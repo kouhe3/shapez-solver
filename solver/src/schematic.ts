@@ -391,21 +391,30 @@ export function schematicSVG(
         }
     }
     out.push(`</g>`);
-    out.push(
-        `<g fill="none" stroke="#d4544f" stroke-width="${r2(Math.max(1.5, t * 0.14))}" stroke-dasharray="${r2(
-            Math.max(4, t * 0.4)
-        )} ${r2(Math.max(3, t * 0.3))}" stroke-linecap="round">`
-    );
-    for (const c of layout.connections) {
-        if (c.routed) continue;
-        const x1 = px(c.x1);
-        const y1 = py(c.y1);
-        const x2 = px(c.x2);
-        const y2 = py(c.y2);
-        const midX = (x1 + x2) / 2;
-        out.push(`<path d="M ${r2(x1)} ${r2(y1)} L ${r2(midX)} ${r2(y1)} L ${r2(midX)} ${r2(y2)} L ${r2(x2)} ${r2(y2)}"/>`);
+    // A link the router could not lay is not a belt. A dashed line there reads
+    // as "lay a belt along this", and building that leaves a stub the game
+    // refuses to accept while the machine feeding it jams on its first item —
+    // so the two ports are marked instead, and nothing pretends to connect them.
+    const brokenLinks = layout.connections.filter((c) => !c.routed);
+    if (brokenLinks.length) {
+        out.push(`<g fill="none" stroke="#d4544f" stroke-width="${r2(Math.max(1.6, t * 0.16))}" stroke-linecap="round">`);
+        for (const c of brokenLinks) {
+            for (const [x, y] of [
+                [c.x1, c.y1],
+                [c.x2, c.y2],
+            ] as const) {
+                const mx = px(x);
+                const my = py(y);
+                const r = t * 0.24;
+                out.push(
+                    `<path d="M ${r2(mx - r)} ${r2(my - r)} L ${r2(mx + r)} ${r2(my + r)} M ${r2(mx + r)} ${r2(
+                        my - r
+                    )} L ${r2(mx - r)} ${r2(my + r)}"/>`
+                );
+            }
+        }
+        out.push(`</g>`);
     }
-    out.push(`</g>`);
     out.push(...tunnelBlocks);
 
     // hub: the game's red 4×4 building with its "中心" badge, above the belts
@@ -430,21 +439,25 @@ export function schematicSVG(
     // Buildings: the exact flat block the game paints in its map view
     // (silhouette colour + the part's own 3×3 cut-out), plus a socket on every
     // input and an arrow tab on every output. The ports are the sheet's own
-    // annotation; the body itself is the game's.
+    // annotation; the body itself is the game's. A turned part is drawn the way
+    // the game turns it: sprite and ports rotate about the placed block's centre.
     for (const b of layout.buildings) {
         const info = BUILDING_INFO[b.kind];
-        const bx = px(b.x);
-        const by = py(b.y);
-        const bw = b.w * t;
-        const bh = b.h * t;
-        out.push(silhouette(b.kind, b.detail, bx, by, bw, bh));
+        // sprite space: the part as the game defines it, centred on the placed block
+        const cx = px(b.x) + (b.w * t) / 2;
+        const cy = py(b.y) + (b.h * t) / 2;
+        const ux = cx - (info.w * t) / 2;
+        const uy = cy - (info.h * t) / 2;
+        const deg = b.rot * 90;
+        if (deg) out.push(`<g transform="rotate(${deg} ${r2(cx)} ${r2(cy)})">`);
+        out.push(silhouette(b.kind, b.detail, ux, uy, info.w * t, info.h * t));
         // ports: in = socket, out = arrow tab pointing away from the body.
         // The trash can takes items on all four sides, so its markers would
         // just be a ring of dots — the belt lines already show where it feeds.
         const showPorts = b.kind !== "trash";
         (showPorts ? info.ins || [] : []).forEach((port, i) => {
-            const x = px(b.x + port.x);
-            const y = py(b.y + port.y);
+            const x = ux + port.x * t;
+            const y = uy + port.y * t;
             const color = port.kind === "color" && b.colors ? b.colors[i - 1] : null;
             const ps = Math.max(2.2, t * 0.22);
             if (color) {
@@ -458,14 +471,15 @@ export function schematicSVG(
             }
         });
         (showPorts ? info.outs || [] : []).forEach((port) => {
-            const x = px(b.x + port.x);
-            const y = py(b.y + port.y);
-            const dx = port.x - b.w / 2;
-            const dy = port.y - b.h / 2;
-            const deg = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 0 : 180) : dy >= 0 ? 90 : -90;
-            const a = (deg * Math.PI) / 180;
-            out.push(arrowHead(x + Math.cos(a) * t * 0.14, y + Math.sin(a) * t * 0.14, t * 0.3, deg));
+            const x = ux + port.x * t;
+            const y = uy + port.y * t;
+            const dx = port.x - info.w / 2;
+            const dy = port.y - info.h / 2;
+            const angle = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 0 : 180) : dy >= 0 ? 90 : -90;
+            const a = (angle * Math.PI) / 180;
+            out.push(arrowHead(x + Math.cos(a) * t * 0.14, y + Math.sin(a) * t * 0.14, t * 0.3, angle));
         });
+        if (deg) out.push(`</g>`);
     }
 
     // legend on its own plate: long belt runs would otherwise cross the text
@@ -500,8 +514,10 @@ export function schematicSVG(
     legend.push(
         `<rect x="${lx + 1}" y="${ly - 10}" width="7" height="7" fill="${TUNNEL_SENDER}"/><rect x="${lx + 9}" y="${ly - 10}" width="7" height="7" fill="${TUNNEL_RECEIVER}"/><text x="${lx + 22}" y="${ly}">隧道：蓝=入口 绿=出口</text>`
     );
-    ly += 12;
-    legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">红色虚线：布线失败（端口被堵住）</text>`);
+    if (brokenLinks.length) {
+        ly += 12;
+        legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">红色 ✕：端口没有合法走线，这条连接不存在</text>`);
+    }
     ly += 12;
     legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">平衡器：2×1（两条带并进一个口）</text>`);
     ly += 12;

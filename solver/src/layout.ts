@@ -35,6 +35,40 @@ export interface Port {
     kind?: "color";
 }
 
+/**
+ * How far a part is turned, in quarter turns clockwise — the game stores the
+ * same thing as `rotation` in degrees (0/90/180/270) on its static map entity
+ * and rotates the part's slots with it (`StaticMapEntityComponent`).
+ */
+export type Rot = 0 | 1 | 2 | 3;
+
+/** footprint of a part after `rot` quarter turns (a 2×1 part becomes 1×2) */
+export function rotatedSize(info: BuildingInfo, rot: Rot): { w: number; h: number } {
+    return rot % 2 === 0 ? { w: info.w, h: info.h } : { w: info.h, h: info.w };
+}
+
+/**
+ * Rotate a tile-space point by `rot` quarter turns clockwise, moving it from
+ * the unrotated footprint's corner into the rotated footprint's corner.
+ *
+ * `Vector.rotateFastMultipleOf90` rotates about the origin and gives negative
+ * coordinates for a 90° turn; the game then shifts the entity's bounds by the
+ * same amount (`getTileSpaceBounds`). Doing the shift here keeps every point
+ * non-negative relative to the placed footprint, which is what a layout wants.
+ */
+function rotatePoint(x: number, y: number, w: number, h: number, rot: Rot): [number, number] {
+    switch (rot) {
+        case 1:
+            return [h - y, x];
+        case 2:
+            return [w - x, h - y];
+        case 3:
+            return [y, w - x];
+        default:
+            return [x, y];
+    }
+}
+
 /** geometry and ports of one game part */
 export interface BuildingInfo {
     w: number;
@@ -115,8 +149,11 @@ export interface Placement {
     zh: string;
     x: number;
     y: number;
+    /** footprint width after `rot` quarter turns */
     w: number;
     h: number;
+    /** quarter turns clockwise; ports and the belt approach turn with it */
+    rot: Rot;
     /** slot/product note shown in the drawing (paint4: "r/-/b/-") */
     detail?: string;
     /** the colour of every colour input port; `null` = that port is unused */
@@ -175,6 +212,12 @@ export interface ConnectionExtra {
     color?: boolean;
     /** this belt vents an unused cutter slot into a trash can */
     waste?: boolean;
+    /**
+     * The item goes straight into the part standing on the ejector's target
+     * tile: the game's ejector hands it to any acceptor there
+     * (`systems/item_ejector.js`), so the link has no belt at all.
+     */
+    direct?: boolean;
 }
 
 /** a link before the router ran: everything but the run itself */
@@ -322,6 +365,12 @@ export interface RouteResult {
     crossings: Tile[];
     /** the underground runs of `cells` */
     spans: TunnelSpan[];
+    /** per cell: 0 = surface belt, 1..4 = underground, 5 = surfaced at the goal */
+    phases: number[];
+    /** per cell: index into the router's direction table */
+    headings: number[];
+    /** the last tile is a belt this run joins; claiming must leave it alone */
+    joinsGoal: boolean;
 }
 
 /** items/s each colour has to produce, and how many sources that takes */
@@ -463,16 +512,39 @@ export function buildingKind(step: P.PlanStep): P.PlanOp {
     return step.op; // base / rotate / cutHalf / cutQuad / stack / paint / paint4
 }
 
+/**
+ * The tile a port sits on, relative to the unrotated footprint's corner. A port
+ * is defined on one edge of the part, so its tile is the one outside that edge.
+ */
+function portCellLocal(info: BuildingInfo, port: Port): Tile {
+    if (port.y === 0) return { x: Math.floor(port.x), y: -1 };
+    if (port.y === info.h) return { x: Math.floor(port.x), y: info.h };
+    if (port.x === 0) return { x: -1, y: Math.floor(port.y) };
+    return { x: info.w, y: Math.floor(port.y) };
+}
+
+/**
+ * Turn a rotation-0 tile offset into the placed footprint's corner. The cell is
+ * rotated as a whole: its centre goes through the same turn as the part, so a
+ * 1×1 tile never lands on a tile boundary (`portCellLocal` only ever yields
+ * integer cells with a half-tile centre).
+ */
+function rotateCell(local: Tile, info: BuildingInfo, rot: Rot): Tile {
+    const [x, y] = rotatePoint(local.x + 0.5, local.y + 0.5, info.w, info.h, rot);
+    return { x: Math.floor(x), y: Math.floor(y) };
+}
+
+/** continuous position of a port on the footprint, relative to its corner */
+export function portCentre(info: BuildingInfo, port: Port, rot: Rot = 0): [number, number] {
+    return rotatePoint(port.x, port.y, info.w, info.h, rot);
+}
+
 /** tiles the building's ports face — where its belts have to go */
-export function portCells(info: BuildingInfo, x: number, y: number): Tile[] {
+export function portCells(info: BuildingInfo, x: number, y: number, rot: Rot = 0): Tile[] {
     const cells: Tile[] = [];
     for (const port of [...(info.ins || []), ...(info.outs || [])]) {
-        const px = x + port.x;
-        const py = y + port.y;
-        if (py === y) cells.push({ x: Math.floor(px), y: y - 1 });
-        else if (py === y + info.h) cells.push({ x: Math.floor(px), y: y + info.h });
-        else if (px === x) cells.push({ x: x - 1, y: Math.floor(py) });
-        else cells.push({ x: x + info.w, y: Math.floor(py) });
+        const c = rotateCell(portCellLocal(info, port), info, rot);
+        cells.push({ x: x + c.x, y: y + c.y });
     }
     return cells;
 }
@@ -482,15 +554,18 @@ export function portCells(info: BuildingInfo, x: number, y: number): Tile[] {
  * Keeping it free is what makes a port connectable at all; a part placed there
  * would wall the port in.
  */
-export function portApproachCells(info: BuildingInfo, x: number, y: number): Tile[] {
+export function portApproachCells(info: BuildingInfo, x: number, y: number, rot: Rot = 0): Tile[] {
     const cells: Tile[] = [];
     for (const port of [...(info.ins || []), ...(info.outs || [])]) {
-        const px = x + port.x;
-        const py = y + port.y;
-        if (py === y) cells.push({ x: Math.floor(px), y: y - 2 });
-        else if (py === y + info.h) cells.push({ x: Math.floor(px), y: y + info.h + 1 });
-        else if (px === x) cells.push({ x: x - 2, y: Math.floor(py) });
-        else cells.push({ x: x + info.w + 1, y: Math.floor(py) });
+        const c = portCellLocal(info, port);
+        // one more tile out, along the same edge
+        const out = { x: c.x, y: c.y };
+        if (c.y === -1) out.y = -2;
+        else if (c.y === info.h) out.y = info.h + 1;
+        else if (c.x === -1) out.x = -2;
+        else out.x = info.w + 1;
+        const r = rotateCell(out, info, rot);
+        cells.push({ x: x + r.x, y: y + r.y });
     }
     return cells;
 }
@@ -781,13 +856,22 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         }
         i = end;
     }
-    if (opts.dryRun) return { cells, crossings, spans };
+    const run: RouteResult = { cells, crossings, spans, phases, headings, joinsGoal: opts.goalMayJoin === true };
+    if (!opts.dryRun) claimRoute(world, run);
+    return run;
+}
 
-    // claim the tunnels: ends become buildings (no belt, but passable
-    // underground); the underground tiles remember their direction so a later
-    // tunnel end above them cannot hijack the link
+/**
+ * Write a searched run into the world: both tunnel ends become buildings (no
+ * belt, but passable underground), the underground tiles remember the direction
+ * running beneath them, and every surface tile gets its belt.
+ *
+ * A plan is committed through here rather than by searching again, so the belt
+ * a caller tested against the map is exactly the belt it gets.
+ */
+export function claimRoute(world: World, run: RouteResult): void {
     const ends = new Set<number>();
-    for (const span of spans) {
+    for (const span of run.spans) {
         const d = ROUTE_DIRS.findIndex((dir) => dir[0] === span.dx && dir[1] === span.dy);
         for (const c of span.cells) {
             const key = cellKey(c.x, c.y);
@@ -801,13 +885,14 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
             ends.add(key);
         }
     }
+    const { cells, phases } = run;
     for (let i = 0; i < cells.length; i++) {
         if (phases[i] !== 0) continue;
         const { x, y } = cells[i]!;
         const key = cellKey(x, y);
         if (ends.has(key)) continue;
-        // the merge case joins the belt already entering the hub; no belt added
-        if (opts.goalMayJoin && i === cells.length - 1) continue;
+        // a merge run joins a belt that already enters the hub; that tile is not ours
+        if (run.joinsGoal && i === cells.length - 1) continue;
         let heading: BeltHeading;
         if (cells.length === 1) heading = "h";
         else if (i === 0) heading = cells[1]!.y === cells[0]!.y ? "h" : "v";
@@ -818,9 +903,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         world.belts.set(key, heading);
         world.occupied.add(key);
     }
-    return { cells, crossings, spans };
 }
-
 
 /** approximate tiles occupied by a patch (the game draws them as overlapping circles) */
 function patchCells(patch: Patch): Tile[] {
@@ -960,6 +1043,8 @@ interface ExtractorSite {
     distance: number;
     x: number;
     y: number;
+    /** every tile the miner took: body, ejector port, approach */
+    cells: number[];
 }
 
 /**
@@ -983,14 +1068,21 @@ function placeExtractor(world: World, predicate: (item: MapItem) => boolean, fro
                     world.approaches.has(cellKey(c.x, c.y))
             );
             if (blocked) continue;
-            world.occupied.add(cellKey(cell.x, cell.y));
-            world.walls.add(cellKey(cell.x, cell.y));
-            for (const c of portCells(BUILDING_INFO.base, cell.x, cell.y)) world.walls.add(cellKey(c.x, c.y));
-            for (const c of portApproachCells(BUILDING_INFO.base, cell.x, cell.y)) {
-                world.approaches.add(cellKey(c.x, c.y));
-                world.occupied.add(cellKey(c.x, c.y));
+            const cells = [cellKey(cell.x, cell.y)];
+            world.occupied.add(cells[0]!);
+            world.walls.add(cells[0]!);
+            for (const c of portCells(BUILDING_INFO.base, cell.x, cell.y)) {
+                const key = cellKey(c.x, c.y);
+                world.walls.add(key);
+                cells.push(key);
             }
-            return { patch, distance, x: cell.x, y: cell.y };
+            for (const c of portApproachCells(BUILDING_INFO.base, cell.x, cell.y)) {
+                const key = cellKey(c.x, c.y);
+                world.approaches.add(key);
+                world.occupied.add(key);
+                cells.push(key);
+            }
+            return { patch, distance, x: cell.x, y: cell.y, cells };
         }
     }
     return null;
@@ -1155,40 +1247,97 @@ export function buildLayout({
         depth.set(step.id, d);
     }
 
-    function fit(info: BuildingInfo, x: number, y: number): boolean {
-        for (let dx = 0; dx < info.w; dx++) {
-            for (let dy = 0; dy < info.h; dy++) if (!processorFree(shared, x + dx, y + dy)) return false;
+    /** tiles one placement took, so a rejected candidate can be undone */
+    interface Claim {
+        cells: number[];
+    }
+
+    /**
+     * What the router may not cross: every machine body, port and belt approach
+     * on this map, earlier factories included. A part is tried in several spots
+     * and turns while it is being placed, so the set follows `shared` instead of
+     * being rebuilt for every search.
+     */
+    const blocked = new Set<number>([...shared.walls, ...shared.approaches]);
+    const allowCross = allowTunnels !== false;
+
+    /** can `info` stand at (x, y) turned `rot`? Reserves nothing. */
+    function fits(info: BuildingInfo, x: number, y: number, rot: Rot): boolean {
+        const size = rotatedSize(info, rot);
+        for (let dx = 0; dx < size.w; dx++) {
+            for (let dy = 0; dy < size.h; dy++) {
+                const key = cellKey(x + dx, y + dy);
+                if (!processorFree(shared, x + dx, y + dy)) return false;
+                // a body over another part's port or approach would wall it in
+                if (shared.walls.has(key) || shared.approaches.has(key)) return false;
+            }
         }
         // a port cannot share a tile with another part's body, port or belt,
         // and the belt beyond it needs a clear tile to run through
-        for (const c of [...portCells(info, x, y), ...portApproachCells(info, x, y)]) {
+        for (const c of [...portCells(info, x, y, rot), ...portApproachCells(info, x, y, rot)]) {
             const key = cellKey(c.x, c.y);
             if (shared.walls.has(key) || shared.belts.has(key) || shared.tunnelEnds.has(key) || shared.approaches.has(key)) return false;
         }
-        for (let dx = 0; dx < info.w; dx++) {
-            for (let dy = 0; dy < info.h; dy++) {
-                shared.occupied.add(cellKey(x + dx, y + dy));
-                shared.walls.add(cellKey(x + dx, y + dy));
+        return true;
+    }
+
+    /**
+     * Reserve every tile `info` needs at (x, y) turned `rot`. The caller keeps
+     * the claim: `release` undoes it when the part cannot be routed there.
+     */
+    function reserve(info: BuildingInfo, x: number, y: number, rot: Rot): Claim {
+        const cells: number[] = [];
+        const size = rotatedSize(info, rot);
+        for (let dx = 0; dx < size.w; dx++) {
+            for (let dy = 0; dy < size.h; dy++) {
+                const key = cellKey(x + dx, y + dy);
+                shared.occupied.add(key);
+                shared.walls.add(key);
+                blocked.add(key);
+                cells.push(key);
             }
         }
-        for (const c of portCells(info, x, y)) shared.walls.add(cellKey(c.x, c.y));
-        for (const c of portApproachCells(info, x, y)) {
-            shared.approaches.add(cellKey(c.x, c.y));
-            shared.occupied.add(cellKey(c.x, c.y));
+        for (const c of portCells(info, x, y, rot)) {
+            const key = cellKey(c.x, c.y);
+            shared.walls.add(key);
+            blocked.add(key);
+            cells.push(key);
         }
-        return true;
+        for (const c of portApproachCells(info, x, y, rot)) {
+            const key = cellKey(c.x, c.y);
+            shared.approaches.add(key);
+            shared.occupied.add(key);
+            blocked.add(key);
+            cells.push(key);
+        }
+        return { cells };
+    }
+
+    /** undo `reserve` — safe only while nothing else touched those tiles */
+    function release(claim: Claim): void {
+        for (const key of claim.cells) {
+            shared.occupied.delete(key);
+            shared.walls.delete(key);
+            shared.approaches.delete(key);
+            blocked.delete(key);
+        }
     }
 
     const buildings: Placement[] = [];
     const sources: LayoutSource[] = [];
     const missing = new Set<string>();
     const connections: Connection[] = [];
+    const routingGaps: RoutingGap[] = [];
     let beltEstimate = 0;
     /** colour chains are per consumer port, so their ids need to stay unique */
     let colorSerial = 0;
 
-    /** first free spot for `info` around an anchor tile, nearest ring first */
-    function placeNear(info: BuildingInfo, anchor: Tile): Tile | null {
+    /**
+     * First free spot for `info` around an anchor tile, nearest ring first.
+     * Only the colour chains use this; a mixer gains nothing from a turn, so
+     * `rot` defaults to the part as the game defines it.
+     */
+    function placeNear(info: BuildingInfo, anchor: Tile, rot: Rot = 0): Tile | null {
         // anchors are often a building centre (half tiles); every part must sit
         // on whole tiles or its ports land between two grid cells
         const ax = Math.floor(anchor.x);
@@ -1197,41 +1346,294 @@ export function buildLayout({
             for (let dy = -r; dy <= r; dy++) {
                 for (let dx = -r; dx <= r; dx++) {
                     if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-                    if (fit(info, ax + dx, ay + dy)) return { x: ax + dx, y: ay + dy };
+                    if (!fits(info, ax + dx, ay + dy, rot)) continue;
+                    reserve(info, ax + dx, ay + dy, rot);
+                    return { x: ax + dx, y: ay + dy };
                 }
             }
         }
         return null;
     }
 
+    /** one link resolved against the map, before anything is claimed */
+    interface LinkPlan {
+        draft: ConnectionDraft;
+        start: Tile;
+        goal: Tile;
+        /** the outside tile this link claims at the hub, when it goes there */
+        hubTile: Tile | null;
+        /** the searched run: `null` when no legal one exists */
+        path: RouteResult | null;
+    }
+
     /**
-     * Links wait for the router: every part is placed first, so the belt a
-     * connection needs can avoid all of them instead of cutting through the
-     * machines that are placed after it.
+     * A dry search. The short box covers any link inside one factory; a wide box
+     * is only worth its cost for the long hub runs, and two of them per failed
+     * candidate is what makes a big campaign crawl.
      */
-    const queued: QueuedLink[] = [];
-    function queueConnection(
-        srcBuilding: Placement,
+    const searchRoute = (
+        start: Tile,
+        goal: Tile,
+        join: boolean,
+        exempt: ReadonlySet<number> | null,
+        startDir: readonly [number, number] | null,
+        goalDir: readonly [number, number] | null,
+        wide: boolean
+    ): RouteResult | null => {
+        // a short link inside one factory only needs a small box: searching ±20
+        // tiles around it costs 7× more and finds the same run
+        const span = Math.abs(goal.x - start.x) + Math.abs(goal.y - start.y);
+        const near = routeBelt(shared, blocked, start, goal, {
+            allowCross,
+            goalMayJoin: join,
+            exempt,
+            startDir,
+            goalDir,
+            margin: Math.max(8, Math.min(20, span)),
+            dryRun: true,
+        });
+        if (near || !wide) return near;
+        return routeBelt(shared, blocked, start, goal, {
+            allowCross,
+            goalMayJoin: join,
+            exempt,
+            startDir,
+            goalDir,
+            margin: 60,
+            dryRun: true,
+        });
+    };
+
+    /**
+     * Resolve a link — the ports turn with their parts, the hub face is picked —
+     * and ask the router whether a legal run exists, without claiming a tile.
+     * A hub run walks down the faces from nearest to farthest: the closest one
+     * is often boxed in by belts of the factories placed before this one.
+     */
+    function planLink(q: QueuedLink): LinkPlan | null {
+        const src = q.srcBuilding;
+        const sInfo = q.srcInfo;
+        const outPort = sInfo.outs[q.outSlot] || sInfo.outs[0];
+        if (!outPort) return null;
+        const [ox, oy] = portCentre(sInfo, outPort, src.rot);
+        const x1 = src.x + ox;
+        const y1 = src.y + oy;
+        const sCells = portCells(sInfo, src.x, src.y, src.rot);
+        const sApproach = portApproachCells(sInfo, src.x, src.y, src.rot);
+        const start = sCells[sInfo.ins.length + q.outSlot];
+        if (!start) return null;
+        const startApproach = sApproach[sInfo.ins.length + q.outSlot] || null;
+
+        // a part standing on the ejector's target tile takes the item directly,
+        // so there is no run to search and nothing to lay
+        if (q.extra.direct && !q.toHub) {
+            const dst = q.dstBuilding;
+            const dInfo = q.dstInfo;
+            const inPort = dInfo.ins[q.inSlot];
+            if (!inPort) return null;
+            const [ix, iy] = portCentre(dInfo, inPort, dst.rot);
+            const x2 = dst.x + ix;
+            const y2 = dst.y + iy;
+            const draft: ConnectionDraft = {
+                from: src.stepId,
+                to: dst.stepId,
+                toHub: false,
+                merged: false,
+                slot: q.inSlot,
+                fromLabel: sInfo.zh,
+                toLabel: dInfo.zh,
+                outSlot: q.outSlot,
+                outCount: sInfo.outs.length,
+                x1,
+                y1,
+                x2,
+                y2,
+                length: Math.abs(x2 - x1) + Math.abs(y2 - y1),
+                ...q.extra,
+            };
+            return {
+                draft,
+                start,
+                goal: start,
+                hubTile: null,
+                path: { cells: [], crossings: [], spans: [], phases: [], headings: [], joinsGoal: false },
+            };
+        }
+
+        /** finish one candidate end: exempt its ports, search, build the draft */
+        const finish = (
+            goal: Tile,
+            x2: number,
+            y2: number,
+            to: string,
+            toLabel: string,
+            slot: number | null,
+            mergeInto: boolean,
+            hubTile: Tile | null,
+            goalApproach: Tile | null
+        ): LinkPlan => {
+            const exempt = new Set<number>();
+            for (const cell of [start, goal, startApproach, goalApproach, hubTile]) {
+                if (cell) exempt.add(cellKey(cell.x, cell.y));
+            }
+            // a sender / receiver on the port tile itself only works when it
+            // faces straight out of / into the machine
+            const startDir = startApproach
+                ? ([Math.sign(startApproach.x - start.x), Math.sign(startApproach.y - start.y)] as const)
+                : null;
+            const goalDir = goalApproach ? ([Math.sign(goal.x - goalApproach.x), Math.sign(goal.y - goalApproach.y)] as const) : null;
+            const path = searchRoute(
+                start,
+                goal,
+                mergeInto,
+                exempt,
+                startDir,
+                goalDir,
+                Math.abs(goal.x - start.x) + Math.abs(goal.y - start.y) > 24
+            );
+            const draft: ConnectionDraft = {
+                from: src.stepId,
+                to,
+                toHub: !!q.toHub,
+                merged: mergeInto,
+                slot,
+                fromLabel: sInfo.zh,
+                toLabel,
+                outSlot: q.outSlot,
+                outCount: sInfo.outs.length,
+                x1,
+                y1,
+                x2,
+                y2,
+                length: Math.abs(x2 - x1) + Math.abs(y2 - y1),
+                ...q.extra,
+            };
+            return { draft, start, goal, hubTile, path };
+        };
+
+        if (q.toHub) {
+            const faces = hubApproaches(hub)
+                .map((t) => ({ ...t, d: Math.abs(t.x - x1) + Math.abs(t.y - y1) }))
+                .sort((a, b) => a.d - b.d || a.y - b.y || a.x - b.x);
+            // a face another factory claimed is taken, and one a belt already runs
+            // over can no longer end a run; merging may join a belt instead.
+            // Only the nearest few faces are worth a search each: on a crowded
+            // hub every extra face costs a full Dijkstra and rarely helps.
+            const candidates: { tile: Tile; join: boolean }[] = [];
+            for (const t of faces) {
+                const key = cellKey(t.x, t.y);
+                if (!shared.hubApproaches.has(key) && !shared.belts.has(key) && candidates.length < 6) {
+                    candidates.push({ tile: t, join: false });
+                }
+            }
+            let merges = 0;
+            for (const t of faces) {
+                const key = cellKey(t.x, t.y);
+                if (shared.hubApproaches.has(key) && shared.belts.has(key) && merges++ < 3) {
+                    candidates.push({ tile: t, join: true });
+                }
+            }
+            if (!candidates.length) for (const t of faces) candidates.push({ tile: t, join: false });
+            let first: LinkPlan | null = null;
+            for (const { tile, join } of candidates) {
+                const border = hubBorderOf(hub, tile);
+                const plan = finish(
+                    { x: tile.x, y: tile.y },
+                    border.x + 0.5,
+                    border.y + 0.5,
+                    "HUB",
+                    "枢纽",
+                    null,
+                    join,
+                    { x: tile.x, y: tile.y },
+                    null
+                );
+                if (plan.path) return plan;
+                if (!first) first = plan;
+            }
+            return first;
+        }
+
+        const dst = q.dstBuilding;
+        const dInfo = q.dstInfo;
+        const inPort = dInfo.ins[q.inSlot];
+        if (!inPort) return null;
+        const [ix, iy] = portCentre(dInfo, inPort, dst.rot);
+        const goal = portCells(dInfo, dst.x, dst.y, dst.rot)[q.inSlot]!;
+        const goalApproach = portApproachCells(dInfo, dst.x, dst.y, dst.rot)[q.inSlot] || null;
+        return finish(goal, dst.x + ix, dst.y + iy, dst.stepId, dInfo.zh, q.inSlot, false, null, goalApproach);
+    }
+
+    /**
+     * Lay a planned run. An unroutable link is reported as a gap instead of
+     * being drawn as if a belt could carry items there — a stub end blocks the
+     * machine that feeds it.
+     */
+    function commitLink(plan: LinkPlan): boolean {
+        if (plan.hubTile) shared.hubApproaches.add(cellKey(plan.hubTile.x, plan.hubTile.y));
+        const path = plan.path;
+        if (!path) {
+            routingGaps.push({
+                from: plan.draft.from,
+                to: plan.draft.to,
+                fromLabel: plan.draft.fromLabel,
+                toLabel: plan.draft.toLabel,
+                start: plan.start,
+                goal: plan.goal,
+            });
+            connections.push({ ...plan.draft, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 });
+            return false;
+        }
+        // the run was searched on this very world a moment ago: write it as tested
+        claimRoute(shared, path);
+        // every path tile is a belt or a tunnel end; the underground tiles are
+        // neither, and the two ends of each tunnel are counted once each
+        const underground = path.spans.reduce((n, span) => n + span.cells.length, 0);
+        const beltTiles = path.cells.length - underground;
+        beltEstimate += beltTiles;
+        connections.push({
+            ...plan.draft,
+            routed: true,
+            path: path.cells,
+            tunnels: path.spans.length,
+            tunnelCells: path.crossings,
+            tunnelSpans: path.spans,
+            beltTiles,
+        });
+        return true;
+    }
+
+    /** a belt between two placed parts; `extra` marks colour / waste runs */
+    function shapeLink(
+        src: Placement,
         srcInfo: BuildingInfo,
         outSlot: number,
-        dstBuilding: Placement,
+        dst: Placement,
         dstInfo: BuildingInfo,
         inSlot: number,
         extra: ConnectionExtra = {}
-    ): void {
-        queued.push({ srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, extra });
+    ): QueuedLink {
+        return { srcBuilding: src, srcInfo, outSlot, dstBuilding: dst, dstInfo, inSlot, extra };
     }
 
-    /** colour feeds have no plan step: one chain head feeds one painter port */
-    function pushColorConnection(
-        srcBuilding: Placement,
-        srcInfo: BuildingInfo,
-        outSlot: number,
-        dstBuilding: Placement,
-        dstInfo: BuildingInfo,
-        inSlot: number
-    ): void {
-        queueConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, { color: true });
+    /** the product of the plan's root, belted into the hub */
+    function hubLinkOf(src: Placement): QueuedLink {
+        return {
+            toHub: true,
+            srcBuilding: src,
+            srcInfo: BUILDING_INFO[src.kind],
+            outSlot: outputSlot(stepById.get(src.step)),
+            dstBuilding: null,
+            dstInfo: null,
+            inSlot: null,
+            extra: {},
+        };
+    }
+
+    /** plan a link and lay it; `false` when no legal run exists */
+    function layLink(q: QueuedLink): boolean {
+        const plan = planLink(q);
+        return plan ? commitLink(plan) : false;
     }
 
     /**
@@ -1265,13 +1667,14 @@ export function buildLayout({
                     y: found.y,
                     w: 1,
                     h: 1,
+                    rot: 0,
                     patch: found.patch,
                     distance: found.distance,
                     color: op.color,
                 };
                 buildings.push(b);
                 sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color: op.color });
-                for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
+                for (const key of found.cells) blocked.add(key);
                 built.push({ color: op.color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 });
                 continue;
             }
@@ -1279,7 +1682,7 @@ export function buildLayout({
             const right = built[op.operands[1]!];
             if (!left || !right) return { color, ok: false };
             const info = BUILDING_INFO.mixer;
-            const pos = placeNear(info, anchor);
+            const pos = placeNear(info, anchor, 0);
             if (!pos) {
                 missing.add(`颜色:${op.color}`);
                 return { color, ok: false };
@@ -1294,13 +1697,13 @@ export function buildLayout({
                 y: pos.y,
                 w: info.w,
                 h: info.h,
+                rot: 0,
                 detail: `${left.color}+${right.color}`,
                 colors: [left.color, right.color],
             };
             buildings.push(b);
-            for (const c of portCells(info, pos.x, pos.y)) shared.occupied.add(cellKey(c.x, c.y));
-            pushColorConnection(left.building, left.info, left.outSlot, b, info, 0);
-            pushColorConnection(right.building, right.info, right.outSlot, b, info, 1);
+            layLink(shapeLink(left.building, left.info, left.outSlot, b, info, 0, { color: true }));
+            layLink(shapeLink(right.building, right.info, right.outSlot, b, info, 1, { color: true }));
             built.push({ color: op.color, ok: true, building: b, info, outSlot: 0 });
         }
         return built.at(-1) || { color, ok: false };
@@ -1338,6 +1741,9 @@ export function buildLayout({
     const blockX = block ? block.x : hub.x + 8;
     const blockY = block ? block.y : hub.y - 8;
 
+    /** placed parts, by plan step id; links resolve their two ends through it */
+    const buildingByStep = new Map<string, Placement>();
+
     // 1) place extractors on real patches
     for (const step of flat.steps) {
         const node = step.node;
@@ -1354,7 +1760,7 @@ export function buildLayout({
             continue;
         }
         sources.push({ step, patch: found.patch, distance: found.distance, x: found.x, y: found.y });
-        buildings.push({
+        const miner: Placement = {
             step: step.id,
             stepId: idPrefix + step.id,
             kind: "base",
@@ -1363,11 +1769,14 @@ export function buildLayout({
             y: found.y,
             w: 1,
             h: 1,
+            rot: 0,
             patch: found.patch,
             distance: found.distance,
-        });
-        // a later factory must not take the tile this miner's belt leaves from
-        for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
+        };
+        buildings.push(miner);
+        buildingByStep.set(step.id, miner);
+        // the extractor reserved straight into the world; the router has to see it
+        for (const key of found.cells) blocked.add(key);
     }
 
     // 2) pack processors into rows, grouped by depth. One free row between two
@@ -1380,94 +1789,141 @@ export function buildLayout({
             for (let y = cy - 1; y <= cy + 2; y++) shared.occupied.add(cellKey(x, y));
         }
     };
+    /** the game turns a part by 90° at a time; 0 is the orientation it ships in */
+    const ROTATIONS: readonly Rot[] = [0, 1, 2, 3];
+    /**
+     * Spots tried per part before it is dropped at the first spot that fits.
+     * Each try is a full route search per input, so this is a search budget:
+     * the first spot almost always routes, and a part that needs a turn finds
+     * one within a row or two.
+     */
+    const MAX_TRIES = 4;
     let reservedY: number | null = null;
+    /** the root's belt into the hub was planned together with its placement */
+    let rootLaid = false;
+
+    /** every link a step's inputs need, against the placement being tried */
+    function inputLinks(step: P.PlanStep, placement: Placement, info: BuildingInfo): QueuedLink[] {
+        const links: QueuedLink[] = [];
+        step.inputs.forEach((input, i) => {
+            const src = buildingByStep.get(input.id);
+            if (!src || !info.ins[i]) return;
+            links.push(shapeLink(src, BUILDING_INFO[src.kind], outputSlot(stepById.get(input.id)), placement, info, i));
+        });
+        return links;
+    }
+
     for (const [d, steps] of [...byDepth.entries()].sort((a, b) => a[0] - b[0])) {
         let cx = blockX;
         let cy = blockY + d * 4;
         for (const step of steps) {
             const info = BUILDING_INFO[step.op];
             if (!info) continue;
-            if (cx + info.w > blockX + packWidth) {
-                cx = blockX;
-                cy += 4;
-            }
-            if (cy !== reservedY) {
-                reserveCorridor(cy);
-                reservedY = cy;
-            }
-            let placed = false;
-            for (let attempt = 0; attempt < 200 && !placed; attempt++) {
-                if (fit(info, cx, cy)) {
-                    placed = true;
-                } else {
-                    cx += info.w + 1;
-                    if (cx + info.w > blockX + packWidth) {
-                        cx = blockX;
-                        cy += 4;
-                        if (cy !== reservedY) {
-                            reserveCorridor(cy);
-                            reservedY = cy;
+            const node = step.node;
+            const detail = node.op === "paint4" ? node.colors.map((c) => c || "-").join("/") : step.detail;
+            const colors =
+                node.op === "paint4"
+                    ? node.colors.map((c) => (c && c !== "u" ? c : null))
+                    : node.op === "paint"
+                    ? [node.color]
+                    : undefined;
+            /** the root also has to reach the hub, so its belt joins the choice */
+            const root = step.id === flat.final.id;
+            const make = (x: number, y: number, rot: Rot): Placement => {
+                const size = rotatedSize(info, rot);
+                return {
+                    step: step.id,
+                    stepId: idPrefix + step.id,
+                    kind: step.op,
+                    zh: info.zh,
+                    x,
+                    y,
+                    w: size.w,
+                    h: size.h,
+                    rot,
+                    detail,
+                    colors,
+                };
+            };
+
+            let chosen: Placement | null = null;
+            let fallback: Placement | null = null;
+            let tries = 0;
+            let scanning = true;
+            for (let guard = 0; scanning && guard < 4096; guard++) {
+                if (cy !== reservedY) {
+                    reserveCorridor(cy);
+                    reservedY = cy;
+                }
+                if (cx + info.w > blockX + packWidth) {
+                    cx = blockX;
+                    cy += 4;
+                    continue;
+                }
+                for (const rot of ROTATIONS) {
+                    if (cx + rotatedSize(info, rot).w > blockX + packWidth) continue;
+                    if (!fits(info, cx, cy, rot)) continue;
+                    if (!fallback) fallback = make(cx, cy, rot);
+                    if (tries >= MAX_TRIES) {
+                        scanning = false;
+                        break;
+                    }
+                    tries += 1;
+                    // stand the part there, then ask the router whether its own
+                    // inputs and — for the root — the hub can all be reached
+                    const placement = make(cx, cy, rot);
+                    const links = inputLinks(step, placement, info);
+                    const toHub = root ? hubLinkOf(placement) : null;
+                    const claim = reserve(info, cx, cy, rot);
+                    const plans = links.map(planLink);
+                    const hubPlan = toHub ? planLink(toHub) : null;
+                    const batch: (LinkPlan | null)[] = toHub ? [...plans, hubPlan] : plans;
+                    // one tile holds one belt: two runs of this part may not share one
+                    const taken = new Set<number>();
+                    let clash = false;
+                    for (const plan of batch) {
+                        if (!plan?.path) continue;
+                        for (const cell of plan.path.cells) {
+                            const key = cellKey(cell.x, cell.y);
+                            if (taken.has(key)) clash = true;
+                            taken.add(key);
                         }
                     }
+                    if (clash || batch.some((plan) => plan === null || plan.path === null)) {
+                        release(claim);
+                        continue;
+                    }
+                    chosen = placement;
+                    scanning = false;
+                    for (const plan of batch) if (plan) commitLink(plan);
+                    if (toHub) rootLaid = true;
+                    break;
                 }
+                if (!scanning) break;
+                cx += info.w + 1;
             }
-            if (!placed) continue;
-            const node = step.node;
-            buildings.push({
-                step: step.id,
-                stepId: idPrefix + step.id,
-                kind: step.op,
-                zh: info.zh,
-                x: cx,
-                y: cy,
-                w: info.w,
-                h: info.h,
-                detail: node.op === "paint4" ? node.colors.map((c) => c || "-").join("/") : step.detail,
-                colors:
-                    node.op === "paint4"
-                        ? node.colors.map((c) => (c && c !== "u" ? c : null))
-                        : node.op === "paint"
-                        ? [node.color]
-                        : undefined,
-            });
-            for (const c of portCells(info, cx, cy)) shared.occupied.add(cellKey(c.x, c.y));
-            cx += info.w + 1;
+
+            let placement = chosen;
+            if (!placement && fallback) {
+                // nothing routed from any spot: keep the first that fits, lay
+                // what still lays, and let the rest surface as reported gaps
+                placement = fallback;
+                reserve(info, placement.x, placement.y, placement.rot);
+                for (const q of inputLinks(step, placement, info)) layLink(q);
+                if (root) rootLaid = layLink(hubLinkOf(placement));
+            }
+            if (!placement) continue;
+            buildings.push(placement);
+            buildingByStep.set(step.id, placement);
+            cx = placement.x + placement.w + 1;
         }
     }
 
-    const buildingByStep = new Map<string, Placement>(buildings.map((b): [string, Placement] => [b.step, b]));
-
-    // 3) queue the shape links; the router lays them after every part is placed
-    for (const step of flat.steps) {
-        const target = buildingByStep.get(step.id);
-        if (!target) continue;
-        const tInfo = BUILDING_INFO[step.op];
-        if (!tInfo) continue;
-        step.inputs.forEach((input, i) => {
-            const src = buildingByStep.get(input.id);
-            if (!src) return;
-            const sInfo = BUILDING_INFO[src.kind];
-            const outSlot = outputSlot(stepById.get(input.id));
-            if (!tInfo.ins[i]) return;
-            queueConnection(src, sInfo, outSlot, target, tInfo, i);
-        });
-    }
-
-    // 3b) the finished product still has to be belted into the hub
-    const rootBuilding = buildingByStep.get(flat.final.id);
-    if (rootBuilding) {
-        const rInfo = BUILDING_INFO[rootBuilding.kind];
-        const outSlot = outputSlot(flat.final);
-        queued.push({
-            srcBuilding: rootBuilding,
-            srcInfo: rInfo,
-            outSlot,
-            dstBuilding: null,
-            dstInfo: null,
-            inSlot: null,
-            extra: {},
-            toHub: true,
-        });
+    // 3b) a bare miner is the whole plan: nothing planned its hub belt next to
+    // a placement, so it is laid here
+    if (!rootLaid) {
+        const rootBuilding = buildingByStep.get(flat.final.id);
+        if (rootBuilding) layLink(hubLinkOf(rootBuilding));
     }
 
     // 3c) colour belts: every painter input is fed by its colour chain
@@ -1486,153 +1942,50 @@ export function buildLayout({
                 missing.add(`颜色:${color}`);
                 return;
             }
-            pushColorConnection(chain.building, chain.info, chain.outSlot, painter, info, i + 1);
+            layLink(shapeLink(chain.building, chain.info, chain.outSlot, painter, info, i + 1, { color: true }));
         });
     }
 
     // 3d) an output port with nowhere to go backs up and stalls the machine, so
-    // every cutter slot the plan does not use gets a trash can. The game unlocks
-    // the can together with the cutter at L1, so this is legal from the start.
+    // every cutter slot the plan does not use gets a trash can. The ejector hands
+    // the item to whatever acceptor stands on the tile in front of it
+    // (`systems/item_ejector.js`), so the can goes exactly there: no belt, and no
+    // way for the last link of a crowded factory to be left unroutable.
     for (const step of flat.steps) {
         const info = BUILDING_INFO[step.op];
         if (!info || !info.outs || info.outs.length < 2) continue;
         const source = buildingByStep.get(step.id);
         if (!source) continue;
         const used = outputSlot(step);
+        const cells = portCells(info, source.x, source.y, source.rot);
+        const approaches = portApproachCells(info, source.x, source.y, source.rot);
         for (let slot = 0; slot < info.outs.length; slot++) {
             if (slot === used) continue;
-            const port = info.outs[slot]!;
-            const pos = placeNear(BUILDING_INFO.trash, {
-                x: Math.floor(source.x + port.x),
-                y: Math.floor(source.y + port.y),
-            });
-            if (!pos) {
-                missing.add("垃圾桶");
-                continue;
-            }
+            const cell = cells[info.ins.length + slot];
+            if (!cell) continue;
             const can: Placement = {
                 step: `trash:${step.id}:${slot}`,
                 stepId: `${idPrefix}trash:${step.id}:${slot}`,
                 kind: "trash",
                 zh: "垃圾桶",
-                x: pos.x,
-                y: pos.y,
+                x: cell.x,
+                y: cell.y,
                 w: 1,
                 h: 1,
+                rot: 0,
             };
             buildings.push(can);
-            for (const cell of portCells(BUILDING_INFO.trash, pos.x, pos.y)) shared.occupied.add(cellKey(cell.x, cell.y));
-            // feed the side of the can that faces the machine
-            const px = source.x + port.x;
-            const py = source.y + port.y;
-            const cx = pos.x + 0.5;
-            const cy = pos.y + 0.5;
-            const inSlot = Math.abs(px - cx) > Math.abs(py - cy) ? (px < cx ? 3 : 1) : py < cy ? 0 : 2;
-            queueConnection(source, info, slot, can, BUILDING_INFO.trash, inSlot, { waste: true });
+            shared.occupied.add(cellKey(cell.x, cell.y));
+            shared.walls.add(cellKey(cell.x, cell.y));
+            blocked.add(cellKey(cell.x, cell.y));
+            // the side of the can the machine ejects into: opposite the port's
+            // outward direction, so it is the side facing the body
+            const approach = approaches[info.ins.length + slot];
+            const outX = approach ? Math.sign(approach.x - cell.x) : 0;
+            const outY = approach ? Math.sign(approach.y - cell.y) : -1;
+            const inSlot = outY === -1 ? 2 : outY === 1 ? 0 : outX === -1 ? 1 : 3;
+            layLink(shapeLink(source, info, slot, can, BUILDING_INFO.trash, inSlot, { waste: true, direct: true }));
         }
-    }
-
-    // 5) route every queued link on the tile grid. Every machine body and port
-    // tile of every factory is off-limits (the world keeps them, so a later
-    // factory cannot cut through an earlier one); a belt may only enter/leave
-    // through the two port tiles of its own link, and crossing an existing
-    // belt needs a tunnel.
-    // a route may not cut through another port's approach corridor either
-    const blocked = new Set<number>([...shared.walls, ...shared.approaches]);
-    const allowCross = allowTunnels !== false;
-    const routingGaps: RoutingGap[] = [];
-    const route = (
-        start: Tile,
-        goal: Tile,
-        join: boolean,
-        exempt: ReadonlySet<number> | null,
-        startDir: readonly [number, number] | null,
-        goalDir: readonly [number, number] | null
-    ): RouteResult | null =>
-        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, startDir, goalDir, margin: 20 }) ||
-        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, startDir, goalDir, margin: 60 });
-
-    for (const q of queued) {
-        const outPort = q.srcInfo.outs[q.outSlot] || q.srcInfo.outs[0];
-        if (!outPort) continue;
-        const x1 = q.srcBuilding.x + outPort.x;
-        const y1 = q.srcBuilding.y + outPort.y;
-        let goal: Tile | undefined;
-        let x2: number;
-        let y2: number;
-        let mergeInto = false;
-        if (q.toHub) {
-            const approaches = hubApproaches(hub)
-                .map((t) => ({ ...t, d: Math.abs(t.x - x1) + Math.abs(t.y - y1) }))
-                .sort((a, b) => a.d - b.d || a.y - b.y || a.x - b.x);
-            const free = approaches.find((t) => !shared.hubApproaches.has(cellKey(t.x, t.y)));
-            const pick = free || approaches[0]!;
-            shared.hubApproaches.add(cellKey(pick.x, pick.y));
-            mergeInto = !free;
-            const border = hubBorderOf(hub, pick);
-            x2 = border.x + 0.5;
-            y2 = border.y + 0.5;
-            goal = { x: pick.x, y: pick.y };
-        } else {
-            const inPort = q.dstInfo.ins[q.inSlot];
-            if (!inPort) continue;
-            x2 = q.dstBuilding.x + inPort.x;
-            y2 = q.dstBuilding.y + inPort.y;
-            goal = portCells(q.dstInfo, q.dstBuilding.x, q.dstBuilding.y)[q.inSlot];
-        }
-        const start = portCells(q.srcInfo, q.srcBuilding.x, q.srcBuilding.y)[q.srcInfo.ins.length + q.outSlot];
-        const startApproach = portApproachCells(q.srcInfo, q.srcBuilding.x, q.srcBuilding.y)[q.srcInfo.ins.length + q.outSlot];
-        const goalApproach = q.toHub ? null : portApproachCells(q.dstInfo, q.dstBuilding.x, q.dstBuilding.y)[q.inSlot];
-        const exempt = new Set<number>();
-        for (const cell of [start, goal, startApproach, goalApproach]) if (cell) exempt.add(cellKey(cell.x, cell.y));
-        // a sender / receiver on the port tile itself only works when it faces
-        // straight out of / into the machine
-        const startDir = start && startApproach ? ([Math.sign(startApproach.x - start.x), Math.sign(startApproach.y - start.y)] as const) : null;
-        const goalDir = goal && goalApproach ? ([Math.sign(goal.x - goalApproach.x), Math.sign(goal.y - goalApproach.y)] as const) : null;
-        const path = start && goal ? route(start, goal, mergeInto, exempt, startDir, goalDir) : null;
-        const connection: ConnectionDraft = {
-            from: q.srcBuilding.stepId,
-            to: q.toHub ? "HUB" : q.dstBuilding.stepId,
-            toHub: !!q.toHub,
-            merged: mergeInto,
-            slot: q.toHub ? null : q.inSlot,
-            fromLabel: q.srcInfo.zh,
-            toLabel: q.toHub ? "枢纽" : q.dstInfo.zh,
-            outSlot: q.outSlot,
-            outCount: q.srcInfo.outs.length,
-            x1,
-            y1,
-            x2,
-            y2,
-            length: Math.abs(x2 - x1) + Math.abs(y2 - y1),
-            ...q.extra,
-        };
-        if (!path) {
-            routingGaps.push({
-                from: connection.from,
-                to: connection.to,
-                fromLabel: connection.fromLabel,
-                toLabel: connection.toLabel,
-                start,
-                goal,
-            });
-            connections.push({ ...connection, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 });
-            continue;
-        }
-        // every path tile is a belt or a tunnel end; the underground tiles are
-        // neither, and the two ends of each tunnel are counted once each
-        const underground = path.spans.reduce((n, span) => n + span.cells.length, 0);
-        const beltTiles = path.cells.length - underground;
-        beltEstimate += beltTiles;
-        connections.push({
-            ...connection,
-            routed: true,
-            path: path.cells,
-            tunnels: path.spans.length,
-            tunnelCells: path.crossings,
-            tunnelSpans: path.spans,
-            beltTiles,
-        });
     }
 
     // 4) colors: which ones are on the map, which need mixing

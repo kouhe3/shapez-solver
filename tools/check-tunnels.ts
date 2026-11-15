@@ -172,8 +172,8 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
             const src = buildingByStep.get(c.from);
             if (si === 0 && src) {
                 const info = BUILDING_INFO[src.kind];
-                const start = portCells(info, src.x, src.y)[info.ins.length + c.outSlot];
-                const approach = portApproachCells(info, src.x, src.y)[info.ins.length + c.outSlot];
+                const start = portCells(info, src.x, src.y, src.rot)[info.ins.length + c.outSlot];
+                const approach = portApproachCells(info, src.x, src.y, src.rot)[info.ins.length + c.outSlot];
                 if (start && approach) {
                     const dir = axisDir(start, approach);
                     if (dir[0] !== dx || dir[1] !== dy) report.portDirection++;
@@ -182,8 +182,8 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
             const dst = c.to === "HUB" ? undefined : buildingByStep.get(c.to);
             if (ri === path.length - 1 && dst && c.slot !== null) {
                 const info = BUILDING_INFO[dst.kind];
-                const goal = portCells(info, dst.x, dst.y)[c.slot];
-                const approach = portApproachCells(info, dst.x, dst.y)[c.slot];
+                const goal = portCells(info, dst.x, dst.y, dst.rot)[c.slot];
+                const approach = portApproachCells(info, dst.x, dst.y, dst.rot)[c.slot];
                 if (goal && approach) {
                     const dir = axisDir(approach, goal);
                     if (dir[0] !== dx || dir[1] !== dy) report.portDirection++;

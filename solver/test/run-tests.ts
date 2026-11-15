@@ -14,8 +14,20 @@ import { generateChunk, scanMap, scanForTypes, availableResources, patchMinerCap
 import type { Patch } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
-import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree, planBom, createWorld, routeBelt, cellKey } from "../src/layout.js";
-import type { Connection, Tile, World } from "../src/layout.js";
+import {
+    buildLayout,
+    BUILDING_INFO,
+    sizeColorSupply,
+    expandPlanTree,
+    planBom,
+    createWorld,
+    routeBelt,
+    cellKey,
+    portCells,
+    portApproachCells,
+    rotatedSize,
+} from "../src/layout.js";
+import type { BuildingKind, Connection, Tile, World } from "../src/layout.js";
 import { schematicSVG } from "../src/schematic.js";
 import type { SchematicLayout } from "../src/schematic.js";
 import { colorChain, colorChains } from "../src/color.js";
@@ -259,6 +271,68 @@ beginSection("blueprint: connections use the right output slot");
     });
     const painter = paint4.buildings.find((b) => b.kind === "paint4")!;
     check("paint4 colors for port labels", painter.colors, ["r", null, "b", null]);
+}
+
+beginSection("layout: a turned part keeps its ports on the game's own edges");
+{
+    // `Vector.rotateFastMultipleOf90(90)` maps (x, y) to (-y, x) and every slot
+    // direction turns with it, so a clockwise cutter puts its south input on the
+    // west edge and both north outputs on the east edge — slot 0 topmost.
+    const cutter = { x: 10, y: 10 };
+    check("turned cutter: footprint is 1×2", rotatedSize(BUILDING_INFO.cutHalf, 1), { w: 1, h: 2 });
+    check("turned cutter: input faces west", portCells(BUILDING_INFO.cutHalf, cutter.x, cutter.y, 1)[0], { x: 9, y: 10 });
+    check(
+        "turned cutter: outputs face east, slot 0 upper",
+        portCells(BUILDING_INFO.cutHalf, cutter.x, cutter.y, 1).slice(1),
+        [
+            { x: 11, y: 10 },
+            { x: 11, y: 11 },
+        ]
+    );
+    check(
+        "turned cutter: each approach is one more tile out",
+        portApproachCells(BUILDING_INFO.cutHalf, cutter.x, cutter.y, 1),
+        [
+            { x: 8, y: 10 },
+            { x: 12, y: 10 },
+            { x: 12, y: 11 },
+        ]
+    );
+    check(
+        "half-turn cutter: input moves to the far end and faces north",
+        portCells(BUILDING_INFO.cutHalf, cutter.x, cutter.y, 2),
+        [
+            { x: 11, y: 9 },
+            { x: 11, y: 11 },
+            { x: 10, y: 11 },
+        ]
+    );
+
+    // every port of every part, at every turn, has to sit outside the body and
+    // touch it on exactly one edge — otherwise the belt it draws is unreachable
+    const offenders: string[] = [];
+    for (const kind of Object.keys(BUILDING_INFO) as BuildingKind[]) {
+        const info = BUILDING_INFO[kind];
+        for (const rot of [0, 1, 2, 3] as const) {
+            const size = rotatedSize(info, rot);
+            const body = new Set<string>();
+            for (let dx = 0; dx < size.w; dx++) {
+                for (let dy = 0; dy < size.h; dy++) body.add(`${dx}|${dy}`);
+            }
+            for (const c of portCells(info, 0, 0, rot)) {
+                const touches =
+                    body.has(`${c.x - 1}|${c.y}`) ||
+                    body.has(`${c.x + 1}|${c.y}`) ||
+                    body.has(`${c.x}|${c.y - 1}`) ||
+                    body.has(`${c.x}|${c.y + 1}`);
+                if (body.has(`${c.x}|${c.y}`) || !touches) offenders.push(`${kind}@${rot}:( ${c.x},${c.y})`);
+            }
+            for (const c of portApproachCells(info, 0, 0, rot)) {
+                if (body.has(`${c.x}|${c.y}`)) offenders.push(`${kind}@${rot} approach (${c.x},${c.y})`);
+            }
+        }
+    }
+    check("every port of every turn sits on the body's edge", offenders, []);
 }
 
 beginSection("blueprint: the finished product is belted into the hub");

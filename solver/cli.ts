@@ -418,7 +418,7 @@ function cmdAll(): void {
         );
         if (res.totals.routingGaps) {
             console.log(
-                `⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住，图纸上用红色虚线标出（${res.layout.routingGaps
+                `⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住，图纸上用红色 ✕ 标出（${res.layout.routingGaps
                     .map((g) => `${g.fromLabel}→${g.toLabel}`)
                     .join("、")}）`
             );
