@@ -115,6 +115,7 @@ export function generateChunk(seed, chunkX, chunkY) {
         let sumX = 0;
         let sumY = 0;
         let patchesDrawn = 0;
+        const cells = [];
         const numCircles = patchSize;
 
         for (let i = 0; i <= numCircles; ++i) {
@@ -138,6 +139,7 @@ export function generateChunk(seed, chunkX, chunkY) {
                         if (originalDx * originalDx + originalDy * originalDy <= circleRadiusSquare) {
                             if (!lower[x][y]) {
                                 lower[x][y] = item;
+                                cells.push([x + chunkX * MAP_CHUNK_SIZE, y + chunkY * MAP_CHUNK_SIZE]);
                                 ++patchesDrawn;
                                 sumX += x;
                                 sumY += y;
@@ -158,6 +160,7 @@ export function generateChunk(seed, chunkX, chunkY) {
             item,
             size: patchSize,
             tiles: patchesDrawn,
+            cells,
         });
     }
 
@@ -270,6 +273,47 @@ export function scanMap(seed, { chunkRadius = 5, originChunkX = 0, originChunkY 
         }
     }
     return patches;
+}
+
+/** shape letters present in the deposits of a patch list */
+export function depositTypes(patches) {
+    const types = new Set();
+    for (const p of patches) {
+        if (p.item.kind !== "shape") continue;
+        for (let i = 0; i < p.item.code.length; i += 2) types.add(p.item.code[i]);
+    }
+    return types;
+}
+
+/**
+ * Scan outwards until every required shape letter has a deposit.
+ *
+ * The generator only starts to place `S` and `W` deposits some chunks away from
+ * the hub (`weights.S/W = 0` below distance 7) and puts at most one windmill
+ * quadrant into a patch, so a fixed radius misses them on some seeds. Doubling
+ * the radius keeps the common case cheap and still finds them on every seed we
+ * have seen; the caller gets the radius that worked and what is still missing.
+ *
+ * @param {number} seed map seed
+ * @param {object} opts
+ * @param {Iterable<string>} opts.types shape letters the plan needs (C R S W)
+ * @param {number} [opts.startRadius] chunks to scan first
+ * @param {number} [opts.maxRadius] hard cap on the expansion
+ * @returns {{patches: Array, radius: number, missingTypes: Array<string>}}
+ */
+export function scanForTypes(seed, { types, startRadius = 8, maxRadius = 32 } = {}) {
+    const wanted = [...new Set(types || [])];
+    let radius = Math.max(1, startRadius);
+    let patches = scanMap(seed, { chunkRadius: radius });
+    let have = depositTypes(patches);
+    let missing = wanted.filter((t) => !have.has(t));
+    while (missing.length && radius < maxRadius) {
+        radius = Math.min(maxRadius, radius * 2);
+        patches = scanMap(seed, { chunkRadius: radius });
+        have = depositTypes(patches);
+        missing = wanted.filter((t) => !have.has(t));
+    }
+    return { patches, radius, missingTypes: missing };
 }
 
 export function itemLabel(item) {

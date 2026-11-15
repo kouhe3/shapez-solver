@@ -82,11 +82,35 @@ export const BUILDING_INFO = {
         ],
         outs: [{ x: 0.5, y: 0 }],
     },
+    mixer: {
+        w: 2,
+        h: 1,
+        zh: "混色器",
+        ins: [
+            { x: 0.5, y: 1, kind: "color" },
+            { x: 1.5, y: 1, kind: "color" },
+        ],
+        outs: [{ x: 0.5, y: 0 }],
+    },
 };
 
 /** how a plan node maps to a game building */
 export function buildingKind(step) {
     return step.op; // base / rotate / cutHalf / cutQuad / stack / paint / paint4
+}
+
+/** tiles the building's ports face — where its belts have to go */
+export function portCells(info, x, y) {
+    const cells = [];
+    for (const port of [...(info.ins || []), ...(info.outs || [])]) {
+        const px = x + port.x;
+        const py = y + port.y;
+        if (py === y) cells.push({ x: Math.floor(px), y: y - 1 });
+        else if (py === y + info.h) cells.push({ x: Math.floor(px), y: y + info.h });
+        else if (px === x) cells.push({ x: x - 1, y: Math.floor(py) });
+        else cells.push({ x: x + info.w, y: Math.floor(py) });
+    }
+    return cells;
 }
 
 /**
@@ -115,6 +139,15 @@ function patchCells(patch) {
 }
 
 const COLOR_NEEDS = { y: ["r", "g"], p: ["r", "b"], c: ["g", "b"], w: ["r", "g", "b"] };
+
+// The game mixes colors by OR-ing their red/green/blue bits (colors.js:
+// enumColorMixingResults is built from the same bitfield table).
+const COLOR_BITS = { u: 0, r: 1, g: 2, y: 3, b: 4, p: 5, c: 6, w: 7 };
+const BITS_COLOR = ["u", "r", "g", "y", "b", "p", "c", "w"];
+
+function mixColor(a, b) {
+    return BITS_COLOR[(COLOR_BITS[a] || 0) | (COLOR_BITS[b] || 0)] || "u";
+}
 
 /** the hub occupies a 4×4 tile block; belts may enter it on any side */
 const HUB_SIZE = 4;
@@ -166,7 +199,7 @@ export function createWorld({ hub, patches }) {
     for (let dx = 0; dx < HUB_SIZE; dx++) {
         for (let dy = 0; dy < HUB_SIZE; dy++) occupied.add(cellKey(hub.x + dx, hub.y + dy));
     }
-    return { hub, patches, occupied, deposits, blocks: [] };
+    return { hub, patches, occupied, deposits, blocks: [], colorChains: new Map(), colorCursor: null };
 }
 
 /** a processor may only sit on bare ground */
@@ -281,14 +314,147 @@ export function buildLayout({
         return true;
     }
 
+    const buildings = [];
+    const sources = [];
+    const missing = new Set();
+    const connections = [];
+    let beltEstimate = 0;
+
+    /** first free spot for `info` around an anchor tile, nearest ring first */
+    function placeNear(info, anchor) {
+        for (let r = 0; r < 48; r++) {
+            for (let dy = -r; dy <= r; dy++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+                    if (fit(info, anchor.x + dx, anchor.y + dy)) return { x: anchor.x + dx, y: anchor.y + dy };
+                }
+            }
+        }
+        return null;
+    }
+
+    /** colour feeds have no plan step; the same chain feeds every painter */
+    function pushColorConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot) {
+        const outPort = srcInfo.outs[outSlot] || srcInfo.outs[0];
+        const inPort = dstInfo.ins[inSlot];
+        if (!outPort || !inPort) return;
+        const x1 = srcBuilding.x + outPort.x;
+        const y1 = srcBuilding.y + outPort.y;
+        const x2 = dstBuilding.x + inPort.x;
+        const y2 = dstBuilding.y + inPort.y;
+        const len = Math.abs(x2 - x1) + Math.abs(y2 - y1);
+        const beltTiles = Math.max(1, Math.round(len));
+        beltEstimate += beltTiles;
+        connections.push({
+            from: srcBuilding.stepId,
+            to: dstBuilding.stepId,
+            slot: inSlot,
+            fromLabel: srcInfo.zh,
+            toLabel: dstInfo.zh,
+            outSlot,
+            outCount: srcInfo.outs.length,
+            x1,
+            y1,
+            x2,
+            y2,
+            length: len,
+            beltTiles,
+            color: true,
+        });
+    }
+
+    /**
+     * Colour supply for one colour: a miner on a deposit of a base colour, or a
+     * chain of mixers. The game ORs colour bits (r+g=y, r+b=p, g+b=c, +b=w), so
+     * w learns two mixers. Built once per map: every painter shares the chain.
+     */
+    function ensureColor(color) {
+        if (!color || color === "u") return null;
+        if (shared.colorChains.has(color)) return shared.colorChains.get(color);
+        const parts = COLOR_NEEDS[color];
+        let chain;
+        if (!parts) {
+            const found = placeExtractor(shared, (item) => item.kind === "color" && item.color === color, {
+                x: hub.x + 2,
+                y: hub.y + 2,
+            });
+            if (!found) {
+                missing.add(`颜色:${color}`);
+                chain = { color, ok: false };
+            } else {
+                const b = {
+                    step: `color:${color}:miner`,
+                    stepId: `${idPrefix}color:${color}:miner`,
+                    kind: "base",
+                    zh: "采矿机",
+                    x: found.x,
+                    y: found.y,
+                    w: 1,
+                    h: 1,
+                    patch: found.patch,
+                    distance: found.distance,
+                    color,
+                };
+                buildings.push(b);
+                sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color });
+                for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
+                chain = { color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 };
+            }
+        } else {
+            let acc = ensureColor(parts[0]);
+            for (let i = 1; i < parts.length; i++) {
+                const rhs = ensureColor(parts[i]);
+                if (!acc || !rhs || !acc.ok || !rhs.ok) {
+                    acc = null;
+                    break;
+                }
+                const info = BUILDING_INFO.mixer;
+                const anchor = shared.colorCursor || { x: hub.x - 8, y: hub.y + HUB_SIZE + 2 };
+                const pos = placeNear(info, anchor);
+                if (!pos) {
+                    acc = null;
+                    break;
+                }
+                const mixed = mixColor(acc.color, rhs.color);
+                const b = {
+                    step: `color:${mixed}:mixer`,
+                    stepId: `${idPrefix}color:${mixed}:mixer`,
+                    kind: "mixer",
+                    zh: info.zh,
+                    x: pos.x,
+                    y: pos.y,
+                    w: info.w,
+                    h: info.h,
+                    detail: `${acc.color}+${rhs.color}`,
+                    colors: [acc.color, rhs.color],
+                };
+                buildings.push(b);
+                for (const c of portCells(info, pos.x, pos.y)) shared.occupied.add(cellKey(c.x, c.y));
+                pushColorConnection(acc.building, acc.info, acc.outSlot, b, info, 0);
+                pushColorConnection(rhs.building, rhs.info, rhs.outSlot, b, info, 1);
+                shared.colorCursor = { x: pos.x + info.w + 1, y: pos.y };
+                acc = { color: mixed, ok: true, building: b, info, outSlot: 0 };
+                shared.colorChains.set(mixed, acc);
+            }
+            chain = acc || { color, ok: false };
+            if (!chain.ok) missing.add(`颜色:${color}`);
+        }
+        shared.colorChains.set(color, chain);
+        return chain;
+    }
+
+    // colour supply goes down before the factories so its mixers sit near the hub
+    const paintColorsUsed = new Set();
+    for (const step of flat.steps) {
+        if (step.op === "paint") paintColorsUsed.add(step.node.color);
+        else if (step.op === "paint4") for (const c of step.node.colors) if (c && c !== "u") paintColorsUsed.add(c);
+    }
+    for (const color of paintColorsUsed) ensureColor(color);
+
     const hasProcessors = flat.steps.some((s) => s.op !== "base");
     const block = hasProcessors ? allocateBlock(shared, blockWidth, blockHeight) : null;
     const blockX = block ? block.x : hub.x + 8;
     const blockY = block ? block.y : hub.y - 8;
-
-    const buildings = [];
-    const sources = [];
-    const missing = new Set();
 
     // 1) place extractors on real patches
     for (const step of flat.steps) {
@@ -317,6 +483,8 @@ export function buildLayout({
             patch: found.patch,
             distance: found.distance,
         });
+        // a later factory must not take the tile this miner's belt leaves from
+        for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
     }
 
     // 2) pack processors into rows, grouped by depth
@@ -367,6 +535,7 @@ export function buildLayout({
                         ? [step.node.color]
                         : undefined,
             });
+            for (const c of portCells(info, cx, cy)) shared.occupied.add(cellKey(c.x, c.y));
             cx += info.w + 1;
         }
     }
@@ -374,8 +543,6 @@ export function buildLayout({
     const buildingByStep = new Map(buildings.map((b) => [b.step, b]));
 
     // 3) connections + belt lengths
-    const connections = [];
-    let beltEstimate = 0;
     for (const step of flat.steps) {
         const target = buildingByStep.get(step.id);
         if (!target) continue;
@@ -444,6 +611,24 @@ export function buildLayout({
         });
     }
 
+    // 3c) colour belts: every painter input is fed by its colour chain
+    for (const step of flat.steps) {
+        if (step.op !== "paint" && step.op !== "paint4") continue;
+        const painter = buildingByStep.get(step.id);
+        if (!painter) continue;
+        const info = BUILDING_INFO[step.op];
+        const colors = step.op === "paint4" ? step.node.colors : [step.node.color];
+        colors.forEach((color, i) => {
+            if (!color || color === "u") return;
+            const chain = ensureColor(color);
+            if (!chain || !chain.ok) {
+                missing.add(`颜色:${color}`);
+                return;
+            }
+            pushColorConnection(chain.building, chain.info, chain.outSlot, painter, info, i + 1);
+        });
+    }
+
     // 4) colors: which ones are on the map, which need mixing
     const colorPatches = new Map();
     for (const p of patches) {
@@ -453,11 +638,7 @@ export function buildLayout({
             colorPatches.set(p.item.color, p);
         }
     }
-    const paintColors = new Set();
-    for (const step of flat.steps) {
-        if (step.op === "paint") paintColors.add(step.node.color);
-    }
-    const colors = [...paintColors].map((c) => {
+    const colors = [...paintColorsUsed].map((c) => {
         const direct = colorPatches.get(c);
         if (direct) return { color: c, direct: true, patch: direct, mix: null };
         const mix = COLOR_NEEDS[c];
