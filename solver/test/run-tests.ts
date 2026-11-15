@@ -13,7 +13,7 @@ import type { Patch } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree, planBom, createWorld, routeBelt } from "../src/layout.js";
-import type { Connection, Tile } from "../src/layout.js";
+import type { Connection, Tile, World } from "../src/layout.js";
 import { schematicSVG } from "../src/schematic.js";
 import type { SchematicLayout } from "../src/schematic.js";
 import { colorChain, colorChains } from "../src/color.js";
@@ -329,6 +329,114 @@ console.log("== router: walls, tunnels, dead ends ==");
         "router: before L6 it goes around",
         !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
     );
+}
+
+console.log("== router: tunnel legality (span limit, straight ends, own tile) ==");
+{
+    /** a one-row corridor with walls on every other tile, so only y = 0 is usable */
+    const sealedCorridor = (world: World, fromX: number, toX: number): void => {
+        for (let x = fromX; x <= toX; x++) {
+            for (let y = -6; y <= 6; y++) if (y !== 0) world.walls.add(x + "|" + y);
+        }
+        world.walls.add(fromX - 1 + "|0");
+        world.walls.add(toX + 1 + "|0");
+    };
+    // four consecutive belts: one tunnel may stay under at most 4 tiles
+    const four = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let x = 0; x <= 3; x++) four.belts.set(x + "|0", "v");
+    sealedCorridor(four, -2, 5);
+    const deep = routeBelt(four, four.walls, { x: -2, y: 0 }, { x: 5, y: 0 }, { allowCross: true, dryRun: true });
+    check("tunnel: four underground tiles are one span", deep && deep.spans.length, 1);
+    check("tunnel: span tiles", deep && deep.spans[0]!.cells, [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 2, y: 0 },
+        { x: 3, y: 0 },
+    ]);
+    check("tunnel: ends sit right before and after the run", deep && [deep.spans[0]!.sender, deep.spans[0]!.receiver], [
+        { x: -1, y: 0 },
+        { x: 4, y: 0 },
+    ]);
+    check("tunnel: flow direction", deep && [deep.spans[0]!.dx, deep.spans[0]!.dy], [1, 0]);
+
+    // five consecutive belts cannot be spanned by one tunnel and cannot be
+    // split (there is no free tile between them), so the link is unroutable
+    const five = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let x = 0; x <= 4; x++) five.belts.set(x + "|0", "v");
+    sealedCorridor(five, -2, 6);
+    const tooDeep = routeBelt(five, five.walls, { x: -2, y: 0 }, { x: 6, y: 0 }, { allowCross: true, dryRun: true });
+    check("tunnel: five underground tiles are impossible", tooDeep, null);
+
+    // the sender has to sit on a straight run: an L-shaped corridor that turns
+    // into the crossing cannot be built
+    const bent = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    const corridor: Record<string, true> = { "-1|0": true, "0|0": true, "0|-1": true, "0|-2": true };
+    for (let x = -5; x <= 5; x++) {
+        for (let y = -6; y <= 4; y++) if (!corridor[x + "|" + y]) bent.walls.add(x + "|" + y);
+    }
+    bent.belts.set("0|-1", "h");
+    const turnIn = routeBelt(bent, bent.walls, { x: -1, y: 0 }, { x: 0, y: -2 }, { allowCross: true, dryRun: true });
+    check("tunnel: a sender on a turn is rejected", turnIn, null);
+
+    // two crossings two tiles apart with a bend between them would need the
+    // same tile for one receiver and the next sender
+    const gapTwo = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    const gapCells: Record<string, true> = { "-1|0": true, "0|0": true, "1|0": true, "1|-1": true, "1|-2": true };
+    for (let x = -5; x <= 5; x++) {
+        for (let y = -6; y <= 4; y++) if (!gapCells[x + "|" + y]) gapTwo.walls.add(x + "|" + y);
+    }
+    gapTwo.belts.set("0|0", "v");
+    gapTwo.belts.set("1|-1", "h");
+    const bentGap = routeBelt(gapTwo, gapTwo.walls, { x: -1, y: 0 }, { x: 1, y: -2 }, { allowCross: true, dryRun: true });
+    check("tunnel: two crossings two apart with a bend are rejected", bentGap, null);
+
+    // a tunnel end is a building on its tile: no belt there, but a belt of a
+    // different direction may pass underneath
+    const endWorld = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    endWorld.tunnelEnds.set("0|0", 0);
+    const acrossEnd = routeBelt(endWorld, endWorld.walls, { x: 0, y: -2 }, { x: 0, y: 2 }, { allowCross: true, dryRun: true });
+    checkTrue("tunnel end: a perpendicular belt may pass underneath", !!acrossEnd);
+    check("tunnel end: the pass is one underground tile", acrossEnd && acrossEnd.spans[0] && acrossEnd.spans[0].cells, [
+        { x: 0, y: 0 },
+    ]);
+    const alongEnd = routeBelt(endWorld, endWorld.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
+    checkTrue(
+        "tunnel end: a same-direction belt goes around",
+        !!alongEnd && alongEnd.spans.every((span) => !span.cells.some((c) => c.x === 0 && c.y === 0))
+    );
+    const noTunnel = routeBelt(endWorld, endWorld.walls, { x: 0, y: -2 }, { x: 0, y: 2 }, { allowCross: false, dryRun: true });
+    checkTrue(
+        "tunnel end: before L6 the tile is closed",
+        !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
+    );
+
+    // claiming: ends become buildings (no belt), the underground tile remembers
+    // the tunnel's direction
+    const claim = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let y = -1; y <= 1; y++) claim.belts.set("0|" + y, "v");
+    const claimed = routeBelt(claim, claim.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true });
+    checkTrue("tunnel: claimed", !!claimed);
+    check(
+        "tunnel: ends are buildings, not belts",
+        [claim.belts.has("-1|0"), claim.belts.has("1|0"), claim.tunnelEnds.has("-1|0"), claim.tunnelEnds.has("1|0")],
+        [false, false, true, true]
+    );
+    check("tunnel: end direction", [claim.tunnelEnds.get("-1|0"), claim.tunnelEnds.get("1|0")], [0, 0]);
+    check("tunnel: underground tile records the direction", claim.tunnelUnder.get("0|0"), 1);
+    check("tunnel: ends are reserved", [claim.occupied.has("-1|0"), claim.occupied.has("1|0")], [true, true]);
+
+    // a run longer than the limit is split; the receiver of one tunnel may feed
+    // the sender of the next directly (they only have to be different tiles)
+    const chain = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let x = 0; x <= 3; x++) chain.belts.set(x + "|0", "v");
+    chain.belts.set("6|0", "v");
+    sealedCorridor(chain, -2, 8);
+    const chained = routeBelt(chain, chain.walls, { x: -2, y: 0 }, { x: 8, y: 0 }, { allowCross: true, dryRun: true });
+    check("tunnel: seven underground tiles split into two runs", chained && chained.spans.length, 2);
+    check("tunnel: a receiver may feed the next sender", chained && [chained.spans[0]!.receiver, chained.spans[1]!.sender], [
+        { x: 4, y: 0 },
+        { x: 5, y: 0 },
+    ]);
 }
 
 console.log("== needs: every shape the game asks for ==");
@@ -652,6 +760,7 @@ console.log("== schematic (game chunk-overview representation) ==");
         path,
         tunnels: 1,
         tunnelCells: [{ x: 7, y: 2 }],
+        tunnelSpans: [{ sender: { x: 6, y: 2 }, receiver: { x: 8, y: 2 }, cells: [{ x: 7, y: 2 }], dx: 1, dy: 0 }],
         beltTiles: 7,
     };
     const layout: SchematicLayout = {
@@ -669,9 +778,9 @@ console.log("== schematic (game chunk-overview representation) ==");
     check("old white tunnel notch is gone", svg.includes("#f8f9ff"), false);
     checkTrue("sender precedes receiver in path order", svg.indexOf('fill="#6d9dff"') < svg.indexOf('fill="#71ff9c"'));
 
-    // one tunnel may run under several belts: two crossings two tiles apart are
-    // a single span, so the drawing gets one sender and one receiver instead of
-    // an overlapping pair on the tile between them
+    // one tunnel may run under several belts: the router already merged these
+    // crossings into one straight span, so the drawing gets one sender and one
+    // receiver instead of an overlapping pair on the tile between them
     const under: Tile[] = [
         { x: 2, y: 5 },
         { x: 3, y: 5 },
@@ -694,6 +803,19 @@ console.log("== schematic (game chunk-overview representation) ==");
                 tunnelCells: [
                     { x: 3, y: 5 },
                     { x: 5, y: 5 },
+                ],
+                tunnelSpans: [
+                    {
+                        sender: { x: 2, y: 5 },
+                        receiver: { x: 6, y: 5 },
+                        cells: [
+                            { x: 3, y: 5 },
+                            { x: 4, y: 5 },
+                            { x: 5, y: 5 },
+                        ],
+                        dx: 1,
+                        dy: 0,
+                    },
                 ],
                 beltTiles: 7,
             },

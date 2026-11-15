@@ -21,13 +21,15 @@
 | F13 | 游戏缩略图按每格 3×3 像素绘制：每个设施是 3×3 色块（采矿机 `[1,1,1,1,0,1,1,1,1]`、垃圾桶 `[1,1,0,1,1,1,0,1,1]`），传送带 1 格宽、隧道 sender/receiver 各带 3×3 矩阵；自动图纸尺寸取 3 的倍数，使 1/3 格落在整像素上 | L2/L4 | `ref/buildings/miner.js:12`、`ref/buildings/trash.js:11`、`ref/buildings/belt.js:11-17`；`bun run cli all 47742` 出图 `stroke-width="7"`、`t=21` | 已证（行为） | 图纸网格 |
 | F14 | 同一段地下的连续交叉是一条隧道：交叉间隔 1 格（连续）或 2 格且中间直行时合并为一个跨度（一个 sender + 一个 receiver）；拐弯间隔保持两段。演示图纸重复方块 8 → 1，full 集 1907 crossings → 1353 spans / 2706 blocks | L4 | `schematicSVG()` 的跨度分组；`bun run test` 的 one-span 用例；`bun run cli all 47742 --set=full` 出图计数 | 已证（行为） | 隧道跨度 |
 | F15 | `routeBelt` 只检查交叉格两条带垂直，允许游戏建不出的隧道：sender/receiver 落在拐角（full 集 senderTurn=182、receiverTurn=131）、两条隧道只隔 1 格且拐弯（gapTwoBent=29）、receiver 落在另一条带的地下格（2 处 receiver+receiver 重叠）。回流条件见 `docs/design-notes.md` | L4 | 一次性探针 `work/probe-full-tunnels.ts`（输入：种子 47742 + `needs.ts` full 集）；`bun run cli all 47742 --set=full --out=work/plan-full.svg` 后统计 `#6d9dff`/`#71ff9c` 的重复 translate | 已证（现象） | 待修：路由约束 |
+| F16 | 把游戏隧道规则写进 `routeBelt` 的搜索状态后，full 集（种子 47742）的隧道违规计数全为 0：`senderTurn`/`receiverTurn`/`gapTwoBent`/`spanTooLong`/`spanNotStraight`/`endOverlap`/`endOnBelt`/`hijack`/`selfOverlap`/`portDirection`/`coverage`/`bookkeeping`；demo 集同样全 0。规则依据：`findRecieverForSender` 从 sender 沿朝向前搜 0..max-1 个偏移（`ref/systems/underground_belt.js:240-280`），max = `undergroundBeltMaxTilesByTier[0] = 5`（`vendor/shapez.io/src/js/core/config.js:91`）；sender 的 `ItemAcceptor` 槽在 local bottom、receiver 的 `ItemEjector` 槽在 local top（`ref/buildings/underground_belt.js:270-300`），故两端前后各一步必须与隧道同向；跨度内遇到同向 sender 会 break、同向 receiver 会被先匹配（劫持） | L2/L4 | `bun run check:tunnels`（`tools/check-tunnels.ts`，独立几何校验器）实跑：demo routed=46 spans=48 gaps=2、full routed=396 spans=928 gaps=413，全部违规计数 0；`bun run test` 174 quick 全过。**预测勘误**：F16 预注册的「full routed ≥ 430」被实测 396 证伪——旧基线的 452 条 link 里混着大量非法隧道（基线 crossings=1907 / senderTurn=216 / receiverTurn=131 / gapTwoBent=29），新规则下 396 才是合法可布线的上限；判据 floor 改为 full 390 / demo 44（测量值减抖动余量） | 已证（行为） | 逐格布线 |
 
 ## 重放
 
 ```bash
-bun run test                           # 189 项，含解锁等级、布线判据与缩略图表示
+bun run test                           # 全部检查，含解锁等级、布线判据与缩略图表示
+bun run check:tunnels                  # 隧道合法性普查：full 396/809、demo 46/48，违规计数全 0
 bun run cli all 47742 --until=9        # 13 种可建 / 26 种需求（试玩版）
-bun run cli all 47742 --set=full       # 34 种：1353 对隧道口、0 个白色隧道方块
+bun run cli all 47742 --set=full       # 34 种：928 个合法隧道跨度（check:tunnels 复核）
 bun run cli solve "RpRp----"           # 色料链必须出现混色器
 ```
 

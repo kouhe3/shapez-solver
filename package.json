@@ -8,6 +8,7 @@
     "fuzz": "bun run solver/test/fuzz.ts",
     "typecheck": "bun check",
     "verify": "bun check && bun run solver/test/run-tests.ts",
+    "check:tunnels": "bun tools/check-tunnels.ts",
     "cli": "bun solver/cli.ts",
     "serve": "bun solver/server.ts"
   },

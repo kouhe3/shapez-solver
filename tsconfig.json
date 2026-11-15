@@ -16,5 +16,5 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["solver/**/*.ts", "setup-ref.ts"]
+  "include": ["solver/**/*.ts", "tools/**/*.ts", "setup-ref.ts"]
 }

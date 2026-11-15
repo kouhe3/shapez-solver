@@ -80,6 +80,18 @@ export interface World {
     belts: Map<string, BeltHeading>;
     /** tiles where one belt passes under another through a tunnel */
     tunnelCells: Set<string>;
+    /**
+     * tile key → the direction index (see `ROUTE_DIRS`) of the tunnel end
+     * sitting there. A tunnel end is a surface building: no belt shares its
+     * tile, but another belt may pass underneath it.
+     */
+    tunnelEnds: Map<string, number>;
+    /**
+     * tile key → bitmask of the directions of the tunnels running underneath.
+     * A tunnel end placed above a run of the same direction would hijack or
+     * break that run's link, so the router refuses it.
+     */
+    tunnelUnder: Map<string, number>;
     /** outside tiles already claimed by a belt feeding the hub */
     hubApproaches: Set<string>;
 }
@@ -194,9 +206,28 @@ export interface Connection extends ConnectionDraft {
     routed: boolean;
     /** the laid belt tiles, start to goal; `null` when no legal run exists */
     path: Tile[] | null;
+    /** real tunnels: one per straight underground run */
     tunnels: number;
     tunnelCells: Tile[];
+    /** the underground runs of `path`, the single source for the drawing */
+    tunnelSpans: TunnelSpan[];
     beltTiles: number;
+}
+
+/**
+ * One tunnel: the belt dives underground at `sender`, runs straight under
+ * `cells` and surfaces at `receiver`. Both ends are 1×1 buildings facing `dx`,
+ * `dy`; in the game a tunnel may span `undergroundBeltMaxTilesByTier[0]` = 5
+ * tiles (so at most 4 tiles strictly between the two ends) and the belt must
+ * enter and leave along the same direction.
+ */
+export interface TunnelSpan {
+    sender: Tile;
+    receiver: Tile;
+    /** underground tiles between the two ends, in flow order */
+    cells: Tile[];
+    dx: number;
+    dy: number;
 }
 
 /** a link the router could not lay */
@@ -273,6 +304,10 @@ export interface RouteOptions {
     exempt?: ReadonlySet<string> | null;
     /** the goal tile may already hold a belt: the run merges into it */
     goalMayJoin?: boolean;
+    /** direction a sender sitting on the source port tile has to face */
+    startDir?: readonly [number, number] | null;
+    /** direction a receiver sitting on the goal port tile has to face */
+    goalDir?: readonly [number, number] | null;
     /** plan only: do not claim the tiles */
     dryRun?: boolean;
     /** how far outside the two endpoints the router may search */
@@ -285,6 +320,8 @@ export interface RouteResult {
     cells: Tile[];
     /** tiles where this run passes under an existing belt */
     crossings: Tile[];
+    /** the underground runs of `cells` */
+    spans: TunnelSpan[];
 }
 
 /** items/s each colour has to produce, and how many sources that takes */
@@ -478,16 +515,32 @@ const ROUTE_DIRS: readonly (readonly [number, number])[] = [
 ];
 
 /**
+ * Tier-0 tunnel range: `globalConfig.undergroundBeltMaxTilesByTier = [5, 9]`
+ * (`vendor/shapez.io/src/js/core/config.js:91`) caps the distance between the
+ * sender and the receiver at 5 tiles, so at most 4 tiles lie strictly between
+ * them. The tier-2 tunnel is not modelled; 5 is the conservative bound.
+ */
+const MAX_UNDERGROUND = 4;
+
+/** search phases: 0 surface, 1..MAX_UNDERGROUND underground, 5 receiver */
+const PHASES = MAX_UNDERGROUND + 2;
+
+/**
  * Shortest legal belt run between two port tiles, as the game would lay it.
  *
  * Every cell has to stay off machines, the hub and other parts' ports. Running
- * into an existing belt is only legal with a tunnel: the two belts must cross
- * at a right angle, and the game only hands the tunnel out at L6, which the
- * caller passes as `allowCross`. When no legal run exists the link is reported
- * as unroutable instead of being drawn as if it worked.
+ * into an existing belt or a tunnel end is only legal underground: the tunnel
+ * crosses a belt at a right angle, and the game only hands the tunnel out at
+ * L6, which the caller passes as `allowCross`. A tunnel may span at most
+ * 5 tiles (tier 0, `undergroundBeltMaxTilesByTier[0]`), its two
+ * ends must sit on a straight run, nothing with the same direction may sit
+ * between them, and each end occupies its tile (no belt there). When no legal
+ * run exists the link is reported as unroutable instead of being drawn as if
+ * it worked.
  *
  * Turns cost 2 so the result reads as a few straight runs instead of a
- * staircase; crossings cost 3 (the tunnel plus the extra tile).
+ * staircase; crossing a belt costs 3 and a completed tunnel end another 2, so
+ * the router prefers short, shallow tunnels.
  */
 export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
     const margin = opts.margin ?? 20;
@@ -501,88 +554,254 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
     const startIndex = indexOf(start.x, start.y);
     const goalIndex = indexOf(goal.x, goal.y);
 
-    // state = tile * 4 + heading; the heading is what makes a turn cost extra
-    const dist = new Float64Array(size * 4).fill(Infinity);
-    const from = new Int32Array(size * 4).fill(-1);
-    const buckets: number[][] = [];
-    const push = (state: number, cost: number): void => {
-        (buckets[cost] || (buckets[cost] = [])).push(state);
-    };
-    for (let d = 0; d < 4; d++) {
-        dist[startIndex * 4 + d] = 0;
-        push(startIndex * 4 + d, 0);
-    }
+    // a belt path may not visit one tile twice: one tile holds one belt. The
+    // cheapest run sometimes loops around a block to re-approach a tunnel end
+    // from the right side; when it does, forbid that edge and search again.
+    const forbidden = new Set<number>();
+    let chosen: { cells: Tile[]; phases: number[]; headings: number[] } | null = null;
+    for (let attempt = 0; attempt < 64 && !chosen; attempt++) {
+        // state = (tile * PHASES + phase) * 4 + heading. phase 0 = surface belt,
+        // 1..4 = under the ground with that many tiles already underground, 5 =
+        // just surfaced at the receiver; the receiver has to go straight once.
+        const dist = new Float64Array(size * PHASES * 4).fill(Infinity);
+        const from = new Int32Array(size * PHASES * 4).fill(-1);
+        const buckets: number[][] = [];
+        const push = (state: number, cost: number): void => {
+            (buckets[cost] || (buckets[cost] = [])).push(state);
+        };
+        for (let d = 0; d < 4; d++) {
+            dist[startIndex * PHASES * 4 + d] = 0;
+            push(startIndex * PHASES * 4 + d, 0);
+        }
+        const stateOf = (cell: number, phase: number, heading: number): number => (cell * PHASES + phase) * 4 + heading;
+        const relax = (next: number, total: number, state: number): void => {
+            if (total >= dist[next]!) return;
+            dist[next] = total;
+            from[next] = state;
+            push(next, total);
+        };
 
-    let best = -1;
-    search: for (let cost = 0; cost < buckets.length; cost++) {
-        const bucket = buckets[cost];
-        if (!bucket) continue;
-        while (bucket.length) {
-            const state = bucket.pop();
-            if (state === undefined) continue;
-            if (dist[state] !== cost) continue;
-            const cell = state >> 2;
-            const heading = state & 3;
-            if (cell === goalIndex) {
-                best = state;
-                break search;
-            }
-            const cx = (cell % width) + minX;
-            const cy = Math.floor(cell / width) + minY;
-            for (let d = 0; d < 4; d++) {
-                const dir = ROUTE_DIRS[d];
-                if (!dir) continue;
-                const nx = cx + dir[0];
-                const ny = cy + dir[1];
+        let best = -1;
+        search: for (let cost = 0; cost < buckets.length; cost++) {
+            const bucket = buckets[cost];
+            if (!bucket) continue;
+            while (bucket.length) {
+                const state = bucket.pop();
+                if (state === undefined) continue;
+                if (dist[state] !== cost) continue;
+                const cell = Math.floor(state / (PHASES * 4));
+                const rest = state % (PHASES * 4);
+                const phase = rest >> 2;
+                const heading = rest & 3;
+                if (cell === goalIndex) {
+                    best = state;
+                    break search;
+                }
+                const cx = (cell % width) + minX;
+                const cy = Math.floor(cell / width) + minY;
+                const curKey = cellKey(cx, cy);
+                // a belt cannot step back onto the tile it just left: the two belts
+                // would share one tile, which the game does not allow
+                const prevCell = from[state]! >= 0 ? Math.floor(from[state]! / (PHASES * 4)) : -1;
+
+                /** may the belt dive here, facing d? */
+                const senderOk = (d: number): boolean => {
+                    const dir = ROUTE_DIRS[d]!;
+                    if (cell === startIndex) {
+                        // a sender on the source port tile accepts straight from
+                        // the machine, so it has to face the machine's eject side
+                        const sd = opts.startDir;
+                        if (!sd || sd[0] !== dir[0] || sd[1] !== dir[1]) return false;
+                    } else if (d !== heading) {
+                        return false;
+                    }
+                    // a tunnel of the same direction already running underneath
+                    // would find this end and hijack (or break) its link
+                    return (((world.tunnelUnder.get(curKey) || 0) >>> d) & 1) === 0;
+                };
+
+                if (phase === 0) {
+                    for (let d = 0; d < 4; d++) {
+                        if (forbidden.has(state * 4 + d)) continue;
+                        const dir = ROUTE_DIRS[d]!;
+                        const nx = cx + dir[0]!;
+                        const ny = cy + dir[1]!;
+                        if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue;
+                        const nk = cellKey(nx, ny);
+                        if (indexOf(nx, ny) === prevCell) continue;
+                        const isStart = nx === start.x && ny === start.y;
+                        const isGoal = nx === goal.x && ny === goal.y;
+                        if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) continue;
+                        const step = 1 + (d === heading ? 0 : 2);
+                        const belt = world.belts.get(nk);
+                        if (belt !== undefined) {
+                            if (isGoal) {
+                                // merging into the belt already entering the hub
+                                if (opts.goalMayJoin) relax(stateOf(indexOf(nx, ny), 0, d), cost + step, state);
+                                continue;
+                            }
+                            // the tunnel runs under a perpendicular belt, never along one
+                            if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
+                            if (world.tunnelCells.has(nk) || !senderOk(d)) continue;
+                            relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
+                            continue;
+                        }
+                        const endDir = world.tunnelEnds.get(nk);
+                        if (endDir !== undefined) {
+                            // the goal has to end on a belt or bare ground; a tunnel
+                            // end is a building, so the run cannot finish there
+                            if (isGoal) continue;
+                            // an existing tunnel end is a building: pass under it only
+                            if (!opts.allowCross || endDir === d || !senderOk(d)) continue;
+                            relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
+                            continue;
+                        }
+                        relax(stateOf(indexOf(nx, ny), 0, d), cost + step, state);
+                    }
+                    continue;
+                }
+
+                if (phase <= MAX_UNDERGROUND) {
+                    // underground: straight on only
+                    const d = heading;
+                    if (forbidden.has(state * 4 + d)) continue;
+                    const dir = ROUTE_DIRS[d]!;
+                    const nx = cx + dir[0]!;
+                    const ny = cy + dir[1]!;
+                    if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue;
+                    const nk = cellKey(nx, ny);
+                    if (indexOf(nx, ny) === prevCell) continue;
+                    const isStart = nx === start.x && ny === start.y;
+                    const isGoal = nx === goal.x && ny === goal.y;
+                    if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) continue;
+                    const nextPhase = phase + 1;
+                    const belt = world.belts.get(nk);
+                    const endDir = world.tunnelEnds.get(nk);
+                    if (isGoal) {
+                        // the run may surface on the goal port tile, but the receiver
+                        // then has to eject straight into the machine
+                        if (belt !== undefined || endDir !== undefined) continue;
+                        const gd = opts.goalDir;
+                        if (!gd || gd[0] !== dir[0] || gd[1] !== dir[1]) continue;
+                        if ((((world.tunnelUnder.get(nk) || 0) >>> d) & 1) !== 0) continue;
+                        relax(stateOf(indexOf(nx, ny), 5, d), cost + 1, state);
+                        continue;
+                    }
+                    if (belt !== undefined) {
+                        if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
+                        if (world.tunnelCells.has(nk)) continue;
+                        if (nextPhase > MAX_UNDERGROUND) continue;
+                        relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
+                        continue;
+                    }
+                    if (endDir !== undefined) {
+                        if (!opts.allowCross || endDir === d) continue;
+                        if (nextPhase > MAX_UNDERGROUND) continue;
+                        relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
+                        continue;
+                    }
+                    // free ground: the run may surface here or stay underground
+                    if ((((world.tunnelUnder.get(nk) || 0) >>> d) & 1) === 0) {
+                        relax(stateOf(indexOf(nx, ny), 5, d), cost + 1, state);
+                    }
+                    if (nextPhase <= MAX_UNDERGROUND) {
+                        relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 1, state);
+                    }
+                    continue;
+                }
+
+                // receiver: one forced straight step onto a surface tile
+                const d = heading;
+                if (forbidden.has(state * 4 + d)) continue;
+                const dir = ROUTE_DIRS[d]!;
+                const nx = cx + dir[0]!;
+                const ny = cy + dir[1]!;
                 if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue;
-                const endpoint = (nx === start.x && ny === start.y) || (nx === goal.x && ny === goal.y);
-                const free = endpoint || (opts.exempt && opts.exempt.has(cellKey(nx, ny)));
-                if (!free && blocked.has(cellKey(nx, ny))) continue;
-                const joinsGoal = opts.goalMayJoin && nx === goal.x && ny === goal.y;
-                let step = 1 + (d === heading ? 0 : 2);
-                const belt = world.belts.get(cellKey(nx, ny));
-                if (belt && !joinsGoal) {
-                    // the tunnel runs under a perpendicular belt, never along one
-                    const across = d < 2 ? "v" : "h";
-                    if (!opts.allowCross || belt !== across || world.tunnelCells.has(cellKey(nx, ny))) continue;
-                    step += 3;
+                const nk = cellKey(nx, ny);
+                if (indexOf(nx, ny) === prevCell) continue;
+                const isStart = nx === start.x && ny === start.y;
+                const isGoal = nx === goal.x && ny === goal.y;
+                if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) continue;
+                const belt = world.belts.get(nk);
+                if (belt !== undefined) {
+                    if (isGoal && opts.goalMayJoin) relax(stateOf(indexOf(nx, ny), 0, d), cost + 1, state);
+                    continue;
                 }
-                const next = indexOf(nx, ny) * 4 + d;
-                const total = cost + step;
-                if (total < dist[next]!) {
-                    dist[next] = total;
-                    from[next] = state;
-                    push(next, total);
-                }
+                if (world.tunnelEnds.has(nk)) continue;
+                relax(stateOf(indexOf(nx, ny), 0, d), cost + 1, state);
             }
         }
-    }
-    if (best < 0) return null;
+        if (best < 0) return null;
 
-    const cells: Tile[] = [];
-    for (let state = best; state >= 0; state = from[state]!) {
-        const cell = state >> 2;
-        cells.push({ x: (cell % width) + minX, y: Math.floor(cell / width) + minY });
+        const states: number[] = [];
+        for (let state = best; state >= 0; state = from[state]!) states.push(state);
+        states.reverse();
+        const cells: Tile[] = states.map((state) => {
+            const cell = Math.floor(state / (PHASES * 4));
+            return { x: (cell % width) + minX, y: Math.floor(cell / width) + minY };
+        });
+        const phases = states.map((state) => (state % (PHASES * 4)) >> 2);
+        const headings = states.map((state) => state & 3);
+        const seen = new Set<number>();
+        let cut = -1;
+        for (let i = 0; i < states.length; i++) {
+            const tile = Math.floor(states[i]! / (PHASES * 4));
+            if (seen.has(tile)) {
+                cut = i;
+                break;
+            }
+            seen.add(tile);
+        }
+        if (cut < 0) {
+            chosen = { cells, phases, headings };
+            break;
+        }
+        forbidden.add(states[cut - 1]! * 4 + headings[cut]!);
     }
-    cells.reverse();
-    if (opts.dryRun) {
-        return { cells, crossings: cells.filter(({ x, y }) => world.belts.has(cellKey(x, y))) };
-    }
+    if (!chosen) return null;
+    const { cells, phases, headings } = chosen;
 
-    // claim the run: a tile that already holds a belt is a tunnel crossing
+    const spans: TunnelSpan[] = [];
     const crossings: Tile[] = [];
     for (let i = 0; i < cells.length; i++) {
+        if (phases[i]! < 1 || phases[i]! > MAX_UNDERGROUND) continue;
+        let end = i;
+        while (end + 1 < cells.length && phases[end + 1]! >= 1 && phases[end + 1]! <= MAX_UNDERGROUND) end++;
+        const dir = ROUTE_DIRS[headings[i]!]!;
+        spans.push({ sender: cells[i - 1]!, receiver: cells[end + 1]!, cells: cells.slice(i, end + 1), dx: dir[0]!, dy: dir[1]! });
+        for (let k = i; k <= end; k++) {
+            const c = cells[k]!;
+            if (world.belts.has(cellKey(c.x, c.y))) crossings.push(c);
+        }
+        i = end;
+    }
+    if (opts.dryRun) return { cells, crossings, spans };
+
+    // claim the tunnels: ends become buildings (no belt, but passable
+    // underground); the underground tiles remember their direction so a later
+    // tunnel end above them cannot hijack the link
+    const ends = new Set<string>();
+    for (const span of spans) {
+        const d = ROUTE_DIRS.findIndex((dir) => dir[0] === span.dx && dir[1] === span.dy);
+        for (const c of span.cells) {
+            const key = cellKey(c.x, c.y);
+            world.tunnelUnder.set(key, (world.tunnelUnder.get(key) || 0) | (1 << d));
+            if (world.belts.has(key)) world.tunnelCells.add(key);
+        }
+        for (const end of [span.sender, span.receiver]) {
+            const key = cellKey(end.x, end.y);
+            world.tunnelEnds.set(key, d);
+            world.occupied.add(key);
+            ends.add(key);
+        }
+    }
+    for (let i = 0; i < cells.length; i++) {
+        if (phases[i] !== 0) continue;
         const { x, y } = cells[i]!;
         const key = cellKey(x, y);
-        if (world.belts.has(key)) {
-            // the merge case joins the belt already entering the hub; no tunnel
-            if (opts.goalMayJoin && i === cells.length - 1) continue;
-            if (!world.tunnelCells.has(key)) {
-                world.tunnelCells.add(key);
-                crossings.push({ x, y });
-            }
-            continue;
-        }
+        if (ends.has(key)) continue;
+        // the merge case joins the belt already entering the hub; no belt added
+        if (opts.goalMayJoin && i === cells.length - 1) continue;
         let heading: BeltHeading;
         if (cells.length === 1) heading = "h";
         else if (i === 0) heading = cells[1]!.y === cells[0]!.y ? "h" : "v";
@@ -593,7 +812,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
         world.belts.set(key, heading);
         world.occupied.add(key);
     }
-    return { cells, crossings };
+    return { cells, crossings, spans };
 }
 
 
@@ -706,6 +925,10 @@ export function createWorld({ hub, patches }: WorldInit): World {
         belts: new Map<string, BeltHeading>(),
         /** tiles where one belt passes under another through a tunnel */
         tunnelCells: new Set<string>(),
+        /** tile → direction index of the tunnel end building sitting there */
+        tunnelEnds: new Map<string, number>(),
+        /** tile → bitmask of tunnel directions running underneath */
+        tunnelUnder: new Map<string, number>(),
         /** outside tiles already claimed by a belt feeding the hub */
         hubApproaches: new Set<string>(),
     };
@@ -738,7 +961,11 @@ function placeExtractor(world: World, predicate: (item: MapItem) => boolean, fro
             if (world.occupied.has(cellKey(cell.x, cell.y))) continue;
             // its ejector tile and the tile behind it must be clear
             const blocked = [...portCells(BUILDING_INFO.base, cell.x, cell.y), ...portApproachCells(BUILDING_INFO.base, cell.x, cell.y)].some(
-                (c) => world.walls.has(cellKey(c.x, c.y)) || world.belts.has(cellKey(c.x, c.y)) || world.approaches.has(cellKey(c.x, c.y))
+                (c) =>
+                    world.walls.has(cellKey(c.x, c.y)) ||
+                    world.belts.has(cellKey(c.x, c.y)) ||
+                    world.tunnelEnds.has(cellKey(c.x, c.y)) ||
+                    world.approaches.has(cellKey(c.x, c.y))
             );
             if (blocked) continue;
             world.occupied.add(cellKey(cell.x, cell.y));
@@ -921,7 +1148,7 @@ export function buildLayout({
         // and the belt beyond it needs a clear tile to run through
         for (const c of [...portCells(info, x, y), ...portApproachCells(info, x, y)]) {
             const key = cellKey(c.x, c.y);
-            if (shared.walls.has(key) || shared.belts.has(key) || shared.approaches.has(key)) return false;
+            if (shared.walls.has(key) || shared.belts.has(key) || shared.tunnelEnds.has(key) || shared.approaches.has(key)) return false;
         }
         for (let dx = 0; dx < info.w; dx++) {
             for (let dy = 0; dy < info.h; dy++) {
@@ -1299,9 +1526,16 @@ export function buildLayout({
     const blocked = new Set<string>([...shared.walls, ...shared.approaches]);
     const allowCross = allowTunnels !== false;
     const routingGaps: RoutingGap[] = [];
-    const route = (start: Tile, goal: Tile, join = false, exempt: ReadonlySet<string> | null = null): RouteResult | null =>
-        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, margin: 20 }) ||
-        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, margin: 60 });
+    const route = (
+        start: Tile,
+        goal: Tile,
+        join: boolean,
+        exempt: ReadonlySet<string> | null,
+        startDir: readonly [number, number] | null,
+        goalDir: readonly [number, number] | null
+    ): RouteResult | null =>
+        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, startDir, goalDir, margin: 20 }) ||
+        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, startDir, goalDir, margin: 60 });
 
     for (const q of queued) {
         const outPort = q.srcInfo.outs[q.outSlot] || q.srcInfo.outs[0];
@@ -1336,7 +1570,11 @@ export function buildLayout({
         const goalApproach = q.toHub ? null : portApproachCells(q.dstInfo, q.dstBuilding.x, q.dstBuilding.y)[q.inSlot];
         const exempt = new Set<string>();
         for (const cell of [start, goal, startApproach, goalApproach]) if (cell) exempt.add(cellKey(cell.x, cell.y));
-        const path = start && goal ? route(start, goal, mergeInto, exempt) : null;
+        // a sender / receiver on the port tile itself only works when it faces
+        // straight out of / into the machine
+        const startDir = start && startApproach ? ([Math.sign(startApproach.x - start.x), Math.sign(startApproach.y - start.y)] as const) : null;
+        const goalDir = goal && goalApproach ? ([Math.sign(goal.x - goalApproach.x), Math.sign(goal.y - goalApproach.y)] as const) : null;
+        const path = start && goal ? route(start, goal, mergeInto, exempt, startDir, goalDir) : null;
         const connection: ConnectionDraft = {
             from: q.srcBuilding.stepId,
             to: q.toHub ? "HUB" : q.dstBuilding.stepId,
@@ -1363,17 +1601,21 @@ export function buildLayout({
                 start,
                 goal,
             });
-            connections.push({ ...connection, routed: false, path: null, tunnels: 0, tunnelCells: [], beltTiles: 0 });
+            connections.push({ ...connection, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 });
             continue;
         }
-        const beltTiles = path.cells.length + 2 * path.crossings.length;
+        // every path tile is a belt or a tunnel end; the underground tiles are
+        // neither, and the two ends of each tunnel are counted once each
+        const underground = path.spans.reduce((n, span) => n + span.cells.length, 0);
+        const beltTiles = path.cells.length - underground;
         beltEstimate += beltTiles;
         connections.push({
             ...connection,
             routed: true,
             path: path.cells,
-            tunnels: path.crossings.length,
+            tunnels: path.spans.length,
             tunnelCells: path.crossings,
+            tunnelSpans: path.spans,
             beltTiles,
         });
     }

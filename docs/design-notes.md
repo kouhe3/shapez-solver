@@ -34,6 +34,8 @@
 | items/s 与带速 | ETA 用额定速度，不建模带等级、堆叠、拥堵 | 需要产线级仿真时 |
 | 平衡器/隧道不计入 BOM | `BUILDING_INFO` 只覆盖机器和垃圾桶 | 要把运输件纳入材料清单时 |
 | 矿脉形状 | 只按 chunk/半径扫描矿脉，不逐格计算可采矿格 | 需要精确矿脉损耗时 |
+**勘误（2026-11-15，隧道跨度合法性已修）**：第一条缺口已关闭。`routeBelt` 现在把隧道作为搜索状态（surface / underground 1..4 / receiver）处理：sender、receiver 前后各一步必须与隧道同向，sender→receiver 间距 ≤ 5 格（一级隧道，`undergroundBeltMaxTilesByTier[0]`），跨度内不得出现同向隧道口，隧道口占格且不再当地面带，路径不得自重叠。判据是独立校验器 `bun run check:tunnels`：seed 47742 的 demo 集 46/48、full 集 396/809 可布线，全部隧道违规计数为 0；旧图里的 452 条 link 中混有大量非法隧道，396 是合法规则下的可布线上限。详细事实见 `docs/facts.md` F16。
+
 
 ## 这是 NP 问题吗
 

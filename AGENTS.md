@@ -72,9 +72,10 @@ bun install                     # once: the single devDependency (@types/bun)
 bun check                       # Bun's built-in TypeScript checker; no typescript package
 
 # Verification
-bun run test                    # 182 checks, seconds
-bun run test:quick              # 147 checks, skips both level loops
+bun run test                    # 209 checks, seconds
+bun run test:quick              # 174 checks, skips both level loops
 bun run verify                  # bun check + the full suite
+bun run check:tunnels           # campaign tunnel legality (demo + full, ~25 s)
 bun run fuzz --n=40 --seed=1234 --budget=30000
 
 # Solve / inspect
@@ -161,11 +162,12 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 ## Testing & QA
 
 - Custom harness, no framework (`bun test` is not used): `check(label, actual, expected)` (deep equality via `JSON.stringify`, `run-tests.ts:23`) and `checkTrue` (`:32`). Sections print as `== … ==`; footer is `N checks, M failure(s)` (`:656`); exit `1` on any failure.
-- Suite size: 182 checks via `bun run test`, 147 via `bun run test:quick` (both level loops skipped).
+- Suite size: 209 checks via `bun run test`, 174 via `bun run test:quick` (both level loops skipped).
 - Covered: shape codec and hashing, rotations, cut/stack, the `BUILDING_INFO` port table against upstream slot indices, connection start slots, map determinism (seed `47742`), savegame round-trip, 9 demo levels, 26 full levels.
 - **Gap to know about:** the level suites assert only `ok` + `verification.ok`, never `cost`. Optimality regressions pass silently — add a cost assertion when you change search order or family priority.
 - Uncovered by tests: `schematic.ts`, `render.ts`, `server.ts`, `web/app.ts`. Verify those by actually starting `bun run serve` and loading `/web/index.html`.
-- No CI, no coverage tool, no snapshots, no golden SVG comparison. `bun run test` is the entire quality gate; `bun run verify` chains `bun check` in front of it.
+- **Tunnel legality gate:** `bun run check:tunnels` (`tools/check-tunnels.ts`) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends. It also floors the routed count (demo 44 / full 390; measured 46 / 396). Slow (~25 s), so it is not part of `verify`; run it after touching `routeBelt`, `World` bookkeeping or `schematic.ts`.
+- No CI, no coverage tool, no snapshots, no golden SVG comparison. `bun run test` is the entire quality gate; `bun run verify` chains `bun check` in front of it; `bun run check:tunnels` is the campaign-level legality gate.
 - Extend in the obvious place: new algebra case → new `== … ==` block with `check`; new targets → `solver/src/levels.ts`; randomized checking → `fuzz.ts`.
 - CLI exit-code nuance: `solve --json` prints its payload and exits `0` **even when `ok` is false**. Parse the JSON, don't rely on the exit code.
 

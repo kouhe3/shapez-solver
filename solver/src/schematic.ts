@@ -317,13 +317,12 @@ export function schematicSVG(
         }
     }
 
-    // Tunnels, because the belt pass needs their underground runs: the chunk
-    // overview paints the sender as a blue block and the receiver as a green
-    // one, each cut into the 3×3 shape `getSpecialOverlayRenderMatrix` returns
-    // in `ref/buildings/underground_belt.js:28-30,68-88`. One tunnel can stay
-    // underground under several over-belts: crossings closer than two tiles are
-    // one span (a receiver and a sender need distinct surface tiles), while a
-    // turn between two crossings keeps them apart (a tunnel is straight).
+    // Tunnels: the chunk overview paints the sender as a blue block and the
+    // receiver as a green one, each cut into the 3×3 shape
+    // `getSpecialOverlayRenderMatrix` returns in
+    // `ref/buildings/underground_belt.js:28-30,68-88`. Which tiles are one
+    // underground run is the router's decision (`Connection.tunnelSpans`), not
+    // the drawing's: a run may only be straight and span at most 5 tiles.
     const TUNNEL_SENDER = "#6d9dff";
     const TUNNEL_RECEIVER = "#71ff9c";
     // the two 3×3 matrices as tile-local (0..1) outlines; the flat bar faces
@@ -351,68 +350,44 @@ export function schematicSVG(
     for (const c of layout.connections) {
         if (!c.routed || !c.path) continue;
         const cells = c.path;
-        const crossings = c.tunnelCells || [];
-        const crossingIdx = cells
-            .map((cell, i) => (crossings.some((x) => x.x === cell.x && x.y === cell.y) ? i : -1))
-            .filter((i) => i >= 0);
-        const spans: Array<[number, number]> = [];
-        for (const i of crossingIdx) {
-            const last = spans[spans.length - 1];
-            if (!last) {
-                spans.push([i, i]);
-                continue;
-            }
-            const gap = i - last[1];
-            const a = cells[last[1]]!;
-            const b = cells[i]!;
-            const mid = gap === 2 ? cells[last[1] + 1]! : null;
-            const straight = mid !== null && mid.x - a.x === b.x - mid.x && mid.y - a.y === b.y - mid.y;
-            if (gap === 1 || (gap === 2 && straight)) last[1] = i;
-            else spans.push([i, i]);
-        }
         const underground = new Set<number>();
-        for (const [a, b] of spans) for (let k = a; k <= b; k++) underground.add(k);
-
-        const pts: Array<[number, number]> = [
-            [px(c.x1), py(c.y1)],
-            ...cells.map((p): [number, number] => [px(p.x + 0.5), py(p.y + 0.5)]),
-            [px(c.x2), py(c.y2)],
-        ];
-        let chunk: Array<[number, number]> = [];
-        const emit = (): void => {
-            if (chunk.length >= 2) {
-                const first = chunk[0]!;
-                const last = chunk[chunk.length - 1]!;
-                out.push(`<path d="${polylinePath(chunk.slice(1, -1), first[0], first[1], last[0], last[1])}"/>`);
-            }
-            chunk = [];
-        };
-        for (let i = 0; i < pts.length; i++) {
-            if (underground.has(i - 1)) emit();
-            else chunk.push(pts[i]!);
+        const ends = new Map<number, readonly [number, number]>();
+        for (const span of c.tunnelSpans) {
+            cells.forEach((p, i) => {
+                if (span.cells.some((q) => q.x === p.x && q.y === p.y)) underground.add(i);
+                if ((p.x === span.sender.x && p.y === span.sender.y) || (p.x === span.receiver.x && p.y === span.receiver.y)) {
+                    ends.set(i, [span.dx, span.dy]);
+                }
+            });
+            tunnelBlocks.push(tunnelBlock(span.sender, TUNNEL_SENDER, SENDER_BLOCK, flowAngle(span.dx, span.dy)));
+            tunnelBlocks.push(tunnelBlock(span.receiver, TUNNEL_RECEIVER, RECEIVER_BLOCK, flowAngle(span.dx, span.dy)));
         }
-        emit();
 
-        for (const [a, b] of spans) {
-            const head = cells[a]!;
-            const tail = cells[b]!;
-            if (a > 0) {
-                const sender = cells[a - 1]!;
-                tunnelBlocks.push(
-                    tunnelBlock(sender, TUNNEL_SENDER, SENDER_BLOCK, flowAngle(head.x - sender.x, head.y - sender.y))
-                );
+        // belt runs: every tile that is neither underground nor a tunnel end.
+        // A run stops half a tile before the tunnel end it feeds, so the band
+        // meets the 3×3 block instead of showing through its holes.
+        for (let i = 0; i < cells.length; i++) {
+            if (underground.has(i) || ends.has(i)) continue;
+            let j = i;
+            while (j + 1 < cells.length && !underground.has(j + 1) && !ends.has(j + 1)) j++;
+            const pts: Array<[number, number]> = [];
+            if (i === 0) {
+                pts.push([px(c.x1), py(c.y1)]);
+            } else {
+                const [dx, dy] = ends.get(i - 1)!;
+                pts.push([px(cells[i]!.x + 0.5) - 0.5 * t * dx, py(cells[i]!.y + 0.5) - 0.5 * t * dy]);
             }
-            if (b + 1 < cells.length) {
-                const receiver = cells[b + 1]!;
-                tunnelBlocks.push(
-                    tunnelBlock(
-                        receiver,
-                        TUNNEL_RECEIVER,
-                        RECEIVER_BLOCK,
-                        flowAngle(receiver.x - tail.x, receiver.y - tail.y)
-                    )
-                );
+            for (let k = i; k <= j; k++) pts.push([px(cells[k]!.x + 0.5), py(cells[k]!.y + 0.5)]);
+            if (j === cells.length - 1) {
+                pts.push([px(c.x2), py(c.y2)]);
+            } else {
+                const [dx, dy] = ends.get(j + 1)!;
+                pts.push([px(cells[j]!.x + 0.5) + 0.5 * t * dx, py(cells[j]!.y + 0.5) + 0.5 * t * dy]);
             }
+            const first = pts[0]!;
+            const last = pts[pts.length - 1]!;
+            out.push(`<path d="${polylinePath(pts.slice(1, -1), first[0], first[1], last[0], last[1])}"/>`);
+            i = j;
         }
     }
     out.push(`</g>`);
