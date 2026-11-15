@@ -69,8 +69,8 @@ Run from `solver/` unless noted.
 
 ```bash
 # Verification (the gate)
-node test/run-tests.js          # 92 checks, <1 s
-node test/run-tests.js --quick  # 57 checks, skips both level loops
+node test/run-tests.js          # 121 checks, <1 s
+node test/run-tests.js --quick  # 86 checks, skips both level loops
 node cli.js check               # spawns test/run-tests.js; cwd must be solver/
 node test/fuzz.js --n=40 --seed=1234 --budget=30000
 
@@ -84,6 +84,9 @@ node cli.js levels --game
 node cli.js map --seed=47742 --radius=3
 node cli.js map --save=../savegame.bin --radius=2
 node cli.js blueprint "RuCw--Cw:----Ru--" --save=../savegame.bin --out=plan.svg
+
+# Every shape the campaign asks for (levels + upgrade tiers), one shared map/HUB
+node cli.js all --set=demo --save=../savegame.bin --out=plan-all.svg
 
 # UI + API
 node server.js --port=8099   # /web/index.html, GET /api/solve, static under solver/
@@ -132,6 +135,8 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 | `solver/src/plan.js` | Plan AST, evaluation, and the verification oracle (`:63` `evalNode`, `:132` `flatten`, `:214` `verifyPlan`). |
 | `solver/src/solver.js` | Search order and budgets (`:100`), `planShape` (`:367`), family list (`:484`). |
 | `solver/src/layout.js` | `BUILDING_INFO` port table (`:17`) — single source of tile geometry; then packing, BOM, belt estimate. |
+| `solver/src/needs.js` | Level + upgrade-tier shape requirements, derived from upstream `modes/regular.js`. Feeds `cli.js all`. |
+| `solver/src/campaign.js` | Solves every needed shape and packs all factories onto one shared world/hub. |
 | `solver/src/levels.js` | `DEMO_LEVELS`, `FULL_LEVELS`, `REWARD_BUILDINGS`. The regression corpus; new targets go here and are auto-covered. |
 | `solver/test/run-tests.js` | Harness plus **all** expectations as inline literals. |
 | `solver/cli.js`, `solver/server.js` | User-facing surfaces; `--k=v` flags only, parsed after the subcommand, unknown flags ignored. |
@@ -147,7 +152,7 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 - `git` + network needed for `setup-ref.mjs` (sparse clone) and `fetch-demo.sh`.
 - Windows: `ref` is a directory junction, handled by `setup-ref.mjs`; don't create it by hand.
 - Generated / never committed: `vendor/`, `ref`, `*.log`, `tree.json`, `savegame.raw.json`, `savegame.json`, `preview-cu.svg`, `solver/tmp-sg.mjs`.
-- Generated but **tracked** (regenerate + commit when source changes): `demo/**` including `demo/solver/**`, `plan.svg`, `solver/plan.svg`, `savegame.bin`.
+- Generated but **tracked** (regenerate + commit when source changes): `demo/**` including `demo/solver/**`, `plan.svg`, `plan-all.svg`, `solver/plan.svg`, `savegame.bin`.
 
 ## Testing & QA
 

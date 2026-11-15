@@ -25,8 +25,14 @@ import {
  * builders
  * ------------------------------------------------------------------ */
 
-export function baseNode(type) {
-    return { op: "base", type, cost: 0 };
+/**
+ * @param {string} type single-letter shape type (C/R/S/W)
+ * @param {string} [code] full code of the deposit this miner sits on; the game
+ *   generates mixed deposits such as "RuRuRuWu", and cutting those is the only
+ *   way to obtain some quadrants. Omitted = all four quadrants of `type`.
+ */
+export function baseNode(type, code = null) {
+    return code ? { op: "base", type, code, cost: 0 } : { op: "base", type, cost: 0 };
 }
 
 export function rotateNode(dir, input) {
@@ -66,6 +72,10 @@ export function evalNode(node) {
     let out;
     switch (node.op) {
         case "base": {
+            if (node.code) {
+                out = parse(node.code);
+                break;
+            }
             const layer = [0, 1, 2, 3].map(() => ({ t: node.type, c: "u" }));
             out = { layers: [layer] };
             break;
@@ -138,7 +148,7 @@ export function flatten(root) {
         const record = { id: 0, op: node.op, node, inputs: [], detail: "", cost: node.cost };
         switch (node.op) {
             case "base":
-                record.detail = `${node.type}`;
+                record.detail = node.code ? `${node.code}` : `${node.type}`;
                 break;
             case "rotate":
                 record.inputs = [visit(node.input)];

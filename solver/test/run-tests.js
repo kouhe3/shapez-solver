@@ -12,6 +12,8 @@ import { generateChunk, scanMap, availableResources } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject } from "../src/savegame.js";
 import { buildLayout, BUILDING_INFO } from "../src/layout.js";
+import { neededShapes } from "../src/needs.js";
+import { planCampaign } from "../src/campaign.js";
 
 let failures = 0;
 let checks = 0;
@@ -186,6 +188,123 @@ console.log("== blueprint: connections use the right output slot ==");
     });
     const painter = paint4.buildings.find((b) => b.kind === "paint4");
     check("paint4 colors for port labels", painter.colors, ["r", null, "b", null]);
+}
+
+console.log("== blueprint: the finished product is belted into the hub ==");
+{
+    // A bare miner still needs one belt run into the hub; it used to vanish from
+    // the layout entirely, leaving 传送带约 0 格 and no flow line on the sheet.
+    const patches = [{ x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
+    const hub = { x: 40, y: 40 };
+
+    const bare = buildLayout({ plan: P.baseNode("C"), patches, hub });
+    const leg = bare.connections.find((c) => c.toHub);
+    checkTrue("base-only plan: hub belt exists", !!leg);
+    if (leg) {
+        check("base-only plan: hub entry tile", [leg.x2, leg.y2], [40.5, 40.5]);
+        check("base-only plan: hub belt tiles", leg.beltTiles, 81);
+    }
+    check("base-only plan: estimate counts the hub leg", bare.beltEstimate, 81);
+
+    const built = buildLayout({ plan: P.cutHalfNode(0, P.baseNode("C")), patches, hub });
+    check("processing plan: exactly one hub belt", built.connections.filter((c) => c.toHub).length, 1);
+    check(
+        "processing plan: estimate is the sum of every leg",
+        built.beltEstimate,
+        built.connections.reduce((n, c) => n + c.beltTiles, 0)
+    );
+}
+
+console.log("== needs: every shape the game asks for ==");
+{
+    for (const set of ["demo", "full"]) {
+        const shapes = neededShapes({ set });
+        check(
+            `needs ${set}: every code parses`,
+            shapes.filter((s) => !S.tryParse(s.code).ok).map((s) => s.code),
+            []
+        );
+        check(`needs ${set}: codes are unique`, shapes.length, new Set(shapes.map((s) => s.code)).size);
+        checkTrue(
+            `needs ${set}: covers level goals`,
+            shapes.some((s) => s.sources.some((x) => x.kind === "level"))
+        );
+        checkTrue(
+            `needs ${set}: covers upgrade tiers`,
+            shapes.some((s) => s.sources.some((x) => x.kind === "upgrade"))
+        );
+    }
+    check("needs demo size", neededShapes({ set: "demo" }).length, 26);
+    check("needs full size", neededShapes({ set: "full" }).length, 34);
+    checkTrue(
+        "rocket shape is full-version only",
+        !neededShapes({ set: "demo" }).some((s) => s.code === "CbCuCbCu:Sr------:--CrSrCr:CwCwCwCw")
+    );
+}
+
+console.log("== solver: atoms cut out of mixed deposits ==");
+{
+    // The map generator never puts four windmill quadrants in one deposit (it
+    // caps a patch at a single W), so a windmill can only be cut out of a mixed
+    // patch. The base family must not invent a "WuWuWuWu" deposit instead.
+    const fromPatch = solve("WuWuWuWu", { baseCodes: ["RuRuWuWu"] });
+    checkTrue("windmill from a mixed patch is plannable", fromPatch.ok, fromPatch.error || "");
+    checkTrue("windmill plan needs buildings", fromPatch.ok && fromPatch.cost > 0);
+    checkTrue("windmill plan verifies", fromPatch.ok && fromPatch.verification.ok);
+
+    const painted = solve("CwCwCwCw:WbWbWbWb", { baseCodes: ["CuCuCuCu", "RuRuWuWu"] });
+    checkTrue("painted windmill is plannable", painted.ok, painted.error || "");
+    checkTrue(
+        "painted windmill mines the real deposit",
+        painted.ok &&
+            P.flatten(painted.plan).steps.some((s) => s.node.op === "base" && s.node.code === "RuRuWuWu")
+    );
+
+    checkTrue("a map without windmills refuses", !solve("WuWuWuWu", { baseCodes: ["CuCuCuCu"] }).ok);
+}
+
+console.log("== campaign: one map, one hub, no overlaps ==");
+{
+    const patches = [
+        { x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } },
+        { x: 14, y: 14, size: 2, item: { kind: "shape", code: "RuRuRuRu" } },
+    ];
+    const hub = { x: 40, y: 40 };
+    const res = planCampaign({
+        shapes: [
+            { code: "CuCuCuCu", sources: [] },
+            { code: "RuRuRuRu", sources: [] },
+            { code: "----CuCu", sources: [] },
+        ],
+        patches,
+        hub,
+    });
+    check("campaign: every shape solved", res.entries.map((e) => e.ok), [true, true, true]);
+    check(
+        "campaign: building total adds up",
+        res.totals.buildings,
+        res.entries.reduce((n, e) => n + e.buildings, 0)
+    );
+
+    const cells = new Set();
+    let clashes = 0;
+    for (const b of res.layout.buildings) {
+        for (let dx = 0; dx < b.w; dx++) {
+            for (let dy = 0; dy < b.h; dy++) {
+                const k = b.x + dx + "|" + (b.y + dy);
+                if (cells.has(k)) clashes += 1;
+                cells.add(k);
+            }
+        }
+    }
+    check("campaign: buildings never overlap", clashes, 0);
+    check("campaign: one miner per factory", res.layout.buildings.filter((b) => b.kind === "base").length, 3);
+    check("campaign: a belt run into the hub per shape", res.layout.connections.filter((c) => c.toHub).length, 3);
+    check(
+        "campaign: belt total is the sum of the legs",
+        res.totals.belts,
+        res.layout.connections.reduce((n, c) => n + c.beltTiles, 0)
+    );
 }
 
 console.log("== planner: level 20 ==");

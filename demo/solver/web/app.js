@@ -7,6 +7,8 @@ import { scanMap, itemLabel } from "../src/map.js";
 import { decodeSavegame } from "../src/savegame.js";
 import { buildLayout } from "../src/layout.js";
 import { schematicSVG } from "../src/schematic.js";
+import { neededShapes, describeSource } from "../src/needs.js";
+import { planCampaign } from "../src/campaign.js";
 
 const BUILDING_LABELS = {
     cutter: "切割机",
@@ -369,7 +371,9 @@ async function readGameSave() {
         const sm = e && e.components && e.components.StaticMapEntity;
         if (sm && sm.code === 26 && sm.origin) hub = sm.origin;
     }
-    const patches = scanMap(seed, { chunkRadius: 4 });
+    // wide enough that every shape type the campaign needs (windmill/star
+    // deposits only exist far out) is on the map
+    const patches = scanMap(seed, { chunkRadius: 8 });
     return {
         seed,
         hub,
@@ -466,9 +470,11 @@ function renderPlacement(layout) {
     const fb = document.createElement("tbody");
     for (const c of layout.connections) {
         const tr = document.createElement("tr");
+        const dest = c.toHub ? "<b>HUB</b> 枢纽" : `<code>${c.to}</code> ${c.toLabel}`;
+        const inPort = c.toHub ? "—" : `#${c.slot}`;
         tr.innerHTML = `<td><code>${c.from}</code> ${c.fromLabel}</td><td>${
             c.outCount > 1 ? "#" + c.outSlot : "—"
-        }</td><td><code>${c.to}</code> ${c.toLabel}</td><td>#${c.slot}</td><td>${c.length}</td>`;
+        }</td><td>${dest}</td><td>${inPort}</td><td>${c.beltTiles}</td>`;
         fb.appendChild(tr);
     }
     ft.appendChild(fb);
@@ -502,8 +508,12 @@ async function onBlueprint() {
     box.innerHTML = `<div style="padding:16px;color:#6b7280">求解并排布中…</div>`;
     await new Promise((r) => setTimeout(r, 30));
     try {
+        const baseCodes = [
+            ...new Set(gameCtx.patches.filter((p) => p.item.kind === "shape").map((p) => p.item.code)),
+        ];
         const res = solve(parsed.shape, {
             buildings: new Set(currentBuildings),
+            baseCodes,
             maxAttempts: 30000,
         });
         if (!res.ok) {
@@ -524,5 +534,83 @@ async function onBlueprint() {
     }
 }
 
+function renderCampaign(res) {
+    const el = $("placement");
+    el.innerHTML = "";
+    const makeCard = (title) => {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `<h3>${title}</h3>`;
+        el.appendChild(card);
+        return card;
+    };
+
+    const tableCard = makeCard(`全部需求图形（${res.totals.shapes} 种）`);
+    const table = document.createElement("table");
+    table.innerHTML = `<thead><tr><th>#</th><th>图形</th><th>建筑</th><th>传送带</th><th>来源</th></tr></thead>`;
+    const tbody = document.createElement("tbody");
+    for (const e of res.entries) {
+        const tr = document.createElement("tr");
+        const why = e.sources.map(describeSource).join(" / ");
+        if (!e.ok) {
+            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td colspan="2">无法求解</td><td>${
+                e.error || ""
+            }</td>`;
+        } else {
+            const gap = e.missing.length
+                ? ` ⚠ 缺 ${e.missing.map((m) => m.replace(/^shape:/, "")).join(", ")}`
+                : "";
+            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td>${e.buildings}</td><td>${e.belts}</td><td>${why}${gap}</td>`;
+        }
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    tableCard.appendChild(table);
+
+    const bomCard = makeCard("材料 / 颜色");
+    const lines = [];
+    lines.push(`合计 ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格`);
+    lines.push(`建筑：${res.layout.bom.map((b) => `${b.zh}×${b.n}`).join("、")}`);
+    for (const c of res.layout.colors) {
+        lines.push(
+            c.direct
+                ? `颜色 ${c.color}：地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`
+                : `颜色 ${c.color}：无直接矿脉，需混合 ${c.mix.join("+")}`
+        );
+    }
+    for (const m of res.layout.missing) lines.push(`⚠ 缺失资源：${m}`);
+    bomCard.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
+}
+
+async function onAll() {
+    if (!gameCtx) await onLoadSave();
+    if (!gameCtx) return;
+
+    const btn = $("all-btn");
+    btn.disabled = true;
+    const box = $("schematic");
+    box.innerHTML = `<div style="padding:16px;color:#6b7280">求解全部需求图形中…</div>`;
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+        const set = $("level-set").value === "game" ? "full" : "demo";
+        const res = planCampaign({
+            shapes: neededShapes({ set }),
+            patches: gameCtx.patches,
+            hub: gameCtx.hub,
+            buildings: new Set(currentBuildings),
+        });
+        const usedPatches = [];
+        for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
+        for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
+        box.innerHTML = schematicSVG(res.layout, usedPatches, { campaign: true });
+        renderCampaign(res);
+    } catch (e) {
+        box.innerHTML = `<div style="padding:16px;color:#a5342f">${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
 $("load-save-btn").addEventListener("click", onLoadSave);
 $("blueprint-btn").addEventListener("click", onBlueprint);
+$("all-btn").addEventListener("click", onAll);

@@ -39,11 +39,11 @@ export function schematicSVG(layout, patches, opts = {}) {
     for (const p of patches || []) grow(p.x - 2, p.y - 2, 4, 4);
 
     // pick a tile size that keeps the sheet readable
+    const campaign = Array.isArray(layout.plans) && layout.plans.length > 1;
     const spanX = Math.max(1, maxX - minX);
     const spanY = Math.max(1, maxY - minY);
-    const t =
-        opts.tile ??
-        Math.max(8, Math.min(30, Math.floor(1150 / Math.max(spanX, spanY))));
+    const minTile = opts.minTile ?? (campaign ? 12 : 8);
+    const t = opts.tile ?? Math.max(minTile, Math.min(30, Math.floor(1150 / Math.max(spanX, spanY))));
 
     const width = Math.ceil((maxX - minX) * t + pad * 2);
     const height = Math.ceil((maxY - minY) * t + pad * 2);
@@ -93,6 +93,26 @@ export function schematicSVG(layout, patches, opts = {}) {
         `<text x="${px(layout.hub.x + 2)}" y="${py(layout.hub.y + 2) + 5}" font-size="14" font-weight="600" text-anchor="middle" fill="#39404f">HUB</text>`
     );
 
+    // one framed block per factory, numbered like the placement table
+    if (campaign) {
+        out.push(`<g fill="none" stroke="#aab5c9" stroke-dasharray="3 3">`);
+        for (const plan of layout.plans) {
+            if (!plan.bounds) continue;
+            const b = plan.bounds;
+            out.push(`<rect x="${px(b.x)}" y="${py(b.y)}" width="${b.w * t}" height="${b.h * t}" rx="3"/>`);
+        }
+        out.push(`</g>`);
+        out.push(`<g font-size="8" fill="#6a7180">`);
+        for (const plan of layout.plans) {
+            if (!plan.bounds) continue;
+            const b = plan.bounds;
+            out.push(
+                `<text x="${px(b.x)}" y="${Math.max(9, py(b.y) - 3)}">#${plan.index} ${esc(plan.code)}</text>`
+            );
+        }
+        out.push(`</g>`);
+    }
+
     // connections first (under buildings)
     out.push(`<g fill="none" stroke="#4f9d68" stroke-width="2" marker-end="url(#arrow)">`);
     for (const c of layout.connections) {
@@ -118,7 +138,9 @@ export function schematicSVG(layout, patches, opts = {}) {
             `<rect x="${px(b.x)}" y="${py(b.y)}" width="${bw - 2}" height="${bh - 2}" rx="4" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`
         );
         out.push(
-            `<text x="${px(b.x) + 4}" y="${py(b.y) + bh / 2 + 3}" font-size="10" fill="#2f3542">${esc(b.zh)}</text>`
+            `<text x="${px(b.x) + 4}" y="${py(b.y) + bh / 2 + 3}" font-size="${campaign ? 9 : 10}" fill="#2f3542">${esc(
+                b.zh
+            )}</text>`
         );
         // ports
         (info.ins || []).forEach((port, i) => {
@@ -146,9 +168,15 @@ export function schematicSVG(layout, patches, opts = {}) {
                 out.push(`<text x="${x + 5}" y="${y - 3}" font-size="8" fill="#3f7f55">#${i}</text>`);
             }
         });
-        out.push(
-            `<text x="${px(b.x) + 4}" y="${py(b.y) + bh - 4}" font-size="8" fill="#6a7180">${esc(b.stepId)}</text>`
-        );
+        if (campaign) {
+            if (b.plan && b.kind === "base") {
+                out.push(`<text x="${px(b.x) + 2}" y="${py(b.y) - 2}" font-size="7" fill="#8a93a6">#${b.plan}</text>`);
+            }
+        } else {
+            out.push(
+                `<text x="${px(b.x) + 4}" y="${py(b.y) + bh - 4}" font-size="8" fill="#6a7180">${esc(b.stepId)}</text>`
+            );
+        }
     }
 
     // legend
@@ -172,7 +200,9 @@ export function schematicSVG(layout, patches, opts = {}) {
 
     // title
     out.push(
-        `<text x="${width - 16}" y="24" font-size="13" text-anchor="end" fill="#6a7180">tile = ${t}px · 共 ${layout.buildings.length} 个建筑 · 传送带约 ${layout.beltEstimate} 格</text>`
+        `<text x="${width - 16}" y="24" font-size="13" text-anchor="end" fill="#6a7180">tile = ${t}px · 共 ${
+            layout.buildings.length
+        } 个建筑${campaign ? ` · ${layout.plans.length} 种图形` : ""} · 传送带约 ${layout.beltEstimate} 格</text>`
     );
 
     out.push(

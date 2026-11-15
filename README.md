@@ -96,13 +96,16 @@ node server.js --port=8099
 
 ### 验证结果
 
-`node test/run-tests.js`（约 5 秒，92 项检查，全部通过）：
+`node test/run-tests.js`（约 5 秒，121 项检查，全部通过）：
 
 - 编码/旋转/切割/堆叠单元测试（含 GitHub issue #313 里 Level 20 的官方构造步骤）
 - 图纸端口表：逐项对照官方 `ItemEjector/ItemAcceptor` 的 slot 位置（四色上色器的颜色入口在底部）
 - 多出口槽位：`cutHalf` side 1、`cutQuad` q1/q3 的连线从正确出口出发
 - 9 个 DEMO 关卡目标：按各关解锁的建筑求解，全部通过
 - 26 个正式关卡目标：全部求解并模拟校验通过
+- 需求表：关卡目标 + 4 条升级线要的所有 shape 都能解析、能求解
+- 混合矿脉：只能从 `RuRuWuWu` 这类矿脉切出来的象限（风车/星星）能正常规划，缺矿脉时明确拒绝
+- campaign：多工厂共用一张地图时建筑不重叠，每个图形各有一条进 HUB 的传送带
 
 几个代表性结果：
 
@@ -127,6 +130,9 @@ node cli.js map --seed=47742 --radius=3
 
 # 按目标生成图纸：放置清单 + 物料流 + 材料表 + SVG
 node cli.js blueprint "RuCw--Cw:----Ru--" --save=../savegame.bin --out=plan.svg
+
+# 一次解出「所有需要的图形」，所有工厂共用一张地图和同一个 HUB
+node cli.js all --set=demo --save=../savegame.bin --out=plan-all.svg
 ```
 
 - **存档解码**：`"\x01" + LZ-String-base64( "crc32-…" + JSON )`，JSON 里是游戏自己的 key/value 内联格式；`src/savegame.js` 解出 `dump.map.seed` 和 HUB 位置。
@@ -136,6 +142,21 @@ node cli.js blueprint "RuCw--Cw:----Ru--" --save=../savegame.bin --out=plan.svg
   - 加工建筑按依赖深度排布，避开采矿脉，给出每个建筑的 tile 坐标
   - 连接按游戏真实的输入/输出口位置计算（切割机 2×1、堆叠器 2×1、上色器 2×1、四色上色器 4×1、旋转器/采矿机 1×1）
   - 输出 SVG：矿脉、HUB、建筑、输入/输出口、物料流向、传送带格数估算
+
+### 一次解出「所有需要的图形」（`all`）
+
+游戏里写着：**“您生产过的所有图形都会被用于解锁升级”** —— 所以正确打法是别拆旧工厂，一次把整条战役要的 shape 都造出来。`all` 就是干这个的：
+
+```bash
+node cli.js all --set=demo --save=../savegame.bin --out=plan-all.svg
+node cli.js all --set=full --save=../savegame.bin --radius=10
+node cli.js all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
+```
+
+- **需求表**（`src/needs.js`）＝ DEMO/正式版关卡目标 + 4 条升级线（传送带 / 采矿机 / 加工建筑 / 上色）每一档要的 shape，去重后一次解完：试玩版 26 种，正式版 34 种。
+- **排布**（`src/campaign.js`）：所有工厂排在同一张地图上、共用同一个 HUB。采矿机落在最近且还空着的矿脉格（同一矿脉可以插多台），加工建筑按依赖深度排布，多工厂之间不会重叠。
+- **输出**：每种 shape 的建筑数 / 传送带格数 / 需求来源，加总材料表与颜色来源，以及一张带编号框的合并图纸（框上写 `#序号 + shape`，矿脉上的采矿机也标了 `#序号`）。
+- 试玩版里要风车（`W`）的几档升级必须 `--radius=8` 以上才扫得到混合矿脉（`RuRuWuWu` 之类）：地图生成器保证一块矿脉最多只有一个风车象限，所以风车只能“切出来再拼”。
 
 ### 建筑端口（默认朝向，tile 边界中点）
 

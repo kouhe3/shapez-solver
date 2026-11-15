@@ -96,6 +96,8 @@ export class Solver {
         this.memo = new Map();
         this.path = new Set();
         this.pieceTables = new Map();
+        this.baseCodes = [...new Set(opts.baseCodes || [])];
+        this.patchPieces = this.buildPatchPieces(this.baseCodes);
         this.attempts = 0;
         this.maxAttempts = opts.maxAttempts ?? 30000;
         this.splitCap = opts.splitCap ?? 4000;
@@ -113,15 +115,78 @@ export class Solver {
         return this.has(ROTATION_BUILDING[dir]);
     }
 
+    /** is a pure 4-quadrant deposit of this type actually on the map? */
+    hasBase(type) {
+        if (!this.baseCodes.length) return true;
+        return this.baseCodes.includes(`${type}u${type}u${type}u${type}u`);
+    }
+
     /* ---------------- cut pieces ---------------- */
+
+    /**
+     * Atoms the map itself supplies. Every deposit is a 4-quadrant shape —
+     * including mixed ones such as "RuRuRuWu" — so a miner plus the right cut is
+     * a legal starting point for any quadrant that appears in a deposit. Without
+     * this the planner can only start from a uniform "XXXX" deposit, which makes
+     * shapes needing a windmill or star quadrant unplannable.
+     *
+     * @param {string[]} codes deposit shape codes from the scanned map
+     */
+    buildPatchPieces(codes) {
+        const byType = new Map();
+        const add = (type, mask, node, cost) => {
+            if (!byType.has(type)) byType.set(type, new Map());
+            const table = byType.get(type);
+            const known = table.get(mask);
+            if (!known || known.cost > cost) table.set(mask, { mask, node, cost });
+        };
+        for (const code of codes) {
+            let shape;
+            try {
+                shape = S.parse(code);
+            } catch {
+                continue;
+            }
+            if (shape.layers.length !== 1) continue;
+            const layer = shape.layers[0];
+            if (!layer.every((c) => c && c.c === "u" && S.TYPE_CHARS.includes(c.t))) continue;
+            const types = layer.map((c) => c.t);
+            const base = P.baseNode(types[0], code);
+            if (types.every((t) => t === types[0])) add(types[0], 15, base, 0);
+            if (this.has("cutter")) {
+                for (const [side, mask] of [
+                    [0, 0b1100],
+                    [1, 0b0011],
+                ]) {
+                    const qs = [0, 1, 2, 3].filter((q) => mask & (1 << q));
+                    if (qs.every((q) => types[q] === types[qs[0]])) {
+                        add(types[qs[0]], mask, P.cutHalfNode(side, base), 1);
+                    }
+                }
+            }
+            if (this.has("quadCutter")) {
+                for (let q = 0; q < 4; q++) add(types[q], 1 << q, P.cutQuadNode(q, base), 1);
+            }
+        }
+        return byType;
+    }
 
     pieceTable(type) {
         if (this.pieceTables.has(type)) return this.pieceTables.get(type);
         const nodes = new Map();
         const costs = new Map();
-        nodes.set(15, P.baseNode(type));
-        costs.set(15, 0);
-        const queue = [15];
+        const seed = (mask, node, cost) => {
+            const known = costs.get(mask);
+            if (known === undefined || known > cost) {
+                costs.set(mask, cost);
+                nodes.set(mask, node);
+            }
+        };
+        if (this.hasBase(type)) seed(15, P.baseNode(type), 0);
+        for (const piece of this.patchPieces.get(type)?.values() ?? []) {
+            seed(piece.mask, piece.node, piece.cost);
+        }
+        const queue = [...nodes.keys()];
         while (queue.length) {
             queue.sort((a, b) => costs.get(a) - costs.get(b));
             const mask = queue.shift();
@@ -398,7 +463,8 @@ export class Solver {
                 if (
                     t &&
                     S.TYPE_CHARS.includes(t) &&
-                    layer.every((c) => c && c.t === t && c.c === "u")
+                    layer.every((c) => c && c.t === t && c.c === "u") &&
+                    this.hasBase(t)
                 ) {
                     consider(P.baseNode(t));
                 }

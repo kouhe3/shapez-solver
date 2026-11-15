@@ -10,9 +10,7 @@
  * y grows downwards (screen/tile space, same as the game).
  */
 
-import * as S from "./shape.js";
 import * as P from "./plan.js";
-import { nearestPatch } from "./map.js";
 
 export const BUILDING_INFO = {
     base: {
@@ -118,14 +116,151 @@ function patchCells(patch) {
 
 const COLOR_NEEDS = { y: ["r", "g"], p: ["r", "b"], c: ["g", "b"], w: ["r", "g", "b"] };
 
+/** the hub occupies a 4×4 tile block; belts may enter it on any side */
+const HUB_SIZE = 4;
+
+/**
+ * Tile centre on the hub's border closest to (x, y) — where the last belt
+ * enters the hub. Entry points sit on the border ring so the arrow lands on
+ * the hub itself rather than inside it.
+ */
+function hubEntry(hub, x, y) {
+    let best = { x: hub.x + 0.5, y: hub.y + 0.5 };
+    let bestD = Infinity;
+    for (let dx = 0; dx < HUB_SIZE; dx++) {
+        for (let dy = 0; dy < HUB_SIZE; dy++) {
+            if (dx !== 0 && dx !== HUB_SIZE - 1 && dy !== 0 && dy !== HUB_SIZE - 1) continue;
+            const cx = hub.x + dx + 0.5;
+            const cy = hub.y + dy + 0.5;
+            const d = Math.abs(cx - x) + Math.abs(cy - y);
+            if (d < bestD) {
+                bestD = d;
+                best = { x: cx, y: cy };
+            }
+        }
+    }
+    return best;
+}
+
+function cellKey(x, y) {
+    return x + "|" + y;
+}
+
+/** tiles covered by a deposit, ordered from its centre outwards */
+function patchCellsByCentre(patch) {
+    return patchCells(patch)
+        .map((c) => ({ x: c.x, y: c.y, d: Math.hypot(c.x - patch.x, c.y - patch.y) }))
+        .sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
+}
+
+/**
+ * Placement state shared by every factory on one map: which tiles are taken and
+ * which belong to a deposit (only a miner may sit on a deposit tile).
+ */
+export function createWorld({ hub, patches }) {
+    const occupied = new Set();
+    const deposits = new Set();
+    for (const p of patches) {
+        for (const c of patchCells(p)) deposits.add(cellKey(c.x, c.y));
+    }
+    for (let dx = 0; dx < HUB_SIZE; dx++) {
+        for (let dy = 0; dy < HUB_SIZE; dy++) occupied.add(cellKey(hub.x + dx, hub.y + dy));
+    }
+    return { hub, patches, occupied, deposits, blocks: [] };
+}
+
+/** a processor may only sit on bare ground */
+function processorFree(world, x, y) {
+    const k = cellKey(x, y);
+    return !world.occupied.has(k) && !world.deposits.has(k);
+}
+
+/**
+ * A miner takes one free tile of the nearest deposit that has one — several
+ * factories (and several steps of one factory) may share a deposit.
+ */
+function placeExtractor(world, predicate, from) {
+    const candidates = world.patches
+        .filter((p) => predicate(p.item))
+        .map((p) => ({ patch: p, distance: Math.hypot(p.x - from.x, p.y - from.y) }))
+        .sort((a, b) => a.distance - b.distance);
+    for (const { patch, distance } of candidates) {
+        for (const cell of patchCellsByCentre(patch)) {
+            if (world.occupied.has(cellKey(cell.x, cell.y))) continue;
+            world.occupied.add(cellKey(cell.x, cell.y));
+            return { patch, distance, x: cell.x, y: cell.y };
+        }
+    }
+    return null;
+}
+
+function blockCollisions(world, x, y, width, height, limit = Infinity) {
+    let hits = 0;
+    for (let i = 0; i < width; i++) {
+        for (let j = 0; j < height; j++) {
+            if (!processorFree(world, x + i, y + j)) {
+                if (++hits >= limit) return hits;
+            }
+        }
+    }
+    return hits;
+}
+
+/**
+ * Block origin for one factory: the nearest window around the hub that no
+ * deposit or existing building sits in, else the emptiest window seen. Windows
+ * may overlap each other — only the buildings packed into them have to be
+ * disjoint — so the grid is fine grained and ordered by distance.
+ */
+function allocateBlock(world, width, height) {
+    const { hub } = world;
+    const stepX = 6;
+    const stepY = 4;
+    const reach = 12;
+    const candidates = [];
+    for (let dx = -reach; dx <= reach; dx++) {
+        for (let dy = -reach; dy <= reach; dy++) {
+            if (!dx && !dy) continue;
+            candidates.push({ dx, dy, d: Math.abs(dx) * stepX + Math.abs(dy) * stepY });
+        }
+    }
+    candidates.sort((a, b) => a.d - b.d || a.dx - b.dx || a.dy - b.dy);
+    let best = null;
+    let bestHits = Infinity;
+    for (const c of candidates) {
+        const x = hub.x + c.dx * stepX;
+        const y = hub.y + c.dy * stepY;
+        const hits = blockCollisions(world, x, y, width, height, bestHits);
+        if (hits < bestHits) {
+            bestHits = hits;
+            best = { x, y, w: width, h: height };
+            if (hits === 0) break;
+        }
+    }
+    if (best) world.blocks.push(best);
+    return best;
+}
+
 /**
  * @param {object} args
  * @param {object} args.plan   plan AST root
  * @param {Array} args.patches map patches (from map.js)
  * @param {{x:number,y:number}} args.hub hub tile origin
- * @param {number} args.blockX factory block x
+ * @param {object} [args.world] shared placement state; omit for a one-off layout
+ * @param {string} [args.idPrefix] namespaces step ids when several plans share a world
+ * @param {string} [args.tag] the target this layout builds (campaign sheets)
  */
-export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3, blockY = -10, blockWidth = 26 }) {
+export function buildLayout({
+    plan,
+    patches,
+    hub = { x: -2, y: -2 },
+    blockWidth = 26,
+    blockHeight = 12,
+    world = null,
+    idPrefix = "",
+    tag = null,
+}) {
+    const shared = world || createWorld({ hub, patches });
     const flat = P.flatten(plan);
     // dependency depth
     const depth = new Map();
@@ -136,49 +271,20 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
         depth.set(step.id, d);
     }
 
-    const occupied = new Set();
-    const key = (x, y) => x + "|" + y;
-
     function fit(info, x, y) {
         for (let dx = 0; dx < info.w; dx++) {
-            for (let dy = 0; dy < info.h; dy++) if (occupied.has(key(x + dx, y + dy))) return false;
+            for (let dy = 0; dy < info.h; dy++) if (!processorFree(shared, x + dx, y + dy)) return false;
         }
         for (let dx = 0; dx < info.w; dx++) {
-            for (let dy = 0; dy < info.h; dy++) occupied.add(key(x + dx, y + dy));
+            for (let dy = 0; dy < info.h; dy++) shared.occupied.add(cellKey(x + dx, y + dy));
         }
         return true;
     }
 
-    // pick a factory block origin that avoids resource patches
-    const blockW = blockWidth;
-    const blockH = 3 * 4; // up to 4 depth rows
-    const candidates = [
-        { x: hub.x + 6, y: hub.y - 6 },
-        { x: hub.x + 6, y: hub.y + 4 },
-        { x: hub.x - 14, y: hub.y - 6 },
-        { x: hub.x - 14, y: hub.y + 4 },
-        { x: hub.x + 2, y: hub.y - 14 },
-        { x: hub.x + 2, y: hub.y + 8 },
-    ];
-    let block = candidates[0];
-    let bestHits = Infinity;
-    for (const c of candidates) {
-        let hits = 0;
-        for (const p of patches) {
-            for (const cell of patchCells(p)) {
-                if (cell.x >= c.x && cell.x < c.x + blockW && cell.y >= c.y && cell.y < c.y + blockH) hits++;
-            }
-        }
-        if (hits < bestHits) {
-            bestHits = hits;
-            block = c;
-        }
-    }
-    blockX = block.x;
-    blockY = block.y;
-
-    // reserve the hub
-    for (let dx = 0; dx < 4; dx++) for (let dy = 0; dy < 4; dy++) occupied.add(key(hub.x + dx, hub.y + dy));
+    const hasProcessors = flat.steps.some((s) => s.op !== "base");
+    const block = hasProcessors ? allocateBlock(shared, blockWidth, blockHeight) : null;
+    const blockX = block ? block.x : hub.x + 8;
+    const blockY = block ? block.y : hub.y - 8;
 
     const buildings = [];
     const sources = [];
@@ -188,36 +294,29 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
     for (const step of flat.steps) {
         if (step.op !== "base") continue;
         const type = step.node.type;
-        const code = `${type}u${type}u${type}u${type}u`;
-        const found = nearestPatch(
-            patches,
-            (item) => item.kind === "shape" && item.code === code,
-            { x: hub.x + 2, y: hub.y + 2 }
-        );
+        const code = step.node.code || `${type}u${type}u${type}u${type}u`;
+        const found = placeExtractor(shared, (item) => item.kind === "shape" && item.code === code, {
+            x: hub.x + 2,
+            y: hub.y + 2,
+        });
         if (!found) {
             missing.add(`shape:${code}`);
             sources.push({ step, missing: `地图上找不到 ${code} 矿脉`, patch: null });
             continue;
         }
-        const px = Math.round(found.patch.x);
-        const py = Math.round(found.patch.y);
-        sources.push({ step, patch: found.patch, distance: found.distance, x: px, y: py });
+        sources.push({ step, patch: found.patch, distance: found.distance, x: found.x, y: found.y });
         buildings.push({
-            stepId: step.id,
+            step: step.id,
+            stepId: idPrefix + step.id,
             kind: "base",
             zh: "采矿机",
-            x: px,
-            y: py,
+            x: found.x,
+            y: found.y,
             w: 1,
             h: 1,
             patch: found.patch,
             distance: found.distance,
         });
-    }
-
-    // keep processors off the resource patches
-    for (const p of patches) {
-        for (const cell of patchCells(p)) occupied.add(key(cell.x, cell.y));
     }
 
     // 2) pack processors into rows, grouped by depth
@@ -252,7 +351,8 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
             }
             if (!placed) continue;
             buildings.push({
-                stepId: step.id,
+                step: step.id,
+                stepId: idPrefix + step.id,
                 kind: step.op,
                 zh: info.zh,
                 x: cx,
@@ -271,7 +371,7 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
         }
     }
 
-    const buildingByStep = new Map(buildings.map((b) => [b.stepId, b]));
+    const buildingByStep = new Map(buildings.map((b) => [b.step, b]));
 
     // 3) connections + belt lengths
     const connections = [];
@@ -294,7 +394,8 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
             const x2 = target.x + inPort.x;
             const y2 = target.y + inPort.y;
             const len = Math.abs(x2 - x1) + Math.abs(y2 - y1);
-            beltEstimate += Math.max(1, len);
+            const beltTiles = Math.max(1, Math.round(len));
+            beltEstimate += beltTiles;
             connections.push({
                 from: src.stepId,
                 to: target.stepId,
@@ -308,7 +409,38 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
                 x2,
                 y2,
                 length: len,
+                beltTiles,
             });
+        });
+    }
+
+    // 3b) the finished product itself still has to be belted into the hub
+    const rootBuilding = buildingByStep.get(flat.final.id);
+    if (rootBuilding) {
+        const rInfo = BUILDING_INFO[rootBuilding.kind];
+        const outSlot = outputSlot(flat.final);
+        const outPort = rInfo.outs[outSlot] || rInfo.outs[0];
+        const x1 = rootBuilding.x + outPort.x;
+        const y1 = rootBuilding.y + outPort.y;
+        const entry = hubEntry(hub, x1, y1);
+        const len = Math.abs(entry.x - x1) + Math.abs(entry.y - y1);
+        const beltTiles = Math.max(1, Math.round(len));
+        beltEstimate += beltTiles;
+        connections.push({
+            from: rootBuilding.stepId,
+            to: "HUB",
+            toHub: true,
+            slot: null,
+            fromLabel: rInfo.zh,
+            toLabel: "枢纽",
+            outSlot,
+            outCount: rInfo.outs.length,
+            x1,
+            y1,
+            x2: entry.x,
+            y2: entry.y,
+            length: len,
+            beltTiles,
         });
     }
 
@@ -337,6 +469,9 @@ export function buildLayout({ plan, patches, hub = { x: -2, y: -2 }, blockX = 3,
 
     return {
         hub,
+        tag,
+        block,
+        world: shared,
         buildings,
         connections,
         sources,

@@ -19,6 +19,8 @@ import { scanMap, itemLabel, availableResources } from "./src/map.js";
 import { decodeSavegame } from "./src/savegame.js";
 import { buildLayout } from "./src/layout.js";
 import { schematicSVG } from "./src/schematic.js";
+import { neededShapes, describeSource, NEED_SETS } from "./src/needs.js";
+import { planCampaign } from "./src/campaign.js";
 import fs from "node:fs";
 
 const args = process.argv.slice(2);
@@ -214,13 +216,14 @@ function cmdBlueprint() {
     const radius = Number(flags.get("radius") ?? 4);
     const patches = scanMap(ctx.seed, { chunkRadius: radius });
     const buildings = flags.get("level") ? resolveBuildings() : new Set(ALL_BUILDINGS);
-    const res = solve(code, { buildings, maxAttempts: Number(flags.get("budget") ?? 30000) });
+    const baseCodes = [...new Set(patches.filter((p) => p.item.kind === "shape").map((p) => p.item.code))];
+    const res = solve(code, { buildings, baseCodes, maxAttempts: Number(flags.get("budget") ?? 30000) });
     if (!res.ok) {
         console.error(`无法求解: ${res.error}`);
         process.exit(1);
     }
     const layout = buildLayout({ plan: res.plan, patches, hub: ctx.hub });
-    console.log(`目标: ${S.hash(res.target)}  建筑数 ${res.cost}`);
+    console.log(`目标: ${S.hash(res.target)}  建筑数 ${layout.buildings.length}`);
     console.log(`\n放置清单 (tile 坐标, 右下为 +x/+y):`);
     for (const b of layout.buildings) {
         const extra = b.kind === "base" ? `  矿脉 ${itemLabel(b.patch && b.patch.item)}  距离 ${b.distance.toFixed(1)}` : b.detail ? `  ${b.detail}` : "";
@@ -229,7 +232,8 @@ function cmdBlueprint() {
     console.log(`\n物料流 (来源 → 目标, 传送带格数):`);
     for (const c of layout.connections) {
         const out = c.outCount > 1 ? ` 输出#${c.outSlot}` : "";
-        console.log(`  ${c.from} (${c.fromLabel})${out} → ${c.to} (${c.toLabel}) 输入#${c.slot}   ${c.length} 格`);
+        const dest = c.toHub ? "HUB (枢纽)" : `${c.to} (${c.toLabel}) 输入#${c.slot}`;
+        console.log(`  ${c.from} (${c.fromLabel})${out} → ${dest}   ${c.beltTiles} 格`);
     }
     console.log(`\n建筑清单: ${layout.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
     console.log(`传送带约 ${layout.beltEstimate} 格`);
@@ -245,6 +249,101 @@ function cmdBlueprint() {
     const svg = schematicSVG(layout, usedPatches);
     if (outPath) {
         fs.writeFileSync(String(outPath), svg, "utf8");
+        console.log(`\n图纸已写入 ${outPath}`);
+    }
+}
+
+/** terminal column width: CJK glyphs take two cells */
+function displayWidth(text) {
+    let n = 0;
+    for (const ch of String(text)) {
+        n += /[\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1;
+    }
+    return n;
+}
+
+function pad(text, width) {
+    const s = String(text);
+    const w = displayWidth(s);
+    return w >= width ? s : s + " ".repeat(width - w);
+}
+
+function cmdAll() {
+    const set = String(flags.get("set") ?? "demo");
+    const custom = flags.get("code") ?? positional[0];
+    const shapes = custom
+        ? String(custom)
+              .split(",")
+              .map((c) => c.trim())
+              .filter(Boolean)
+              .map((code) => ({ code, sources: [] }))
+        : neededShapes({ set });
+
+    const ctx = loadMapContext();
+    const radius = Number(flags.get("radius") ?? 8);
+    const patches = scanMap(ctx.seed, { chunkRadius: radius });
+    const res = planCampaign({
+        shapes,
+        patches,
+        hub: ctx.hub,
+        maxAttempts: Number(flags.get("budget") ?? 30000),
+        buildings: flags.get("level") ? resolveBuildings() : null,
+    });
+
+    if (flags.get("json")) {
+        console.log(
+            JSON.stringify(
+                {
+                    set: custom ? "custom" : set,
+                    seed: ctx.seed,
+                    hub: ctx.hub,
+                    totals: res.totals,
+                    entries: res.entries,
+                    bom: res.layout.bom,
+                    colors: res.layout.colors.map((c) =>
+                        c.direct
+                            ? { color: c.color, direct: true, patch: { x: c.patch.x, y: c.patch.y } }
+                            : { color: c.color, direct: false, mix: c.mix }
+                    ),
+                    missing: res.layout.missing,
+                    belts: res.layout.beltEstimate,
+                },
+                null,
+                2
+            )
+        );
+    } else {
+        const label = NEED_SETS[set] ? NEED_SETS[set].label : set;
+        console.log(`全部需求图形（${label}）: ${shapes.length} 种\n`);
+        console.log(` ${pad("#", 4)}${pad("图形", 28)}${pad("建筑", 6)}${pad("传送带", 8)}来源`);
+        for (const e of res.entries) {
+            const why = e.sources.map(describeSource).join(" / ");
+            if (!e.ok) {
+                console.log(` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}无法求解: ${e.error}`);
+                continue;
+            }
+            const gap = e.missing.length ? `  ⚠ 缺矿脉 ${e.missing.map((m) => m.replace(/^shape:/, "")).join(", ")}` : "";
+            console.log(` ${pad(e.index, 4)}${pad(e.code, 28)}${pad(e.buildings, 6)}${pad(e.belts, 8)}${why}${gap}`);
+        }
+        console.log(
+            `\n合计: ${res.totals.shapes} 种 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
+                (res.totals.failed ? ` · ${res.totals.failed} 种无法求解` : "") +
+                (res.totals.unbuildable ? ` · ${res.totals.unbuildable} 种缺矿脉` : "")
+        );
+        console.log(`材料: ${res.layout.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
+        for (const c of res.layout.colors) {
+            if (c.direct) console.log(`颜色 ${c.color}: 地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`);
+            else console.log(`颜色 ${c.color}: 无直接矿脉，需混合 ${c.mix.join("+")}`);
+        }
+        for (const m of res.layout.missing) console.log(`缺失资源: ${m}`);
+    }
+
+    const outPath = flags.get("out");
+    if (outPath) {
+        const usedPatches = [];
+        for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
+        for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
+        fs.writeFileSync(String(outPath), schematicSVG(res.layout, usedPatches, { campaign: true }), "utf8");
         console.log(`\n图纸已写入 ${outPath}`);
     }
 }
@@ -268,6 +367,9 @@ switch (command) {
     case "blueprint":
         cmdBlueprint();
         break;
+    case "all":
+        cmdAll();
+        break;
     default:
         console.log(`shapez 通用机器求解器
 
@@ -278,6 +380,7 @@ switch (command) {
   check             运行回归测试(单元 + 全关卡)
   map               读取地图(矿脉/颜色)  --save=<savegame.bin> 或 --seed=N
   blueprint <shape> 输出放置清单 + SVG 图纸
+  all               一次解出所有需要的图形(关卡+升级), 共用地图与 HUB
 
 选项:
   --json            输出机器可读的 JSON
@@ -287,5 +390,7 @@ switch (command) {
   --seed=<n>        直接用地图种子
   --radius=<n>      扫描的 chunk 半径
   --out=<file.svg>  blueprint: 输出图纸
+  --set=demo|full   all: 需求集合 (默认 demo)
+  --code=A,B,C      all: 只解指定图形
 `);
 }
