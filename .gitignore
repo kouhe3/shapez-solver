@@ -1,0 +1,11 @@
+/vendor/
+/ref
+
+# runtime / scratch artifacts
+/server.log
+/solver-server.log
+/tree.json
+/savegame.raw.json
+/savegame.json
+/preview-cu.svg
+/solver/tmp-sg.mjs
