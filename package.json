@@ -11,7 +11,8 @@
     "check:tunnels": "bun tools/check-tunnels.ts",
     "check:filter": "bun tools/check-test-filter.ts",
     "cli": "bun solver/cli.ts",
-    "serve": "bun solver/server.ts"
+    "serve": "bun solver/server.ts",
+    "bench:key": "bun tools/bench-key-cost.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.4"

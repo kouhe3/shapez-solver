@@ -24,7 +24,7 @@ import { neededShapes, requiredTypes } from "../solver/src/needs.ts";
 import { scanForTypes } from "../solver/src/map.ts";
 import { ALL_BUILDINGS } from "../solver/src/solver.ts";
 import { DEMO_LEVELS, FULL_LEVELS } from "../solver/src/levels.ts";
-import { BUILDING_INFO, portApproachCells, portCells } from "../solver/src/layout.ts";
+import { BUILDING_INFO, cellKey, portApproachCells, portCells } from "../solver/src/layout.ts";
 import type { Tile, TunnelSpan } from "../solver/src/layout.ts";
 
 /** tier-0 tunnel range (`vendor/shapez.io/src/js/core/config.js:91`) */
@@ -200,25 +200,25 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
             // remember it, no surface belt shares an end tile
             const d = dirIndex(dx, dy);
             for (const end of [span.sender, span.receiver]) {
-                const k = keyOf(end);
+                const k = cellKey(end.x, end.y);
                 if (world.tunnelEnds.get(k) !== d) report.bookkeeping++;
                 if (world.belts.has(k)) report.endOnBelt++;
             }
             for (const cell of span.cells) {
-                const k = keyOf(cell);
+                const k = cellKey(cell.x, cell.y);
                 if (((world.tunnelUnder.get(k) || 0) >>> d & 1) === 0) report.bookkeeping++;
             }
         }
         // a crossing the router recorded must be one of this connection's
         // underground tiles and must still carry the over-belt
         for (const cell of c.tunnelCells) {
-            if (!undergroundKeys.has(keyOf(cell)) || !world.belts.has(keyOf(cell))) report.bookkeeping++;
+            if (!undergroundKeys.has(keyOf(cell)) || !world.belts.has(cellKey(cell.x, cell.y))) report.bookkeeping++;
         }
         // every path tile that is not an end or underground must carry a belt
         for (const cell of path) {
             const k = keyOf(cell);
             if (undergroundKeys.has(k) || connectionEndKeys.has(k)) continue;
-            if (!world.belts.has(k)) report.coverage++;
+            if (!world.belts.has(cellKey(cell.x, cell.y))) report.coverage++;
         }
         // no stale ends / under-cells beyond what the paths claim: a global
         // count keeps a buggy claim from hiding behind the per-path checks
@@ -248,11 +248,11 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
     }
     for (const end of ends) {
         const d = dirIndex(end.dx, end.dy);
-        if ((((world.tunnelUnder.get(keyOf(end.cell)) || 0) >>> d) & 1) !== 0) report.hijack++;
+        if ((((world.tunnelUnder.get(cellKey(end.cell.x, end.cell.y)) || 0) >>> d) & 1) !== 0) report.hijack++;
     }
 
     // the world's end table must be exactly the ends the paths claim
-    const claimedEnds = new Set(ends.map((end) => keyOf(end.cell)));
+    const claimedEnds = new Set(ends.map((end) => cellKey(end.cell.x, end.cell.y)));
     for (const k of claimedEnds) if (!world.tunnelEnds.has(k)) report.bookkeeping++;
     for (const [k] of world.tunnelEnds) if (!claimedEnds.has(k)) report.bookkeeping++;
 

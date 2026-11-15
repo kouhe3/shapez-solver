@@ -67,33 +67,33 @@ export interface World {
     hub: Tile;
     patches: Patch[];
     /** tiles taken by a building, a port or an approach corridor */
-    occupied: Set<string>;
+    occupied: Set<number>;
     /** tiles belonging to a deposit; only a miner may sit on one */
-    deposits: Set<string>;
+    deposits: Set<number>;
     /** windows reserved for factories so far */
     blocks: BlockRect[];
     /** machine bodies and port tiles; never carry a belt */
-    walls: Set<string>;
+    walls: Set<number>;
     /** tiles a belt must run through to reach a port; never built on */
-    approaches: Set<string>;
+    approaches: Set<number>;
     /** tile key → the belt already laid there */
-    belts: Map<string, BeltHeading>;
+    belts: Map<number, BeltHeading>;
     /** tiles where one belt passes under another through a tunnel */
-    tunnelCells: Set<string>;
+    tunnelCells: Set<number>;
     /**
      * tile key → the direction index (see `ROUTE_DIRS`) of the tunnel end
      * sitting there. A tunnel end is a surface building: no belt shares its
      * tile, but another belt may pass underneath it.
      */
-    tunnelEnds: Map<string, number>;
+    tunnelEnds: Map<number, number>;
     /**
      * tile key → bitmask of the directions of the tunnels running underneath.
      * A tunnel end placed above a run of the same direction would hijack or
      * break that run's link, so the router refuses it.
      */
-    tunnelUnder: Map<string, number>;
+    tunnelUnder: Map<number, number>;
     /** outside tiles already claimed by a belt feeding the hub */
-    hubApproaches: Set<string>;
+    hubApproaches: Set<number>;
 }
 
 /** what `createWorld` needs to know about a map */
@@ -301,7 +301,7 @@ export interface RouteOptions {
     /** a belt may cross a perpendicular belt through a tunnel */
     allowCross?: boolean;
     /** extra tiles this link may enter although `blocked` lists them */
-    exempt?: ReadonlySet<string> | null;
+    exempt?: ReadonlySet<number> | null;
     /** the goal tile may already hold a belt: the run merges into it */
     goalMayJoin?: boolean;
     /** direction a sender sitting on the source port tile has to face */
@@ -525,6 +525,9 @@ const MAX_UNDERGROUND = 4;
 /** search phases: 0 surface, 1..MAX_UNDERGROUND underground, 5 receiver */
 const PHASES = MAX_UNDERGROUND + 2;
 
+/** Dijkstra "unvisited"; a 32-bit sentinel lets `dist` stay an Int32Array */
+const ROUTE_INF = 0x7fffffff;
+
 /**
  * Shortest legal belt run between two port tiles, as the game would lay it.
  *
@@ -542,7 +545,7 @@ const PHASES = MAX_UNDERGROUND + 2;
  * staircase; crossing a belt costs 3 and a completed tunnel end another 2, so
  * the router prefers short, shallow tunnels.
  */
-export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
+export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
     const margin = opts.margin ?? 20;
     const minX = Math.min(start.x, goal.x) - margin;
     const maxX = Math.max(start.x, goal.x) + margin;
@@ -563,15 +566,17 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
         // state = (tile * PHASES + phase) * 4 + heading. phase 0 = surface belt,
         // 1..4 = under the ground with that many tiles already underground, 5 =
         // just surfaced at the receiver; the receiver has to go straight once.
-        const dist = new Float64Array(size * PHASES * 4).fill(Infinity);
-        const from = new Int32Array(size * PHASES * 4).fill(-1);
+        const totalStates = size * PHASES * 4;
+        const dist = new Int32Array(totalStates).fill(ROUTE_INF);
+        const from = new Int32Array(totalStates).fill(-1);
         const buckets: number[][] = [];
         const push = (state: number, cost: number): void => {
             (buckets[cost] || (buckets[cost] = [])).push(state);
         };
         for (let d = 0; d < 4; d++) {
-            dist[startIndex * PHASES * 4 + d] = 0;
-            push(startIndex * PHASES * 4 + d, 0);
+            const s = startIndex * PHASES * 4 + d;
+            dist[s] = 0;
+            push(s, 0);
         }
         const stateOf = (cell: number, phase: number, heading: number): number => (cell * PHASES + phase) * 4 + heading;
         const relax = (next: number, total: number, state: number): void => {
@@ -579,6 +584,23 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
             dist[next] = total;
             from[next] = state;
             push(next, total);
+        };
+
+        /**
+         * may the belt dive at `cell` (arrived with `heading`) facing `d`? A
+         * sender on the source port has to face the machine's eject side; a
+         * tunnel of the same direction already running underneath would
+         * hijack (or break) its link.
+         */
+        const senderOk = (d: number, cell: number, heading: number, curKey: number): boolean => {
+            const dir = ROUTE_DIRS[d]!;
+            if (cell === startIndex) {
+                const sd = opts.startDir;
+                if (!sd || sd[0] !== dir[0] || sd[1] !== dir[1]) return false;
+            } else if (d !== heading) {
+                return false;
+            }
+            return (((world.tunnelUnder.get(curKey) || 0) >>> d) & 1) === 0;
         };
 
         let best = -1;
@@ -589,7 +611,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
                 const state = bucket.pop();
                 if (state === undefined) continue;
                 if (dist[state] !== cost) continue;
-                const cell = Math.floor(state / (PHASES * 4));
+                const cell = (state / (PHASES * 4)) | 0;
                 const rest = state % (PHASES * 4);
                 const phase = rest >> 2;
                 const heading = rest & 3;
@@ -598,27 +620,11 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
                     break search;
                 }
                 const cx = (cell % width) + minX;
-                const cy = Math.floor(cell / width) + minY;
+                const cy = ((cell / width) | 0) + minY;
                 const curKey = cellKey(cx, cy);
                 // a belt cannot step back onto the tile it just left: the two belts
                 // would share one tile, which the game does not allow
-                const prevCell = from[state]! >= 0 ? Math.floor(from[state]! / (PHASES * 4)) : -1;
-
-                /** may the belt dive here, facing d? */
-                const senderOk = (d: number): boolean => {
-                    const dir = ROUTE_DIRS[d]!;
-                    if (cell === startIndex) {
-                        // a sender on the source port tile accepts straight from
-                        // the machine, so it has to face the machine's eject side
-                        const sd = opts.startDir;
-                        if (!sd || sd[0] !== dir[0] || sd[1] !== dir[1]) return false;
-                    } else if (d !== heading) {
-                        return false;
-                    }
-                    // a tunnel of the same direction already running underneath
-                    // would find this end and hijack (or break) its link
-                    return (((world.tunnelUnder.get(curKey) || 0) >>> d) & 1) === 0;
-                };
+                const prevCell = from[state]! >= 0 ? (from[state]! / (PHASES * 4)) | 0 : -1;
 
                 if (phase === 0) {
                     for (let d = 0; d < 4; d++) {
@@ -642,7 +648,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
                             }
                             // the tunnel runs under a perpendicular belt, never along one
                             if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
-                            if (world.tunnelCells.has(nk) || !senderOk(d)) continue;
+                            if (world.tunnelCells.has(nk) || !senderOk(d, cell, heading, curKey)) continue;
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
@@ -652,7 +658,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
                             // end is a building, so the run cannot finish there
                             if (isGoal) continue;
                             // an existing tunnel end is a building: pass under it only
-                            if (!opts.allowCross || endDir === d || !senderOk(d)) continue;
+                            if (!opts.allowCross || endDir === d || !senderOk(d, cell, heading, curKey)) continue;
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
@@ -780,7 +786,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<string>, start: Til
     // claim the tunnels: ends become buildings (no belt, but passable
     // underground); the underground tiles remember their direction so a later
     // tunnel end above them cannot hijack the link
-    const ends = new Set<string>();
+    const ends = new Set<number>();
     for (const span of spans) {
         const d = ROUTE_DIRS.findIndex((dir) => dir[0] === span.dx && dir[1] === span.dy);
         for (const c of span.cells) {
@@ -882,8 +888,17 @@ function hubBorderOf(hub: Tile, tile: Tile): Tile {
     return { x: hub.x + HUB_SIZE - 1, y: tile.y };
 }
 
-function cellKey(x: number, y: number): string {
-    return x + "|" + y;
+/**
+ * Packed tile key: `(x + 4096) * 8192 + (y + 4096)`.
+ *
+ * Numeric keys make the router's per-neighbour `Map`/`Set` lookups ~16× faster
+ * than `"x|y"` strings (`bun run bench:key`, JSC). ±4096 tiles is far
+ * outside any coordinate this tool reaches (map scan radius ≤ 32, campaign
+ * blocks within a few hundred tiles). Exported so tests and the tunnel census
+ * can address `World` containers directly.
+ */
+export function cellKey(x: number, y: number): number {
+    return (x + 4096) * 8192 + (y + 4096);
 }
 
 /** tiles covered by a deposit, ordered from its centre outwards */
@@ -898,8 +913,8 @@ function patchCellsByCentre(patch: Patch): (Tile & { d: number })[] {
  * which belong to a deposit (only a miner may sit on a deposit tile).
  */
 export function createWorld({ hub, patches }: WorldInit): World {
-    const occupied = new Set<string>();
-    const deposits = new Set<string>();
+    const occupied = new Set<number>();
+    const deposits = new Set<number>();
     for (const p of patches) {
         for (const c of patchCells(p)) deposits.add(cellKey(c.x, c.y));
     }
@@ -908,7 +923,7 @@ export function createWorld({ hub, patches }: WorldInit): World {
     }
     // machine bodies and their port tiles never carry a belt; kept across
     // factories so a later route cannot cut through an earlier factory
-    const walls = new Set<string>();
+    const walls = new Set<number>();
     for (let dx = 0; dx < HUB_SIZE; dx++) {
         for (let dy = 0; dy < HUB_SIZE; dy++) walls.add(cellKey(hub.x + dx, hub.y + dy));
     }
@@ -920,17 +935,17 @@ export function createWorld({ hub, patches }: WorldInit): World {
         blocks: [],
         walls,
         /** tiles a belt must run through to reach a port; never built on */
-        approaches: new Set<string>(),
+        approaches: new Set<number>(),
         /** tile → "h" | "v" | "turn": the belt already laid there */
-        belts: new Map<string, BeltHeading>(),
+        belts: new Map<number, BeltHeading>(),
         /** tiles where one belt passes under another through a tunnel */
-        tunnelCells: new Set<string>(),
+        tunnelCells: new Set<number>(),
         /** tile → direction index of the tunnel end building sitting there */
-        tunnelEnds: new Map<string, number>(),
+        tunnelEnds: new Map<number, number>(),
         /** tile → bitmask of tunnel directions running underneath */
-        tunnelUnder: new Map<string, number>(),
+        tunnelUnder: new Map<number, number>(),
         /** outside tiles already claimed by a belt feeding the hub */
-        hubApproaches: new Set<string>(),
+        hubApproaches: new Set<number>(),
     };
 }
 
@@ -1523,14 +1538,14 @@ export function buildLayout({
     // through the two port tiles of its own link, and crossing an existing
     // belt needs a tunnel.
     // a route may not cut through another port's approach corridor either
-    const blocked = new Set<string>([...shared.walls, ...shared.approaches]);
+    const blocked = new Set<number>([...shared.walls, ...shared.approaches]);
     const allowCross = allowTunnels !== false;
     const routingGaps: RoutingGap[] = [];
     const route = (
         start: Tile,
         goal: Tile,
         join: boolean,
-        exempt: ReadonlySet<string> | null,
+        exempt: ReadonlySet<number> | null,
         startDir: readonly [number, number] | null,
         goalDir: readonly [number, number] | null
     ): RouteResult | null =>
@@ -1568,7 +1583,7 @@ export function buildLayout({
         const start = portCells(q.srcInfo, q.srcBuilding.x, q.srcBuilding.y)[q.srcInfo.ins.length + q.outSlot];
         const startApproach = portApproachCells(q.srcInfo, q.srcBuilding.x, q.srcBuilding.y)[q.srcInfo.ins.length + q.outSlot];
         const goalApproach = q.toHub ? null : portApproachCells(q.dstInfo, q.dstBuilding.x, q.dstBuilding.y)[q.inSlot];
-        const exempt = new Set<string>();
+        const exempt = new Set<number>();
         for (const cell of [start, goal, startApproach, goalApproach]) if (cell) exempt.add(cellKey(cell.x, cell.y));
         // a sender / receiver on the port tile itself only works when it faces
         // straight out of / into the machine

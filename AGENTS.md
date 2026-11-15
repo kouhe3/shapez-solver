@@ -76,8 +76,9 @@ bun run test                    # 209 checks, seconds
 bun run test:quick              # 174 checks, skips both level loops
 bun run test --filter=router    # only matching sections/labels; no match exits 1
 bun run verify                  # bun check + the full suite
-bun run check:tunnels           # campaign tunnel legality (demo + full, ~25 s)
+bun run check:tunnels           # campaign tunnel legality (demo + full, ~10 s)
 bun run check:filter            # harness self-check: --filter/--timings/section partition (~40 s)
+bun run bench:key               # tile-key microbenchmark: packed numbers vs "x|y" (~3 s)
 bun run fuzz --n=40 --seed=1234 --budget=30000
 
 # Solve / inspect
@@ -140,7 +141,7 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 | `solver/src/shape.ts` | The algebra. A change here propagates through solver, plan, layout and every test. |
 | `solver/src/plan.ts` | Plan AST (`:81` `PlanNode`), evaluation, and the verification oracle (`:137` `evalNode`, `:227` `flatten`, `:322` `verifyPlan`). |
 | `solver/src/solver.ts` | Search order and budgets (`:102-103`), `planShape` (`:432`), family list (`:550`). |
-| `solver/src/layout.ts` | `BUILDING_INFO` port table (`:25`) — single source of tile geometry; then packing, BOM, belt routing. |
+| `solver/src/layout.ts` | `BUILDING_INFO` port table (`:25`) — single source of tile geometry; then packing, BOM, belt routing. `World` containers are keyed by packed-number tiles (`cellKey`, exported for tests and the census). |
 | `solver/src/needs.ts` | Level + upgrade-tier shape requirements, derived from upstream `modes/regular.js`. Feeds `cli.ts all`. |
 | `solver/src/campaign.ts` | Solves every needed shape and packs all factories onto one shared world/hub. |
 | `solver/src/levels.ts` | `DEMO_LEVELS`, `FULL_LEVELS`, `REWARD_BUILDINGS`. The regression corpus; new targets go here and are auto-covered. |
@@ -168,7 +169,7 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 - Covered: shape codec and hashing, rotations, cut/stack, the `BUILDING_INFO` port table against upstream slot indices, connection start slots, map determinism (seed `47742`), savegame round-trip, 9 demo levels, 26 full levels.
 - **Gap to know about:** the level suites assert only `ok` + `verification.ok`, never `cost`. Optimality regressions pass silently — add a cost assertion when you change search order or family priority.
 - Uncovered by tests: `schematic.ts`, `render.ts`, `server.ts`, `web/app.ts`. Verify those by actually starting `bun run serve` and loading `/web/index.html`.
-- **Tunnel legality gate:** `bun run check:tunnels` (`tools/check-tunnels.ts`) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends. It also floors the routed count (demo 44 / full 390; measured 46 / 396). Slow (~25 s), so it is not part of `verify`; run it after touching `routeBelt`, `World` bookkeeping or `schematic.ts`.
+- **Tunnel legality gate:** `bun run check:tunnels` (`tools/check-tunnels.ts`) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends. It also floors the routed count (demo 44 / full 390; measured 46 / 396). Slow (~10 s), so it is not part of `verify`; run it after touching `routeBelt`, `World` bookkeeping or `schematic.ts`. The campaign build is dominated by `routeBelt`; `Map`/`Set` lookups on packed-number tile keys are ~16× faster than on `"x|y"` strings (`bun run bench:key`, F19/F20 in `docs/facts.md`), so keep `World` keyed by numbers.
 - **Harness self-check:** `bun run check:filter` (`tools/check-test-filter.ts`) runs one anchored `--filter=^section$` per `beginSection` and asserts the partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. Slow (~40 s), so it is not part of `verify`; run it after touching `run-tests.ts`.
 - No CI, no coverage tool, no snapshots, no golden SVG comparison. `bun run test` is the entire quality gate; `bun run verify` chains `bun check` in front of it; `bun run check:tunnels` is the campaign-level legality gate.
 - Extend in the obvious place: new algebra case → new `== … ==` block with `check`; new targets → `solver/src/levels.ts`; randomized checking → `fuzz.ts`.
