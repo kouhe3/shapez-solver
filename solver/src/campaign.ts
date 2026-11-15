@@ -10,13 +10,21 @@
 
 import { solve, solve as solveWithAllBuildings, ALL_BUILDINGS } from "./solver.js";
 import { buildLayout, createWorld, sizeColorSupply } from "./layout.js";
+import type { BlockRect, Connection, Layout, LayoutColor, LayoutSource, Placement, PlanFrame, RoutingGap, Tile } from "./layout.js";
 import { chainRate, bottleneck, HUB_SIDES, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
+import type { Bottleneck } from "./rates.js";
 import { availableLevels, buildingsForLevel, FULL_LEVELS } from "./levels.js";
+import type { Level } from "./levels.js";
 import { patchMinerCapacity } from "./map.js";
-import { colorChains } from "./color.js";
+import type { Patch } from "./map.js";
+import { colorChains, isMixedColor } from "./color.js";
+import type { ColorChain } from "./color.js";
+import type { FlatPlan, PlanOp } from "./plan.js";
+import type { ColorChar } from "./shape.js";
+import type { NeededShape, ShapeSource } from "./needs.js";
 
 /** the game building a plan op needs (a miner is always available) */
-const OP_BUILDING = {
+const OP_BUILDING: Record<PlanOp, string | null> = {
     base: null,
     cutHalf: "cutter",
     cutQuad: "quadCutter",
@@ -26,8 +34,153 @@ const OP_BUILDING = {
     paint4: "quadPainter",
 };
 
-/** mixed colours need a mixer chain, base colours only a miner */
-const MIXED_COLORS = new Set(["y", "p", "c", "w"]);
+interface CampaignEntryBase {
+    /** 1-based row number on the sheet */
+    index: number;
+    code: string;
+    sources: ShapeSource[];
+}
+
+export interface CampaignOkEntry extends CampaignEntryBase {
+    ok: true;
+    status: "ok";
+    cost: number;
+    buildings: number;
+    belts: number;
+    bounds: BlockRect | null;
+    missing: string[];
+    rate: number;
+    limit: Bottleneck | null;
+    /** colours the painters of this factory pull, one item per output item */
+    colorPorts: ColorChar[];
+    availableAt: number;
+    /** items the game asks for, summed over every source that needs this shape */
+    amount: number;
+    /** 1 = every colour port owns a chain that keeps up; below that a source caps it */
+    supplyFactor: number;
+    effectiveRate: number;
+    etaNominal: number;
+    eta: number;
+}
+
+export interface CampaignFailedEntry extends CampaignEntryBase {
+    ok: false;
+    status: "failed";
+    /** the solver's reason; `undefined` only when a plan fails its own verification */
+    error: string | undefined;
+    buildings: number;
+    belts: number;
+    bounds: null;
+}
+
+export interface CampaignDeferredEntry extends CampaignEntryBase {
+    ok: false;
+    status: "deferred";
+    availableAt: number;
+    reason: string;
+    buildings: number;
+    belts: number;
+    bounds: null;
+}
+
+export interface CampaignImpossibleEntry extends CampaignEntryBase {
+    ok: false;
+    status: "impossible";
+    availableAt: null;
+    reason: string;
+    buildings: number;
+    belts: number;
+    bounds: null;
+}
+
+export type CampaignEntry = CampaignOkEntry | CampaignFailedEntry | CampaignDeferredEntry | CampaignImpossibleEntry;
+
+/** items/s one colour has to produce, summed over every colour port of every painter */
+export interface CampaignColorDemand {
+    color: ColorChar;
+    rate: number;
+}
+
+/** colour sources the drawn layout does not have yet */
+export interface CampaignColorGap {
+    color: ColorChar;
+    need: number;
+    have: number;
+    kind: string;
+}
+
+/** mixers a deposit cannot hold: every miner needs a free neighbouring tile */
+export interface CampaignCapacityGap {
+    color: ColorChar;
+    need: number;
+    capacity: number;
+}
+
+export interface CampaignThroughput {
+    beltRate: number;
+    minerRate: number;
+    sourceRate: number;
+    colorDemand: CampaignColorDemand[];
+    demandTotal: number;
+    supplyAvailable: number;
+    builtSourceCount: number;
+    demandSizedCount: number;
+    colorGap: CampaignColorGap[];
+    extraSources: number;
+    capacityGap: CampaignCapacityGap[];
+    splitters: number;
+    worstFanout: number;
+    hubInbound: number;
+    hubMerges: number;
+    limitedShapes: number;
+    balancerAt: number | null;
+    tunnelAt: number | null;
+}
+
+export interface CampaignTotals {
+    requested: number;
+    shapes: number;
+    failed: number;
+    deferred: number;
+    impossible: number;
+    unbuildable: number;
+    routingGaps: number;
+    buildings: number;
+    belts: number;
+    untilLevel: number | null;
+    throughput: CampaignThroughput;
+}
+
+/** the campaign sheet: one shared world, one hub, one frame per factory */
+export type CampaignLayout = Omit<Layout, "steps" | "depth" | "plans"> & { plans: PlanFrame[] };
+
+export interface CampaignOptions {
+    /** needed shapes, in build order */
+    shapes: readonly NeededShape[];
+    /** map patches (from map.js) */
+    patches: Patch[];
+    /** hub tile origin */
+    hub: Tile;
+    /** search budget per shape */
+    maxAttempts?: number;
+    /** available buildings; null = all */
+    buildings?: ReadonlySet<string> | null;
+    /**
+     * only plan factories buildable by this level, and never let the search use
+     * a machine unlocked after it
+     */
+    untilLevel?: number | null;
+    /** level table the unlock levels come from */
+    levels?: readonly Level[];
+}
+
+export interface CampaignResult {
+    /** every requested shape was planned, buildable and routed */
+    ok: boolean;
+    entries: CampaignEntry[];
+    layout: CampaignLayout;
+    totals: CampaignTotals;
+}
 
 /**
  * The level a factory can first exist on: the last machine it needs (including
@@ -36,10 +189,15 @@ const MIXED_COLORS = new Set(["y", "p", "c", "w"]);
  * unlocks, so the factory can never be built — the demo ends before the
  * stacker.
  */
-function levelOfPlan(flat, sources, chains, unlock) {
+function levelOfPlan(
+    flat: FlatPlan,
+    sources: readonly ShapeSource[],
+    chains: readonly ColorChain[],
+    unlock: ReadonlyMap<string, number>,
+): number {
     let at = 1;
     let never = false;
-    const require = (building) => {
+    const require = (building: string) => {
         const level = unlock.get(building);
         if (level === undefined) never = true;
         else if (level > at) at = level;
@@ -59,7 +217,7 @@ function levelOfPlan(flat, sources, chains, unlock) {
 }
 
 /** bounding box of a factory, one tile of margin so frames do not touch buildings */
-function boundsOf(buildings) {
+function boundsOf(buildings: readonly Placement[]): BlockRect {
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -73,19 +231,7 @@ function boundsOf(buildings) {
     return { x: minX - 1, y: minY - 1, w: maxX - minX + 2, h: maxY - minY + 2 };
 }
 
-/**
- * @param {object} args
- * @param {Array<{code: string, sources: Array<object>}>} args.shapes needed shapes, in build order
- * @param {Array} args.patches map patches (from map.js)
- * @param {{x:number,y:number}} args.hub hub tile origin
- * @param {number} [args.maxAttempts] search budget per shape
- * @param {Set<string>|null} [args.buildings] available buildings; null = all
- * @param {number|null} [args.untilLevel] only plan factories buildable by this
- *   level, and never let the search use a machine unlocked after it
- * @param {Array} [args.levels] level table the unlock levels come from
- * @returns {{ok: boolean, entries: Array, layout: object, totals: object}}
- *   `ok` = every requested shape was planned, buildable and routed
- */
+/** plan every requested shape on one map; `ok` = all planned, buildable and routed */
 export function planCampaign({
     shapes,
     patches,
@@ -94,7 +240,7 @@ export function planCampaign({
     buildings = null,
     untilLevel = null,
     levels = FULL_LEVELS,
-}) {
+}: CampaignOptions): CampaignResult {
     const world = createWorld({ hub, patches });
     const unlock = availableLevels(levels);
     const tunnelAt = unlock.get("tunnel") || null;
@@ -102,25 +248,26 @@ export function planCampaign({
     const allowTunnels = untilLevel == null || (tunnelAt !== null && untilLevel >= tunnelAt);
     // never plan with a machine this version does not hand out — the demo
     // simply has no stacker — and cap that at the requested level as well
-    const lastLevel = levels.length ? levels[levels.length - 1].level : 0;
+    const last = levels[levels.length - 1];
+    const lastLevel = last ? last.level : 0;
     const cap = buildingsForLevel(levels, untilLevel ?? lastLevel + 1);
     const allowed = new Set([...(buildings ?? ALL_BUILDINGS)].filter((building) => cap.has(building)));
-    const baseCodes = [...new Set(patches.filter((p) => p.item.kind === "shape").map((p) => p.item.code))];
-    const entries = [];
-    const plans = [];
-    const allBuildings = [];
-    const allConnections = [];
-    const allSources = [];
-    const missing = new Set();
-    const bom = new Map();
-    const colors = new Map();
+    const baseCodes = [...new Set(patches.flatMap((p) => (p.item.kind === "shape" ? [p.item.code] : [])))];
+    const entries: CampaignEntry[] = [];
+    const plans: PlanFrame[] = [];
+    const allBuildings: Placement[] = [];
+    const allConnections: Connection[] = [];
+    const allSources: LayoutSource[] = [];
+    const missing = new Set<string>();
+    const bom = new Map<string, number>();
+    const colors = new Map<ColorChar, LayoutColor>();
     let beltEstimate = 0;
     let totalBuildings = 0;
     let failed = 0;
     let deferred = 0;
     let impossible = 0;
     let unbuildable = 0;
-    const gapList = [];
+    const gapList: RoutingGap[] = [];
 
     shapes.forEach((need, i) => {
         const index = i + 1;
@@ -234,14 +381,21 @@ export function planCampaign({
         const processors = layout.buildings.filter((b) => b.kind !== "base");
         const bounds = processors.length ? boundsOf(processors) : null;
         // colour ports this factory pulls, one item per output item
-        const colorPorts = [];
+        const colorPorts: ColorChar[] = [];
         for (const step of layout.steps) {
-            if (step.op === "paint") colorPorts.push(step.node.color);
-            else if (step.op === "paint4") {
+            if (step.op === "paint" && step.node.op === "paint") colorPorts.push(step.node.color);
+            else if (step.op === "paint4" && step.node.op === "paint4") {
                 for (const c of step.node.colors) if (c && c !== "u") colorPorts.push(c);
             }
         }
         const rate = chainRate(layout.steps);
+        // every port owns a chain, so the only limit is a port that outruns a
+        // single source (a 1/s quad painter port would need three miners)
+        const amount = need.sources.reduce((sum, s) => sum + ("required" in s ? s.required : s.amount), 0);
+        const supplyFactor = rate > SOURCE_RATE ? SOURCE_RATE / rate : 1;
+        const effectiveRate = rate * supplyFactor;
+        const etaNominal = amount > 0 && rate > 0 ? amount / rate : 0;
+        const eta = amount > 0 && effectiveRate > 0 ? amount / effectiveRate : 0;
         entries.push({
             index,
             code: need.code,
@@ -257,6 +411,11 @@ export function planCampaign({
             limit: bottleneck(layout.steps),
             colorPorts,
             availableAt,
+            amount,
+            supplyFactor,
+            effectiveRate,
+            etaNominal,
+            eta,
         });
         if (layout.missing.length) unbuildable += 1;
         plans.push({ index, code: need.code, bounds, buildings: layout.buildings.length, rate });
@@ -274,17 +433,18 @@ export function planCampaign({
     // ---- throughput: what each factory can deliver, and what is missing -----
 
     // every colour port of every painter pulls at its factory's chain rate
-    const colorDemand = new Map();
+    const colorDemand = new Map<ColorChar, number>();
     for (const e of entries) {
         if (!e.ok) continue;
         for (const color of e.colorPorts) colorDemand.set(color, (colorDemand.get(color) || 0) + e.rate);
     }
     const supply = sizeColorSupply(colorDemand);
     // what the layout actually built: one chain per colour port
-    const builtSources = new Map();
+    const builtSources = new Map<string, number>();
     for (const b of allBuildings) {
         const m = /^color:([a-z]):/.exec(b.step || "");
-        if (m) builtSources.set(m[1], (builtSources.get(m[1]) || 0) + 1);
+        const key = m ? m[1] : undefined;
+        if (key) builtSources.set(key, (builtSources.get(key) || 0) + 1);
     }
     const builtSourceCount = [...builtSources.values()].reduce((a, b) => a + b, 0);
     const demandSizedCount = [...supply.sources.values()].reduce((a, b) => a + b, 0);
@@ -292,23 +452,16 @@ export function planCampaign({
     let limitedShapes = 0;
     for (const e of entries) {
         if (!e.ok) continue;
-        e.amount = e.sources.reduce((sum, s) => sum + (s.required ?? s.amount ?? 0), 0);
-        // every port owns a chain, so the only limit is a port that outruns a
-        // single source (a 1/s quad painter port would need three miners)
-        e.supplyFactor = e.rate > SOURCE_RATE ? SOURCE_RATE / e.rate : 1;
-        e.effectiveRate = e.rate * e.supplyFactor;
-        e.etaNominal = e.amount > 0 && e.rate > 0 ? e.amount / e.rate : 0;
-        e.eta = e.amount > 0 && e.effectiveRate > 0 ? e.amount / e.effectiveRate : 0;
         if (e.supplyFactor < 0.999) limitedShapes += 1;
     }
 
     // colour sources the layout has to add: it currently builds exactly one
     // chain per colour, so anything above one source is a shortfall
-    const colorGap = [];
+    const colorGap: CampaignColorGap[] = [];
     for (const [color, needCount] of supply.sources) {
         const have = builtSources.get(color) || 0;
         if (have >= needCount) continue;
-        colorGap.push({ color, need: needCount, have, kind: MIXED_COLORS.has(color) ? "混色器" : "采矿机" });
+        colorGap.push({ color, need: needCount, have, kind: isMixedColor(color) ? "混色器" : "采矿机" });
     }
     colorGap.sort((a, b) => b.need - a.need);
     const extraSources = colorGap.reduce((sum, g) => sum + (g.need - g.have), 0);
@@ -318,22 +471,22 @@ export function planCampaign({
     // deposits are lossy: every miner needs a free neighbouring tile to eject
     // into, and one belt takes one tile, so a blocky deposit tops out well below
     // its cell count
-    const minerCapacity = new Map();
+    const minerCapacity = new Map<ColorChar, number>();
     for (const p of patches) {
         if (p.item.kind !== "color") continue;
         const color = p.item.color;
         minerCapacity.set(color, (minerCapacity.get(color) || 0) + patchMinerCapacity(p));
     }
-    const capacityGap = [];
+    const capacityGap: CampaignCapacityGap[] = [];
     for (const [color, needCount] of supply.sources) {
-        if (MIXED_COLORS.has(color)) continue; // mixers are not ground-limited
+        if (isMixedColor(color)) continue; // mixers are not ground-limited
         const capacity = minerCapacity.get(color) || 0;
         if (needCount > capacity) capacityGap.push({ color, need: needCount, capacity });
     }
 
     // one belt per port: every extra belt leaving the same output slot needs a
     // splitter/balancer node in front of it
-    const ports = new Map();
+    const ports = new Map<string, number>();
     for (const c of allConnections) {
         if (c.toHub) continue;
         const key = `${c.from}|${c.outSlot}`;

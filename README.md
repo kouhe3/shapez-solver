@@ -9,19 +9,34 @@
 >
 > 两部分互不依赖：`demo/` 是原样镜像，求解器独立运行，存档通过网页上的文件上传读取，不需要和游戏同源。
 
+## 运行环境
+
+- **Bun ≥ 1.4.4** —— 唯一的运行时。`solver/` 的源码全部是 TypeScript（唯一例外是 vendor 进来的 `lz_factory.js`），`tsconfig.json` 开 `strict` + `noUncheckedIndexedAccess` + `verbatimModuleSyntax`；Bun 直接执行源码，**没有构建步骤、没有打包器**。
+- `bun install` —— 只装一个 devDependency `@types/bun`；**运行时零依赖**（只用 `node:` 内置模块和相对 import）。
+- `bun check` —— 类型门禁（Bun 自带的 TypeScript 检查器；不装 `typescript` 包）。
+- `bun run test` —— 回归测试，182 项检查；`bun run test:quick` 只跑单元部分，147 项；`bun run verify` = `bun check` + 完整测试。
+
+| 文件 | 作用 |
+| --- | --- |
+| `solver/cli.ts` | 命令行入口（`bun run cli`）；在 `solver/` 里也可以直接 `bun cli.ts` |
+| `solver/server.ts` | 网页 UI + JSON API（`bun run serve`） |
+| `solver/src/*.ts` | 求解器内核：形状代数、搜索、地图、布局、图纸 |
+| `solver/src/lz_factory.js` | 上游 LZ-String 原样 vendor（唯一保留的 `.js`；`lz_factory.d.ts` 补类型） |
+| `solver/test/run-tests.ts` | 自定义回归测试（`bun run test`），`fuzz.ts` 是随机对拍 |
+| `solver/web/app.ts` | 浏览器端 UI；请求 `/web/app.js` 时由 Bun 服务器现转译，不落盘 |
+
 ## 输入 seed，产出图纸
 
 ```bash
-cd solver
-node cli.js all 47742             # → plan-47742.svg（DEMO 需求表 · 26 种）
-node cli.js all 47742 --set=full  # 完整版需求表 · 34 种
-node cli.js all 47742 --until=9   # 只画第 9 关时已解锁的产线
+bun run cli all 47742             # → plan-47742.svg（DEMO 需求表 · 26 种）
+bun run cli all 47742 --set=full  # 完整版需求表 · 34 种
+bun run cli all 47742 --until=9   # 只画第 9 关时已解锁的产线
 ```
 
 - 图纸 = 放置清单（tile 坐标）+ 物料流（哪台机器的哪个口接到哪个口、多少格）+ 材料表 + 一张按游戏内元素标注的 SVG（资源色矿脉、形状图标、中心）。
 - `--until=N` 只画第 N 关时能建的工厂：求解器不会再用更晚解锁的机器（四向切割机、堆叠器、四色上色器等），需要更高关卡或本版本根本没有的机器会标「要 L10+」/「不可建」，而不是硬画出来。
 - 种子决定矿脉分布：`S`/`W` 矿脉只在地图外围出现，扫描半径默认自动翻倍，直到需求表要的形状字母都能找到（`--radius=N` 可固定）。
-- 网页版：`node server.js --port=8099` → 打开 <http://127.0.0.1:8099/web/index.html>，在「地图种子」里填数字，点「生成全体图纸」。
+- 网页版：`bun run serve`（默认 8099，`--port=N` 可改）→ 打开 <http://127.0.0.1:8099/>，在「地图种子」里填数字，点「生成全体图纸」。
 
 ---
 
@@ -33,14 +48,14 @@ node cli.js all 47742 --until=9   # 只画第 9 关时已解锁的产线
 `8a79de52` 是同一个 commit。
 
 ```bash
-node setup-ref.mjs
+bun setup-ref.ts
 ```
 
 首次运行会 clone，之后只重建链接。求解器的 shape 运算和建筑端口都以 `ref/` 里的官方实现为准：
 `buildings/*.js`（ItemAcceptor/ItemEjector slot）、`shape_definition.js`（切割/堆叠/旋转/上色）、
 `systems/item_processor.js`（四色上色器的象限顺序）。
 
-> `vendor/` 和 `ref` 是本机生成物，不提交；换机器后重跑一次 `node setup-ref.mjs`。
+> `vendor/` 和 `ref` 是本机生成物，不提交；换机器后重跑一次 `bun setup-ref.ts`。
 
 ---
 
@@ -65,18 +80,16 @@ node setup-ref.mjs
 ## 2. 求解器核心（单图形）
 
 ```bash
-cd solver
-
 # 命令行
-node cli.js solve "RuCw--Cw:----Ru--"
-node cli.js solve "CbCuCbCu:Sr------:--CrSrCr:CwCwCwCw" --json
-node cli.js solve "Cu------" --level=demo:6      # 只用第 6 关时已解锁的建筑
-node cli.js render "RuCw--Cw"
-node cli.js levels --game
-node cli.js check                                 # 单元测试 + 全部关卡
+bun run cli solve "RuCw--Cw:----Ru--"
+bun run cli solve "CbCuCbCu:Sr------:--CrSrCr:CwCwCwCw" --json
+bun run cli solve "Cu------" --level=demo:6      # 只用第 6 关时已解锁的建筑
+bun run cli render "RuCw--Cw"
+bun run cli levels --game
+bun run cli check                                 # CLI 别名，等价于 bun run test
 
 # 网页 UI + JSON API
-node server.js --port=8099
+bun run serve
 # 打开 http://127.0.0.1:8099/
 # GET /api/solve?shape=RuCw--Cw:----Ru--&buildings=cutter,stacker
 ```
@@ -118,7 +131,7 @@ node server.js --port=8099
 
 ### 验证结果
 
-`node test/run-tests.js`（182 项检查，全部通过，秒级）：
+`bun run test`（182 项检查，全部通过，秒级）：
 
 - 编码/旋转/切割/堆叠单元测试（含 GitHub issue #313 里 Level 20 的官方构造步骤）
 - 图纸端口表：逐项对照官方 `ItemEjector/ItemAcceptor` 的 slot 位置（四色上色器的颜色入口在底部）
@@ -148,23 +161,23 @@ node server.js --port=8099
 
 ```bash
 # 读存档：savegame-*.bin 原始内容（或直接给种子）
-node cli.js map --save=../savegame.bin --radius=2
-node cli.js map --seed=47742 --radius=3
+bun run cli map --save=savegame.bin --radius=2
+bun run cli map --seed=47742 --radius=3
 
 # 一次解出「所有需要的图形」，所有工厂共用一张地图和同一个中心
-node cli.js all 47742 --out=plan-all.svg
+bun run cli all 47742 --out=plan-all.svg
 ```
 
-- **存档解码**：`"\x01" + LZ-String-base64( "crc32-…" + JSON )`，JSON 里是游戏自己的 key/value 内联格式；`src/savegame.js` 解出 `dump.map.seed` 和中心位置。
-- **地图重建**：`src/map.js` 是 `map_chunk.js` 的逐行移植（ALEA RNG、`${chunkX}|${chunkY}|${seed}`、预置的 Cu/Ru/红/绿/星矿脉、圆的叠加算法）。实测与游戏画面完全对齐（Cu 在左下、Ru 在右上、红在右下、绿在左上）。
-- **图纸**：`src/layout.js` + `src/schematic.js`
+- **存档解码**：`"\x01" + LZ-String-base64( "crc32-…" + JSON )`，JSON 里是游戏自己的 key/value 内联格式；`solver/src/savegame.ts` 解出 `dump.map.seed` 和中心位置。
+- **地图重建**：`solver/src/map.ts` 是 `map_chunk.js` 的逐行移植（ALEA RNG、`${chunkX}|${chunkY}|${seed}`、预置的 Cu/Ru/红/绿/星矿脉、圆的叠加算法）。实测与游戏画面完全对齐（Cu 在左下、Ru 在右上、红在右下、绿在左上）。
+- **图纸**：`solver/src/layout.ts` + `solver/src/schematic.ts`
   - 每个采矿机自动落到最近的对应矿脉上（给出坐标和距离）
   - 加工建筑按依赖深度排布，避开采矿脉，给出每个建筑的 tile 坐标
   - 连接按游戏真实的输入/输出口位置计算（切割机 2×1、堆叠器 2×1、上色器 2×1、四色上色器 4×1、混色器 2×1、旋转器/采矿机 1×1）
   - 颜色供应：基础色由矿脉上的采矿机给出，混合色由混色器链给出（p=r+b、y=r+g、c=g+b、w=先 r+g 再 +b），每条都接到上色器的颜色入口
   - 输出 SVG 只用游戏地图视图自己的画法：矿脉用主题资源色 + 游戏形状图标；建筑是 `getSilhouetteColor` 的**整块剪影**（采矿机紫、切割机绿、旋转器青、堆叠器黄绿、上色器棕、混色器卡其、垃圾桶红），有 3×3 挖空的零件（采矿机圆环、旋转器、垃圾桶 U 形）按 `getSpecialOverlayRenderMatrix` 画，不自造图标或文字贴图；中心是红色 4×4 + 「中心」；输入口画方口、输出口画箭头；传送带按 router 的逐格路径画游戏地图的深灰带色（`chunkOverview.beltColor = #777`），交叉处画白色小方块（隧道）。1 tile = 22 px，容器内滚动查看
   - **逐格布线**：`routeBelt()` 在 tile 网格上按真实零件尺寸布线——机器本体、所有端口和端口外的引带格都是障碍；两条带交叉要隧道（L6 解锁，且必须垂直），没有合法路径的连接画成**红色虚线**并在表格里报「布线失败 N 条」，不再用直线假装接通
-  - **产能账本**：`src/rates.js` 里是游戏自己的速率（`getProcessorBaseSpeed` = `beltSpeed 2` × 升级 × `buildingSpeeds`，矿机 0.4/s、切割 0.5/s、旋转 2/s、堆叠 0.25/s、上色 2/6/s、四色上色 1/s、混色 0.4/s、带 2/s；升级等级 1）。一座厂 = 一条链，最慢的机器决定产能，所以每张图都给出「多少/分 + 多久交完这条图形要求的数量」
+  - **产能账本**：`solver/src/rates.ts` 里是游戏自己的速率（`getProcessorBaseSpeed` = `beltSpeed 2` × 升级 × `buildingSpeeds`，矿机 0.4/s、切割 0.5/s、旋转 2/s、堆叠 0.25/s、上色 2/6/s、四色上色 1/s、混色 0.4/s、带 2/s；升级等级 1）。一座厂 = 一条链，最慢的机器决定产能，所以每张图都给出「多少/分 + 多久交完这条图形要求的数量」
   - **供给定容与运输缺口**：色料按实际需求定容（每个源 0.4/s；`y/p/c` 消耗两台，`w = mix(mix(r,g),b)` 把需求推到 `y` 和 `b`），并报出还需几台矿机/混色器、一个输出口挂多条带要几个分流节点、进带数超过中心 16 个外侧格时要几个并带
   - **解锁门槛**：奖励是「通关后」才给的，所以平衡器 L4、隧道 L6、上色器 L7、混色器 L9 才能真正用（试玩版与完整版前 5 关一致）；试玩版没有堆叠器，需要它的图形标「不可建」。每个工段都标出「最早在第几关可建」，混合色会把混色器的 L9 算进去（例如青色 `ScScScSc` 是 L9，不是上色器的 L7）
   - **拓扑合法化**：游戏里一个输出口只能接一条带，所以 `expandPlanTree()` 会把被多个父节点复用的子计划按消费者各复制一份（零件免费），色料也改成「每个上色口自带一条链」而不是共享一条再分流。结果是整张图 **0 个多带出口**；中心有 16 个外侧进带格，工厂数超过时才需要并带（L4 后可用平衡器）
@@ -202,16 +215,16 @@ node cli.js all 47742 --out=plan-all.svg
 游戏里写着：**“您生产过的所有图形都会被用于解锁升级”** —— 所以正确打法是别拆旧工厂，一次把整条战役要的 shape 都造出来。`all` 就是干这个的，输入只有地图种子：
 
 ```bash
-node cli.js all 47742                    # → plan-47742.svg（DEMO 26 种）
-node cli.js all 47742 --set=full         # 完整版 34 种
-node cli.js all 47742 --out=base.svg     # 指定图纸路径
-node cli.js all --save=../savegame.bin   # 用存档里的真实种子和中心
-node cli.js all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
+bun run cli all 47742                    # → plan-47742.svg（DEMO 26 种）
+bun run cli all 47742 --set=full         # 完整版 34 种
+bun run cli all 47742 --out=base.svg     # 指定图纸路径
+bun run cli all --save=savegame.bin      # 用存档里的真实种子和中心
+bun run cli all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
 ```
 
-- **需求表**（`src/needs.js`）＝ DEMO/正式版关卡目标 + 4 条升级线（传送带 / 采矿机 / 加工建筑 / 上色）每一档要的 shape，去重后一次解完：试玩版 26 种，正式版 34 种。
-- **矿脉**（`src/map.js`）：地图按种子重建。风车（`W`）/星星（`S`）矿脉只在地图外围生成，`scanForTypes` 从半径 8（正式版 10）开始翻倍，直到需求表用到的形状字母都出现（上限 32），并报出实际半径；固定 `--radius=N` 时缺的字母会被明确警告。
-- **排布**（`src/campaign.js`）：所有工厂排在同一张地图上、共用同一个中心。采矿机落在最近且还空着的矿脉格（同一矿脉可以插多台），加工建筑按依赖深度排布，多工厂之间不会重叠；每个建筑的端口格会被预留，后来排的工厂不会把建筑盖在接口上。颜色链整张图只建一次，所有工厂共用。
+- **需求表**（`solver/src/needs.ts`）＝ DEMO/正式版关卡目标 + 4 条升级线（传送带 / 采矿机 / 加工建筑 / 上色）每一档要的 shape，去重后一次解完：试玩版 26 种，正式版 34 种。
+- **矿脉**（`solver/src/map.ts`）：地图按种子重建。风车（`W`）/星星（`S`）矿脉只在地图外围生成，`scanForTypes` 从半径 8（正式版 10）开始翻倍，直到需求表用到的形状字母都出现（上限 32），并报出实际半径；固定 `--radius=N` 时缺的字母会被明确警告。
+- **排布**（`solver/src/campaign.ts`）：所有工厂排在同一张地图上、共用同一个中心。采矿机落在最近且还空着的矿脉格（同一矿脉可以插多台），加工建筑按依赖深度排布，多工厂之间不会重叠；每个建筑的端口格会被预留，后来排的工厂不会把建筑盖在接口上。颜色链整张图只建一次，所有工厂共用。
 - **输出**：每种 shape 的建筑数 / 传送带格数（不含隧道与平衡器）/ 需求来源，加总材料表与颜色来源，以及一张合并图纸：每个工厂框的左上角画该工厂的目标 shape 图标（游戏内形状渲染），不写自造的编号或 shape 代码；中心画成游戏里的红色 4×4 建筑 + `中心` 标签。
 - 不给 `--out`（且不是 `--json`）时默认写 `plan-<seed>.svg`。
 
@@ -229,9 +242,9 @@ node cli.js all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
 | 混色器 | 2×1 | 下 (0.5,1)、(1.5,1)=两种颜色 | 上 (0.5,0) |
 
 坐标相对建筑左上角，y 向下；多出口建筑的出口编号与游戏 `ItemEjector` 的 slot 下标一致
-（图纸按端口从左到右画，不额外标注编号）。`node test/run-tests.js` 会把这张表逐项和官方源码对齐。
+（图纸按端口从左到右画，不额外标注编号）。`bun run test` 会把这张表逐项和官方源码对齐。
 
-网页版：<http://127.0.0.1:8099/web/index.html>（`node server.js --port=8099`，和 `demo/` 完全独立）。填地图种子 → 点「生成全体图纸」；「读取存档（可选）」用文件上传拿真实的中心位置：支持 Electron 版的 `savegame-*.bin`，或浏览器 IndexedDB `app_storage/files` 里的原始内容（DevTools → Application → IndexedDB 复制出来存成文件即可）。不传存档就按种子画。
+网页版：<http://127.0.0.1:8099/>（`bun run serve`，默认 8099，和 `demo/` 完全独立；Bun 服务器把 `/web/app.js` 的请求转译成 `solver/web/app.ts`，所以没有构建步骤）。填地图种子 → 点「生成全体图纸」；「读取存档（可选）」用文件上传拿真实的中心位置：支持 Electron 版的 `savegame-*.bin`，或浏览器 IndexedDB `app_storage/files` 里的原始内容（DevTools → Application → IndexedDB 复制出来存成文件即可）。不传存档就按种子画。
 
 > 说明：原版 1.5.7 **没有**可导入的蓝图字符串（游戏里的蓝图只是内存里的复制/粘贴，不写进存档），所以这里给的是"坐标级放置清单 + 接口精确的连线图 + 传送带格数"，传送带按图上的连线铺即可。
 

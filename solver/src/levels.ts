@@ -3,6 +3,15 @@
  * Used as a regression corpus and as ready-made targets in the UI.
  */
 
+export interface Level {
+    level: number;
+    shape: string;
+    required: number;
+    reward: string;
+    /** throughput-only levels (L14) are not part of the shape corpus */
+    throughputOnly?: boolean;
+}
+
 /**
  * Which part a reward unlocks, straight from the game's
  * `tutorial_goals_mappings.js` (`enumHubGoalRewardsToContentUnlocked`). A
@@ -13,7 +22,7 @@
  * endless upgrades) stay empty. Transport pieces count too: the balancer, the
  * splitter, the merger and the tunnel gate what a belt layout can do.
  */
-export const REWARD_BUILDINGS = {
+export const REWARD_BUILDINGS: Record<string, readonly string[]> = {
     reward_cutter_and_trash: ["cutter"],
     reward_rotater: ["rotaterCW"],
     reward_painter: ["painter"],
@@ -42,7 +51,7 @@ export const REWARD_BUILDINGS = {
     reward_freeplay: [],
 };
 
-export const DEMO_LEVELS = [
+export const DEMO_LEVELS: Level[] = [
     { level: 1, shape: "CuCuCuCu", required: 10, reward: "reward_cutter_and_trash" },
     { level: 2, shape: "----CuCu", required: 20, reward: "no_reward" },
     { level: 3, shape: "RuRuRuRu", required: 30, reward: "reward_balancer" },
@@ -54,7 +63,7 @@ export const DEMO_LEVELS = [
     { level: 9, shape: "RpRp----", required: 0, reward: "reward_demo_end" },
 ];
 
-export const FULL_LEVELS = [
+export const FULL_LEVELS: Level[] = [
     { level: 1, shape: "CuCuCuCu", required: 30, reward: "reward_cutter_and_trash" },
     { level: 2, shape: "----CuCu", required: 40, reward: "no_reward" },
     { level: 3, shape: "RuRuRuRu", required: 70, reward: "reward_balancer" },
@@ -89,8 +98,8 @@ export const FULL_LEVELS = [
  * appears in no level of this version — the demo ends before the stacker — is
  * absent, which callers must read as "never", not "from L1".
  */
-export function buildingsForLevel(levels, levelNumber) {
-    const set = new Set();
+export function buildingsForLevel(levels: readonly Level[], levelNumber: number): Set<string> {
+    const set = new Set<string>();
     for (const lvl of levels) {
         if (lvl.level >= levelNumber) break;
         for (const b of REWARD_BUILDINGS[lvl.reward] || []) set.add(b);
@@ -104,14 +113,12 @@ export function buildingsForLevel(levels, levelNumber) {
  * which is why the balancer (reward of L3) is a level-4 building. Transport
  * pieces are in the table too, under the names the throughput report uses.
  *
- * @param {Array<{level:number, reward:string}>} levels
- * @returns {Map<string, number>} building → first usable level
+ * @returns building → first usable level
  */
-export function availableLevels(levels) {
-    const map = new Map();
+export function availableLevels(levels: readonly Level[]): Map<string, number> {
+    const map = new Map<string, number>();
     for (const lvl of levels) {
         for (const b of REWARD_BUILDINGS[lvl.reward] || []) if (!map.has(b)) map.set(b, lvl.level + 1);
     }
     return map;
 }
-

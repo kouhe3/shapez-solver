@@ -2,17 +2,22 @@ import * as S from "../src/shape.js";
 import * as P from "../src/plan.js";
 import { shapeSVG } from "../src/render.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
+import type { SolveResult } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, REWARD_BUILDINGS } from "../src/levels.js";
+import type { Level } from "../src/levels.js";
 import { scanMap, scanForTypes, itemLabel } from "../src/map.js";
+import type { Patch } from "../src/map.js";
 import { decodeSavegame, savegameMapInfo } from "../src/savegame.js";
 import { schematicSVG } from "../src/schematic.js";
 import { neededShapes, requiredTypes, describeSource } from "../src/needs.js";
+import type { NeedSetName } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
+import type { CampaignResult } from "../src/campaign.js";
 import { formatRate, formatDuration } from "../src/rates.js";
 import { colorChains } from "../src/color.js";
 import { planBom, expandPlanTree } from "../src/layout.js";
 
-const BUILDING_LABELS = {
+const BUILDING_LABELS: Record<string, string> = {
     cutter: "切割机",
     quadCutter: "四向切割机",
     rotaterCW: "旋转器 (顺时针)",
@@ -23,27 +28,33 @@ const BUILDING_LABELS = {
     quadPainter: "四色上色器",
 };
 
-const $ = (id) => document.getElementById(id);
-const shapeInput = $("shape-input");
-const solveBtn = $("solve-btn");
-const shapeHint = $("shape-hint");
-const preview = $("target-preview");
-const statusEl = $("status");
-const stepsEl = $("steps");
-const resultMeta = $("result-meta");
-const levelSet = $("level-set");
-const levelPick = $("level-pick");
-const levelHint = $("level-hint");
-const buildingList = $("building-list");
+/** every id passed here exists in index.html; a missing one is a bug, not a state */
+function mustGet<T extends HTMLElement>(id: string): T {
+    const el = document.getElementById(id);
+    if (!el) throw new Error(`index.html 缺少 #${id} 元素`);
+    return el as T;
+}
 
-let currentBuildings = new Set(ALL_BUILDINGS);
-let lastResult = null;
+const shapeInput = mustGet<HTMLInputElement>("shape-input");
+const solveBtn = mustGet<HTMLButtonElement>("solve-btn");
+const shapeHint = mustGet<HTMLElement>("shape-hint");
+const preview = mustGet<HTMLElement>("target-preview");
+const statusEl = mustGet<HTMLElement>("status");
+const stepsEl = mustGet<HTMLElement>("steps");
+const resultMeta = mustGet<HTMLElement>("result-meta");
+const levelSet = mustGet<HTMLSelectElement>("level-set");
+const levelPick = mustGet<HTMLSelectElement>("level-pick");
+const levelHint = mustGet<HTMLElement>("level-hint");
+const buildingList = mustGet<HTMLElement>("building-list");
+
+let currentBuildings: Set<string> = new Set(ALL_BUILDINGS);
+let lastResult: SolveResult | null = null;
 
 /* ------------------------------------------------------------------ *
  * buildings
  * ------------------------------------------------------------------ */
 
-function renderBuildings() {
+function renderBuildings(): void {
     buildingList.innerHTML = "";
     for (const b of ALL_BUILDINGS) {
         const label = document.createElement("label");
@@ -62,10 +73,11 @@ function renderBuildings() {
     }
 }
 
-function setBuildings(set) {
+function setBuildings(set: Iterable<string>): void {
     currentBuildings = new Set(set);
-    for (const cb of buildingList.querySelectorAll("input[type=checkbox]")) {
-        cb.checked = currentBuildings.has(cb.dataset.building);
+    for (const cb of buildingList.querySelectorAll<HTMLInputElement>("input[type=checkbox]")) {
+        const building = cb.dataset.building;
+        cb.checked = building !== undefined && currentBuildings.has(building);
     }
     updateSolveState();
 }
@@ -74,11 +86,11 @@ function setBuildings(set) {
  * levels
  * ------------------------------------------------------------------ */
 
-function levelsFor(setName) {
+function levelsFor(setName: string): Level[] {
     return setName === "game" ? FULL_LEVELS : DEMO_LEVELS;
 }
 
-function renderLevelPick() {
+function renderLevelPick(): void {
     const levels = levelsFor(levelSet.value);
     levelPick.innerHTML = "";
     const placeholder = document.createElement("option");
@@ -95,7 +107,7 @@ function renderLevelPick() {
     levelHint.textContent = "选择关卡会自动填入目标，并把可用建筑限制为该关卡时已解锁的那些。";
 }
 
-function onLevelChange() {
+function onLevelChange(): void {
     if (!levelPick.value) return;
     const levels = levelsFor(levelSet.value);
     const lvl = levels.find((l) => String(l.level) === levelPick.value);
@@ -110,9 +122,9 @@ function onLevelChange() {
 }
 
 /** "全部关卡" plus every level of the selected need set */
-function renderAllLevels() {
-    const levels = levelsFor($("all-set").value);
-    const sel = $("all-until");
+function renderAllLevels(): void {
+    const levels = levelsFor(mustGet<HTMLSelectElement>("all-set").value);
+    const sel = mustGet<HTMLSelectElement>("all-until");
     const keep = sel.value;
     sel.innerHTML = "";
     const all = document.createElement("option");
@@ -132,7 +144,7 @@ function renderAllLevels() {
  * input handling
  * ------------------------------------------------------------------ */
 
-function onInputChanged() {
+function onInputChanged(): void {
     const text = shapeInput.value.trim();
     preview.innerHTML = "";
     if (!text) {
@@ -156,7 +168,7 @@ function onInputChanged() {
     updateSolveState();
 }
 
-function updateSolveState() {
+function updateSolveState(): void {
     const parsed = S.tryParse(shapeInput.value.trim());
     solveBtn.disabled = !parsed.ok;
 }
@@ -165,7 +177,7 @@ function updateSolveState() {
  * results
  * ------------------------------------------------------------------ */
 
-function ioThumb(shape, caption) {
+function ioThumb(shape: S.Shape, caption: string): HTMLDivElement {
     const wrap = document.createElement("div");
     wrap.className = "io-item";
     wrap.innerHTML = shapeSVG(shape, 46);
@@ -175,7 +187,7 @@ function ioThumb(shape, caption) {
     return wrap;
 }
 
-function renderPlan(res) {
+function renderPlan(res: SolveResult): void {
     stepsEl.innerHTML = "";
     resultMeta.innerHTML = "";
 
@@ -202,7 +214,7 @@ function renderPlan(res) {
     chipOk.textContent = res.verification.ok ? "校验通过" : "校验失败";
     resultMeta.append(chipCost, chipSteps, chipOk);
 
-    const counts = new Map();
+    const counts = new Map<P.PlanOp, number>();
     for (const step of res.flat.steps) {
         if (step.op === "base") continue;
         counts.set(step.op, (counts.get(step.op) || 0) + 1);
@@ -229,7 +241,7 @@ function renderPlan(res) {
         const detail = document.createElement("div");
         detail.className = "detail";
         detail.textContent =
-            step.op === "paint4"
+            step.node.op === "paint4"
                 ? "按象限上色：" + step.node.colors.map((c) => c || "-").join(" / ")
                 : step.detail || "";
         const io = document.createElement("div");
@@ -324,7 +336,7 @@ function renderPlan(res) {
  * solving
  * ------------------------------------------------------------------ */
 
-async function doSolve() {
+async function doSolve(): Promise<void> {
     const parsed = S.tryParse(shapeInput.value.trim());
     if (!parsed.ok) return;
     solveBtn.disabled = true;
@@ -334,9 +346,9 @@ async function doSolve() {
     resultMeta.innerHTML = "";
 
     // let the browser paint the busy state before the (synchronous) search
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise<void>((r) => setTimeout(r, 30));
     const t0 = performance.now();
-    let res;
+    let res: SolveResult;
     try {
         res = solve(parsed.shape, {
             buildings: new Set(currentBuildings),
@@ -344,7 +356,7 @@ async function doSolve() {
         });
     } catch (e) {
         statusEl.className = "status err";
-        statusEl.textContent = "求解异常: " + e.message;
+        statusEl.textContent = "求解异常: " + (e instanceof Error ? e.message : String(e));
         solveBtn.disabled = false;
         return;
     }
@@ -366,14 +378,14 @@ async function doSolve() {
  * ------------------------------------------------------------------ */
 
 shapeInput.addEventListener("input", onInputChanged);
-shapeInput.addEventListener("keydown", (e) => {
+shapeInput.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key === "Enter") doSolve();
 });
 solveBtn.addEventListener("click", doSolve);
 levelSet.addEventListener("change", renderLevelPick);
 levelPick.addEventListener("change", onLevelChange);
-$("reset-buildings").addEventListener("click", () => setBuildings(new Set(ALL_BUILDINGS)));
-$("all-set").addEventListener("change", renderAllLevels);
+mustGet<HTMLButtonElement>("reset-buildings").addEventListener("click", () => setBuildings(new Set(ALL_BUILDINGS)));
+mustGet<HTMLSelectElement>("all-set").addEventListener("change", renderAllLevels);
 
 renderBuildings();
 renderLevelPick();
@@ -385,33 +397,43 @@ onInputChanged();
  * seed → campaign sheet
  * ------------------------------------------------------------------ */
 
-let gameCtx = null;
+interface GameContext {
+    seed: number;
+    hub: { x: number; y: number };
+    level?: number;
+    patches: Patch[];
+    name?: string;
+}
+
+let gameCtx: GameContext | null = null;
 
 /**
  * Decode an uploaded savegame file. Accepts shapez's raw client-storage dump
  * ("\x01" + LZ-String, i.e. savegame-*.bin), a {"save": "..."} JSON wrapper,
  * or an already-decoded dump JSON.
  */
-function decodeSaveText(text) {
+function decodeSaveText(text: string): unknown {
     if (text.trimStart().startsWith("{")) {
-        let json;
+        let json: unknown;
         try {
             json = JSON.parse(text);
         } catch (e) {
-            throw new Error(`JSON 解析失败：${e.message}`);
+            throw new Error(`JSON 解析失败：${e instanceof Error ? e.message : String(e)}`);
         }
-        if (typeof json.save === "string") return decodeSavegame(json.save).payload;
-        if (json.dump || json.map) return json;
+        // JSON.parse gives no type: the wrapper is either {save} or a decoded dump
+        const wrapper = json as { save?: unknown; dump?: unknown; map?: unknown };
+        if (typeof wrapper.save === "string") return decodeSavegame(wrapper.save).payload;
+        if (wrapper.dump || wrapper.map) return json;
         throw new Error("JSON 里没有 save（原始存档）或 dump（解码后的存档）");
     }
     try {
         return decodeSavegame(text).payload;
     } catch (e) {
-        throw new Error(`不是可识别的 shapez 存档（${e.message}）`);
+        throw new Error(`不是可识别的 shapez 存档（${e instanceof Error ? e.message : String(e)}）`);
     }
 }
 
-async function readSaveFile(file) {
+async function readSaveFile(file: File): Promise<GameContext> {
     const payload = decodeSaveText(await file.text());
     const info = savegameMapInfo(payload);
     // wide enough that every shape type the campaign needs (windmill/star
@@ -420,9 +442,9 @@ async function readSaveFile(file) {
     return { seed: info.seed, hub: info.hub, level: info.level, patches, name: file.name };
 }
 
-function renderMapSummary() {
-    const el = $("map-summary");
-    const meta = $("map-meta");
+function renderMapSummary(): void {
+    const el = mustGet<HTMLElement>("map-summary");
+    const meta = mustGet<HTMLElement>("map-meta");
     meta.innerHTML = "";
     if (!gameCtx) {
         el.textContent = "";
@@ -463,21 +485,24 @@ function renderMapSummary() {
             .join(" · ");
 }
 
-async function onLoadSave() {
-    const input = $("save-file");
-    const file = input.files && input.files[0];
+async function onLoadSave(): Promise<void> {
+    const input = mustGet<HTMLInputElement>("save-file");
+    const file = input.files?.[0];
     if (!file) return;
     try {
-        gameCtx = await readSaveFile(file);
-        $("seed-input").value = String(gameCtx.seed);
-        if (gameCtx.level && [...$("all-until").options].some((o) => Number(o.value) === gameCtx.level)) {
-            $("all-until").value = String(gameCtx.level);
+        const loaded = await readSaveFile(file);
+        gameCtx = loaded;
+        mustGet<HTMLInputElement>("seed-input").value = String(loaded.seed);
+        const untilPick = mustGet<HTMLSelectElement>("all-until");
+        const level = loaded.level;
+        if (level && [...untilPick.options].some((o) => Number(o.value) === level)) {
+            untilPick.value = String(level);
         }
         renderMapSummary();
     } catch (e) {
         gameCtx = null;
         renderMapSummary();
-        $("map-summary").textContent = `${file.name}：${e.message}`;
+        mustGet<HTMLElement>("map-summary").textContent = `${file.name}：${e instanceof Error ? e.message : String(e)}`;
     }
 }
 
@@ -485,17 +510,23 @@ async function onLoadSave() {
  * Map the drawing button works on: the seed field is the input, and a loaded
  * save only contributes its real hub position when its seed matches.
  */
-function mapContext() {
-    const seed = Number($("seed-input").value);
+function mapContext(): { seed: number; hub: { x: number; y: number } } {
+    const seed = Number(mustGet<HTMLInputElement>("seed-input").value);
     if (!Number.isInteger(seed) || seed < 0 || seed > 999999) throw new Error("地图种子应是 0–999999 的整数");
     const hub = gameCtx && gameCtx.seed === seed ? gameCtx.hub : { x: -2, y: -2 };
     return { seed, hub };
 }
 
-function renderCampaign(res, meta) {
-    const el = $("placement");
+interface CampaignMeta {
+    set: NeedSetName;
+    seed?: number;
+    radius: number;
+}
+
+function renderCampaign(res: CampaignResult, meta: CampaignMeta): void {
+    const el = mustGet<HTMLElement>("placement");
     el.innerHTML = "";
-    const makeCard = (title) => {
+    const makeCard = (title: string): HTMLDivElement => {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `<h3>${title}</h3>`;
@@ -538,14 +569,16 @@ function renderCampaign(res, meta) {
     tableCard.appendChild(table);
 
     const bomCard = makeCard("材料 / 颜色");
-    const lines = [];
+    const lines: string[] = [];
     lines.push(`合计 ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格`);
     lines.push(`建筑：${res.layout.bom.map((b) => `${b.zh}×${b.n}`).join("、")}`);
     for (const c of res.layout.colors) {
+        // a base colour the map lacks has no recipe, and this expression has
+        // always thrown on it; `!` keeps that instead of inventing output
         lines.push(
             c.direct
                 ? `颜色 ${c.color}：地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`
-                : `颜色 ${c.color}：无直接矿脉，需混合 ${c.mix.join("+")}`
+                : `颜色 ${c.color}：无直接矿脉，需混合 ${c.mix ? c.mix.join("+") : "—"}`
         );
     }
     for (const m of res.layout.missing) lines.push(`⚠ 缺失资源：${m}`);
@@ -583,18 +616,19 @@ function renderCampaign(res, meta) {
     bomCard.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
 }
 
-async function onAll() {
-    const btn = $("all-btn");
+async function onAll(): Promise<void> {
+    const btn = mustGet<HTMLButtonElement>("all-btn");
     btn.disabled = true;
-    const box = $("schematic");
-    const status = $("all-status");
+    const box = mustGet<HTMLElement>("schematic");
+    const status = mustGet<HTMLElement>("all-status");
     status.textContent = "";
     box.innerHTML = `<div style="padding:16px;color:#6b7280">求解全部需求图形中…</div>`;
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise<void>((r) => setTimeout(r, 30));
     try {
         const ctx = mapContext();
-        const set = $("all-set").value;
-        const untilLevel = $("all-until").value ? Number($("all-until").value) : null;
+        const set = mustGet<HTMLSelectElement>("all-set").value as NeedSetName;
+        const untilPick = mustGet<HTMLSelectElement>("all-until");
+        const untilLevel = untilPick.value ? Number(untilPick.value) : null;
         const shapes = neededShapes({ set });
         const scan = scanForTypes(ctx.seed, {
             types: requiredTypes(shapes),
@@ -609,7 +643,7 @@ async function onAll() {
             untilLevel,
             levels: set === "full" ? FULL_LEVELS : DEMO_LEVELS,
         });
-        const usedPatches = [];
+        const usedPatches: Patch[] = [];
         for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
         for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
         box.innerHTML = schematicSVG(res.layout, usedPatches, { campaign: true });
@@ -622,12 +656,12 @@ async function onAll() {
             `${res.totals.shapes} 种可建 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
             (scan.missingTypes.length ? ` · ⚠ 缺 ${scan.missingTypes.join("/")} 矿脉` : "");
     } catch (e) {
-        box.innerHTML = `<div style="padding:16px;color:#a5342f">${e.message}</div>`;
-        $("placement").innerHTML = "";
+        box.innerHTML = `<div style="padding:16px;color:#a5342f">${e instanceof Error ? e.message : String(e)}</div>`;
+        mustGet<HTMLElement>("placement").innerHTML = "";
     } finally {
         btn.disabled = false;
     }
 }
 
-$("save-file").addEventListener("change", onLoadSave);
-$("all-btn").addEventListener("click", onAll);
+mustGet<HTMLInputElement>("save-file").addEventListener("change", onLoadSave);
+mustGet<HTMLButtonElement>("all-btn").addEventListener("click", onAll);

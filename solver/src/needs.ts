@@ -17,6 +17,7 @@
  */
 
 import { DEMO_LEVELS, FULL_LEVELS } from "./levels.js";
+import type { Level } from "./levels.js";
 import * as S from "./shape.js";
 
 export const PREPAREMENT_SHAPE = "CpRpCp--:SwSwSwSw";
@@ -24,12 +25,19 @@ export const FINAL_GAME_SHAPE = "RuCw--Cw:----Ru--";
 export const ROCKET_SHAPE = "CbCuCbCu:Sr------:--CrSrCr:CwCwCwCw";
 
 /** shapes the China build asks for instead of the standard ones */
-export const CHINA_VARIANT = {
+export const CHINA_VARIANT: Record<string, string> = {
     miner_t4: "CyCyCyCy:CyCyCyCy:RyRyRyRy:RuRuRuRu",
     painting_t2: "CuCuCuCu:CwCwCwCw:Sb--Sr--",
 };
 
-export const UPGRADE_TRACKS = {
+export interface UpgradeRequirement {
+    shape: string;
+    amount: number;
+}
+
+export type TrackId = "belt" | "miner" | "processors" | "painting";
+
+export const UPGRADE_TRACKS: Record<TrackId, UpgradeRequirement[][]> = {
     belt: [
         [{ shape: "CuCuCuCu", amount: 30 }],
         [{ shape: "--CuCu--", amount: 500 }],
@@ -80,7 +88,7 @@ export const UPGRADE_TRACKS = {
     ],
 };
 
-export const UPGRADE_LABELS = {
+export const UPGRADE_LABELS: Record<TrackId, string> = {
     belt: "传送带",
     miner: "采矿机",
     processors: "加工建筑",
@@ -88,7 +96,7 @@ export const UPGRADE_LABELS = {
 };
 
 /** endless endgame tiers: only the unrestricted build has them */
-export const ENDGAME_TIERS = [
+export const ENDGAME_TIERS: UpgradeRequirement[][] = [
     [
         { shape: PREPAREMENT_SHAPE, amount: 30000 },
         { shape: FINAL_GAME_SHAPE, amount: 20000 },
@@ -96,25 +104,56 @@ export const ENDGAME_TIERS = [
     ],
 ];
 
-export const NEED_SETS = {
+export type NeedSetName = "demo" | "full";
+
+export interface NeedSet {
+    label: string;
+    levels: Level[];
+    endgame: boolean;
+}
+
+export const NEED_SETS: Record<NeedSetName, NeedSet> = {
     demo: { label: "试玩版", levels: DEMO_LEVELS, endgame: false },
     full: { label: "完整版", levels: FULL_LEVELS, endgame: true },
 };
 
+export interface ShapeSourceLevel {
+    kind: "level";
+    level: number;
+    required: number;
+    reward: string;
+}
+
+export interface ShapeSourceUpgrade {
+    kind: "upgrade";
+    track: TrackId;
+    tier: number;
+    amount: number;
+}
+
+export interface ShapeSourceEndgame {
+    kind: "endgame";
+    tier: number;
+    amount: number;
+}
+
+export type ShapeSource = ShapeSourceLevel | ShapeSourceUpgrade | ShapeSourceEndgame;
+
+export interface NeededShape {
+    code: string;
+    sources: ShapeSource[];
+}
+
 /**
  * All shapes a run of the given set needs, in priority order: level goals first
  * (in level order), then upgrade-only shapes by track and tier.
- *
- * @param {{set?: "demo"|"full"}} [opts]
- * @returns {Array<{code: string, sources: Array<object>}>}
  */
-export function neededShapes({ set = "demo" } = {}) {
+export function neededShapes({ set = "demo" }: { set?: NeedSetName } = {}): NeededShape[] {
     const conf = NEED_SETS[set];
     if (!conf) throw new Error(`unknown need set: ${set}`);
 
-    /** @type {Map<string, {code: string, sources: Array<object>}>} */
-    const byCode = new Map();
-    const add = (code, source) => {
+    const byCode = new Map<string, NeededShape>();
+    const add = (code: string, source: ShapeSource) => {
         let entry = byCode.get(code);
         if (!entry) {
             entry = { code, sources: [] };
@@ -126,8 +165,8 @@ export function neededShapes({ set = "demo" } = {}) {
     for (const lvl of conf.levels) {
         add(lvl.shape, { kind: "level", level: lvl.level, required: lvl.required, reward: lvl.reward });
     }
-    for (const [track, tiers] of Object.entries(UPGRADE_TRACKS)) {
-        tiers.forEach((required, tier) => {
+    for (const track of Object.keys(UPGRADE_TRACKS) as TrackId[]) {
+        UPGRADE_TRACKS[track].forEach((required, tier) => {
             for (const req of required) {
                 add(req.shape, { kind: "upgrade", track, tier, amount: req.amount });
             }
@@ -147,12 +186,9 @@ export function neededShapes({ set = "demo" } = {}) {
  * Shape letters (C R S W) a list of targets needs from the map. A letter that
  * never appears as a deposit cannot be built, so the map scan has to know about
  * it before planning: `S`/`W` deposits only start a few chunks out.
- *
- * @param {Array<{code: string}>} shapes
- * @returns {Set<string>}
  */
-export function requiredTypes(shapes) {
-    const types = new Set();
+export function requiredTypes(shapes: readonly { code: string }[]): Set<string> {
+    const types = new Set<string>();
     for (const need of shapes) {
         const parsed = S.tryParse(need.code);
         if (!parsed.ok) continue;
@@ -164,7 +200,7 @@ export function requiredTypes(shapes) {
 }
 
 /** one-line Chinese description of why a shape is needed */
-export function describeSource(source) {
+export function describeSource(source: ShapeSource): string {
     if (source.kind === "level") {
         return `关卡 ${source.level}（要 ${source.required} 个）`;
     }

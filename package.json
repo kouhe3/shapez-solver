@@ -1,0 +1,17 @@
+{
+  "name": "shapez-solver",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun run solver/test/run-tests.ts",
+    "test:quick": "bun run solver/test/run-tests.ts --quick",
+    "fuzz": "bun run solver/test/fuzz.ts",
+    "typecheck": "bun check",
+    "verify": "bun check && bun run solver/test/run-tests.ts",
+    "cli": "bun solver/cli.ts",
+    "serve": "bun solver/server.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4"
+  }
+}

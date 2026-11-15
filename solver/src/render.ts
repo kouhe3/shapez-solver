@@ -7,13 +7,14 @@
  */
 
 import { COLOR_HEX, TYPE_NAMES_ZH, COLOR_NAMES_ZH } from "./shape.js";
+import type { Cell, Shape } from "./shape.js";
 
 const OUTLINE = "#4a4c5a";
 const OUTLINE_WIDTH = 0.55;
 const BACKGROUND = "#e3e8f3";
 const BACKGROUND_STROKE = "#c7cddd";
 
-function cellPath(cell, layerScale) {
+function cellPath(cell: Cell, layerScale: number): string {
     const dims = 10 * layerScale;
     const x0 = -5;
     const y0 = 5 - dims;
@@ -42,21 +43,22 @@ function cellPath(cell, layerScale) {
     }
 }
 
-const QUAD_OFFSET = [
+const QUAD_OFFSET: ReadonlyArray<readonly [number, number]> = [
     [1, -1], // q0 top-right
     [1, 1], // q1 bottom-right
     [-1, 1], // q2 bottom-left
     [-1, -1], // q3 top-left
 ];
 
-/**
- * @param {object} shape
- * @param {number} size pixel size
- * @param {object} opts {background: boolean}
- */
-export function shapeSVG(shape, size = 120, opts = {}) {
+export interface ShapeSVGOptions {
+    /** draw the light disc behind the shape (default true) */
+    background?: boolean;
+}
+
+/** @param size pixel size */
+export function shapeSVG(shape: Shape, size = 120, opts: ShapeSVGOptions = {}): string {
     const scale = size / 23;
-    const parts = [];
+    const parts: string[] = [];
     parts.push(
         `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img">`
     );
@@ -68,10 +70,9 @@ export function shapeSVG(shape, size = 120, opts = {}) {
     }
     shape.layers.forEach((layer, layerIndex) => {
         const layerScale = Math.max(0.1, 0.9 - layerIndex * 0.22);
-        for (let q = 0; q < 4; q++) {
+        QUAD_OFFSET.forEach(([dx, dy], q) => {
             const cell = layer[q];
-            if (!cell) continue;
-            const [dx, dy] = QUAD_OFFSET[q];
+            if (!cell) return;
             parts.push(
                 `<g transform="translate(${dx * 5} ${dy * 5}) rotate(${q * 90})" fill="${
                     COLOR_HEX[cell.c] || COLOR_HEX.u
@@ -79,13 +80,13 @@ export function shapeSVG(shape, size = 120, opts = {}) {
             );
             parts.push(cellPath(cell, layerScale));
             parts.push(`</g>`);
-        }
+        });
     });
     parts.push(`</g></svg>`);
     return parts.join("");
 }
 
-export function dataUriSVG(shape, size = 120, opts = {}) {
+export function dataUriSVG(shape: Shape, size = 120, opts: ShapeSVGOptions = {}): string {
     return "data:image/svg+xml;utf8," + encodeURIComponent(shapeSVG(shape, size, opts));
 }
 
@@ -93,15 +94,15 @@ export function dataUriSVG(shape, size = 120, opts = {}) {
  * ASCII
  * ------------------------------------------------------------------ */
 
-function cellText(cell) {
+function cellText(cell: Cell | null | undefined): string {
     if (!cell) return "·";
     const type = cell.t;
     const color = cell.c === "u" ? "" : cell.c;
     return (type + color).padEnd(2, " ");
 }
 
-export function shapeASCII(shape) {
-    const lines = [];
+export function shapeASCII(shape: Shape): string {
+    const lines: string[] = [];
     shape.layers.forEach((layer, li) => {
         const label = `L${li}`;
         lines.push(`${label}   ${cellText(layer[3])}│${cellText(layer[0])}`);
@@ -113,8 +114,8 @@ export function shapeASCII(shape) {
 }
 
 /** [["Ru","Cw"],["·","Cw"]] style grid, handy in tables */
-export function shapeGrid(shape) {
-    const out = [];
+export function shapeGrid(shape: Shape): string[][] {
+    const out: string[][] = [];
     shape.layers.forEach((layer) => {
         out.push([cellText(layer[3]).trim() || "·", cellText(layer[0]).trim() || "·"]);
         out.push([cellText(layer[2]).trim() || "·", cellText(layer[1]).trim() || "·"]);
@@ -122,7 +123,7 @@ export function shapeGrid(shape) {
     return out;
 }
 
-export function describeCellShort(cell) {
+export function describeCellShort(cell: Cell | null | undefined): string {
     if (!cell) return "空";
     return `${TYPE_NAMES_ZH[cell.t]}${cell.c === "u" ? "（未上色）" : COLOR_NAMES_ZH[cell.c]}`;
 }
@@ -131,7 +132,12 @@ export function describeCellShort(cell) {
  * world map / stacker order helpers (for docs and the UI legend)
  * ------------------------------------------------------------------ */
 
-export const QUADRANT_LEGEND = [
+export interface QuadrantLegendEntry {
+    q: number;
+    name: string;
+}
+
+export const QUADRANT_LEGEND: readonly QuadrantLegendEntry[] = [
     { q: 0, name: "右上 (q0)" },
     { q: 1, name: "右下 (q1)" },
     { q: 2, name: "左下 (q2)" },

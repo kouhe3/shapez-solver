@@ -10,9 +10,9 @@ import * as S from "../src/shape.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 
 const args = process.argv.slice(2);
-const flag = (name, dflt) => {
+const flag = (name: string, dflt: number): string | number => {
     const hit = args.find((a) => a.startsWith(`--${name}=`));
-    return hit ? hit.split("=")[1] : dflt;
+    return hit ? (hit.split("=")[1] ?? "") : dflt;
 };
 const N = Number(flag("n", 40));
 const SEED = Number(flag("seed", 1234));
@@ -20,7 +20,7 @@ const BUDGET = Number(flag("budget", 30000));
 
 // xorshift32
 let state = SEED >>> 0 || 1;
-function rnd() {
+function rnd(): number {
     state ^= state << 13;
     state >>>= 0;
     state ^= state >>> 17;
@@ -28,16 +28,16 @@ function rnd() {
     state >>>= 0;
     return state / 0x100000000;
 }
-const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+const pick = <T>(arr: readonly T[]): T => arr[Math.floor(rnd() * arr.length)]!;
 /** bias towards the shapes created later in the chain (they are the complex ones) */
-const pickIdx = (len) => Math.floor(rnd() * rnd() * len);
+const pickIdx = (len: number): number => Math.floor(rnd() * rnd() * len);
 
-const TYPES = ["C", "R", "S", "W"];
-const COLORS = ["r", "g", "b", "y", "p", "c", "w"];
+const TYPES: readonly S.ShapeType[] = ["C", "R", "S", "W"];
+const COLORS: readonly S.ColorChar[] = ["r", "g", "b", "y", "p", "c", "w"];
 
-function randomProducible() {
-    const pool = [{ t: pick(TYPES), c: "u" }].map((base) => {
-        const layer = [0, 1, 2, 3].map(() => ({ t: base.t, c: "u" }));
+function randomProducible(): S.Shape {
+    const pool: S.Shape[] = [{ t: pick(TYPES), c: "u" }].map((base): S.Shape => {
+        const layer: S.Layer = [0, 1, 2, 3].map(() => ({ t: base.t, c: "u" }));
         return { layers: [layer] };
     });
     const ops = 4 + Math.floor(rnd() * 7);
@@ -45,22 +45,22 @@ function randomProducible() {
         const op = Math.floor(rnd() * 10);
         if (op < 2) {
             const idx = pickIdx(pool.length);
-            pool[idx] = S.rotate(pool[idx], pick(["CW", "CCW", "180"]));
+            pool[idx] = S.rotate(pool[idx]!, pick(["CW", "CCW", "180"]));
         } else if (op < 4) {
             const idx = pickIdx(pool.length);
-            const [a, b] = S.cutHalf(pool[idx]);
+            const [a, b] = S.cutHalf(pool[idx]!);
             if (!S.isEntirelyEmpty(a)) pool.push(a);
             if (!S.isEntirelyEmpty(b)) pool.push(b);
         } else if (op < 5) {
             const idx = pickIdx(pool.length);
-            pool[idx] = S.paint(pool[idx], pick(COLORS));
+            pool[idx] = S.paint(pool[idx]!, pick(COLORS));
         } else {
             if (pool.length < 2) continue;
             const i = pickIdx(pool.length);
             // stacking a shape onto itself is the reliable way to grow layers
             let j = rnd() < 0.55 ? i : pickIdx(pool.length);
             try {
-                const merged = S.stack(pool[i], pool[j]);
+                const merged = S.stack(pool[i]!, pool[j]!);
                 if (merged.layers.length <= 4) pool.push(merged);
             } catch (e) {
                 /* collision — skip */
@@ -71,7 +71,7 @@ function randomProducible() {
     // grow depth on purpose so the solver sees 3-4 layer targets too
     for (let t = 0; t < 2; t++) {
         const deep = pool.reduce((a, b) => (b.layers.length > a.layers.length ? b : a));
-        const other = pool[Math.floor(rnd() * pool.length)];
+        const other = pool[Math.floor(rnd() * pool.length)]!;
         try {
             const merged = S.stack(deep, other);
             if (merged.layers.length <= 4 && merged.layers.length > deep.layers.length) {
@@ -82,7 +82,7 @@ function randomProducible() {
         }
     }
     // target = the deepest/most complex shape we produced
-    let best = pool[0];
+    let best = pool[0]!;
     let bestScore = -1;
     for (const shape of pool) {
         const score = shape.layers.length * 100 + S.countCells(shape);

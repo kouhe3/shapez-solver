@@ -5,13 +5,47 @@
  */
 
 import { COLOR_HEX, parse } from "./shape.js";
+import type { ColorChar, Shape } from "./shape.js";
 import { BUILDING_INFO } from "./layout.js";
+import type { BuildingKind, Connection, PlanFrame, Placement, Tile } from "./layout.js";
+import type { Patch } from "./map.js";
 import { shapeSVG } from "./render.js";
 import { formatRate } from "./rates.js";
 
+export interface SchematicLayout {
+    hub: Tile;
+    buildings: ReadonlyArray<Placement>;
+    connections: ReadonlyArray<Connection>;
+    beltEstimate: number;
+    plans?: ReadonlyArray<PlanFrame> | null;
+}
+
+export interface SchematicOptions {
+    tile?: number;
+    minTile?: number;
+    campaign?: boolean;
+}
+
+interface MapTheme {
+    background: string;
+    resources: { shape: string } & Partial<Record<ColorChar, string>>;
+}
+
+const ALL_KINDS: BuildingKind[] = [
+    "base",
+    "cutHalf",
+    "cutQuad",
+    "rotate",
+    "stack",
+    "paint",
+    "paint4",
+    "mixer",
+    "trash",
+];
+
 // Values taken from the game itself so the sheet matches what the player sees:
 // themes/light.json for the map layer, MetaHubBuilding for the hub.
-const MAP_THEME = {
+const MAP_THEME: MapTheme = {
     background: "#eceef2",
     resources: {
         shape: "#e0e2e8",
@@ -22,8 +56,16 @@ const MAP_THEME = {
 };
 const HUB_COLOR = "#eb5555";
 
-function esc(text) {
-    return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ESCAPES: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+};
+
+function esc(text: string): string {
+    return String(text).replace(/[&<>"']/g, (c) => ESCAPES[c] ?? c);
 }
 
 // Palette read off the game's own art (res/atlas0_hq.png) and its map view:
@@ -34,14 +76,14 @@ const INK = {
     belt: "#797a80",
 };
 
-const r2 = (v) => Math.round(v * 100) / 100;
+const r2 = (v: number): number => Math.round(v * 100) / 100;
 
 /**
  * The colour the game paints each building in its map view
  * (MetaBuilding.getSilhouetteColor) — the same blocks the player sees when
  * zoomed out, so a colour is the machine's identity on this sheet too.
  */
-const KIND_COLOR = {
+const KIND_COLOR: Record<string, string> = {
     base: "#b37dcd",
     cutHalf: "#7dcda2",
     cutQuad: "#7dcda2",
@@ -59,13 +101,13 @@ const KIND_COLOR = {
  * `ref/buildings/{miner,rotater,trash}.js`). Row-major, 1 = filled with the
  * part's silhouette colour; the rest shows the ground through.
  */
-const OVERLAY = {
+const OVERLAY: Record<string, readonly number[]> = {
     base: [1, 1, 1, 1, 0, 1, 1, 1, 1], // miner: ring around the drill hole
     trash: [1, 1, 0, 1, 1, 1, 0, 1, 1], // trash can: U with two open sides
 };
 
 /** the rotater's cut-out depends on its variant, not on its rotation here */
-const ROTATER_OVERLAY = {
+const ROTATER_OVERLAY: Record<string, readonly number[]> = {
     CW: [0, 1, 1, 1, 1, 0, 0, 1, 1],
     CCW: [1, 1, 0, 0, 1, 1, 1, 1, 0],
     180: [1, 1, 0, 1, 1, 1, 0, 1, 1],
@@ -77,9 +119,17 @@ const ROTATER_OVERLAY = {
  * one. Nothing is invented here — no pictograms, no outlines, no rounded
  * corners; the colour and the cut-out are the game's identity for the part.
  */
-function silhouette(kind, detail, x, y, w, h) {
+function silhouette(
+    kind: BuildingKind,
+    detail: string | null | undefined,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+): string {
     const color = KIND_COLOR[kind] || "#dfe3ea";
-    const matrix = kind === "rotate" ? ROTATER_OVERLAY[detail] || ROTATER_OVERLAY.CW : OVERLAY[kind];
+    const matrix =
+        kind === "rotate" ? ROTATER_OVERLAY[detail ?? "CW"] || ROTATER_OVERLAY.CW : OVERLAY[kind];
     if (!matrix) {
         return `<rect x="${r2(x)}" y="${r2(y)}" width="${r2(w)}" height="${r2(h)}" fill="${color}"/>`;
     }
@@ -98,7 +148,7 @@ function silhouette(kind, detail, x, y, w, h) {
 }
 
 /** filled triangle whose tip sits at (cx, cy) and points along `deg` (0 = +x, 90 = +y) */
-function arrowHead(cx, cy, len, deg, fill = INK.line) {
+function arrowHead(cx: number, cy: number, len: number, deg: number, fill: string = INK.line): string {
     const a = (deg * Math.PI) / 180;
     const cos = Math.cos(a);
     const sin = Math.sin(a);
@@ -110,15 +160,15 @@ function arrowHead(cx, cy, len, deg, fill = INK.line) {
 }
 
 /** SVG path through the routed cells, with collinear runs collapsed */
-function polylinePath(pts, x1, y1, x2, y2) {
-    const all = [[x1, y1], ...pts, [x2, y2]];
-    const kept = [all[0]];
+function polylinePath(pts: Array<[number, number]>, x1: number, y1: number, x2: number, y2: number): string {
+    const all: Array<[number, number]> = [[x1, y1], ...pts, [x2, y2]];
+    const kept: Array<[number, number]> = [all[0]!];
     for (let i = 1; i < all.length; i++) {
-        const b = all[i];
-        const a = kept[kept.length - 1];
+        const b = all[i]!;
+        const a = kept[kept.length - 1]!;
         if (a[0] === b[0] && a[1] === b[1]) continue;
         if (kept.length >= 2) {
-            const p = kept[kept.length - 2];
+            const p = kept[kept.length - 2]!;
             if ((p[0] === a[0] && a[0] === b[0]) || (p[1] === a[1] && a[1] === b[1])) {
                 kept[kept.length - 1] = b;
                 continue;
@@ -129,7 +179,11 @@ function polylinePath(pts, x1, y1, x2, y2) {
     return kept.map(([x, y], i) => `${i ? "L" : "M"} ${r2(x)} ${r2(y)}`).join(" ");
 }
 
-export function schematicSVG(layout, patches, opts = {}) {
+export function schematicSVG(
+    layout: SchematicLayout,
+    patches: ReadonlyArray<Patch> | null | undefined,
+    opts: SchematicOptions = {}
+): string {
     const pad = 40;
 
     // bounds over buildings + patches + hub
@@ -137,7 +191,7 @@ export function schematicSVG(layout, patches, opts = {}) {
     let minY = layout.hub.y;
     let maxX = layout.hub.x + 4;
     let maxY = layout.hub.y + 4;
-    const grow = (x, y, w = 1, h = 1) => {
+    const grow = (x: number, y: number, w = 1, h = 1): void => {
         minX = Math.min(minX, x);
         minY = Math.min(minY, y);
         maxX = Math.max(maxX, x + w);
@@ -153,7 +207,8 @@ export function schematicSVG(layout, patches, opts = {}) {
     }
 
     // pick a tile size that keeps the sheet readable
-    const campaign = Array.isArray(layout.plans) && layout.plans.length > 1;
+    const plans = Array.isArray(layout.plans) ? layout.plans : [];
+    const campaign = plans.length > 1;
     const spanX = Math.max(1, maxX - minX);
     const spanY = Math.max(1, maxY - minY);
     // 18 px per tile keeps the game pictograms legible on a campaign sheet;
@@ -163,10 +218,10 @@ export function schematicSVG(layout, patches, opts = {}) {
 
     const width = Math.ceil((maxX - minX) * t + pad * 2);
     const height = Math.ceil((maxY - minY) * t + pad * 2);
-    const px = (x) => (x - minX) * t + pad;
-    const py = (y) => (y - minY) * t + pad;
+    const px = (x: number): number => (x - minX) * t + pad;
+    const py = (y: number): number => (y - minY) * t + pad;
 
-    const out = [];
+    const out: string[] = [];
     out.push(
         `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="Segoe UI, Microsoft YaHei, sans-serif">`
     );
@@ -185,9 +240,9 @@ export function schematicSVG(layout, patches, opts = {}) {
     // Resource patches: the game paints every deposit tile with the theme
     // resource colour at half opacity, then stamps the item icon in the middle.
     // The same patch reaches us once per miner, so draw each one only once.
-    const drawnPatches = [];
+    const drawnPatches: Patch[] = [];
     {
-        const seen = new Set();
+        const seen = new Set<string>();
         for (const p of patches || []) {
             const key = `${p.chunkX}|${p.chunkY}|${p.x.toFixed(2)}|${p.y.toFixed(2)}`;
             if (seen.has(key)) continue;
@@ -196,7 +251,9 @@ export function schematicSVG(layout, patches, opts = {}) {
         }
     }
     for (const p of drawnPatches) {
-        const fill = MAP_THEME.resources[p.item.kind === "color" ? p.item.color : "shape"] || MAP_THEME.resources.shape;
+        const colorKey = p.item.kind === "color" ? p.item.color : null;
+        const fill =
+            (colorKey ? MAP_THEME.resources[colorKey] : undefined) || MAP_THEME.resources.shape;
         out.push(`<g fill="${fill}" fill-opacity="0.5">`);
         if (p.cells && p.cells.length) {
             for (const [x, y] of p.cells) {
@@ -211,7 +268,7 @@ export function schematicSVG(layout, patches, opts = {}) {
     // zoomed-out overlay: one game-accurate shape icon per shape patch
     for (const p of drawnPatches) {
         if (p.item.kind !== "shape") continue;
-        let shape;
+        let shape: Shape;
         try {
             shape = parse(p.item.code);
         } catch {
@@ -226,17 +283,17 @@ export function schematicSVG(layout, patches, opts = {}) {
     // one framed block per factory, identified by its target shape icon
     if (campaign) {
         out.push(`<g fill="none" stroke="#aab5c9" stroke-dasharray="3 3">`);
-        for (const plan of layout.plans) {
+        for (const plan of plans) {
             if (!plan.bounds) continue;
             const b = plan.bounds;
             out.push(`<rect x="${px(b.x)}" y="${py(b.y)}" width="${b.w * t}" height="${b.h * t}" rx="3"/>`);
         }
         out.push(`</g>`);
         const iconSize = Math.max(20, Math.min(32, t * 2.5));
-        for (const plan of layout.plans) {
+        for (const plan of plans) {
             if (!plan.bounds) continue;
             const b = plan.bounds;
-            let shape;
+            let shape: Shape | null = null;
             try {
                 shape = parse(plan.code);
             } catch {
@@ -265,7 +322,7 @@ export function schematicSVG(layout, patches, opts = {}) {
     );
     for (const c of layout.connections) {
         if (!c.routed || !c.path) continue;
-        const pts = c.path.map((p) => [px(p.x + 0.5), py(p.y + 0.5)]);
+        const pts = c.path.map((p): [number, number] => [px(p.x + 0.5), py(p.y + 0.5)]);
         out.push(`<path d="${polylinePath(pts, px(c.x1), py(c.y1), px(c.x2), py(c.y2))}"/>`);
     }
     out.push(`</g>`);
@@ -320,7 +377,7 @@ export function schematicSVG(layout, patches, opts = {}) {
     // input and an arrow tab on every output. The ports are the sheet's own
     // annotation; the body itself is the game's.
     for (const b of layout.buildings) {
-        const info = BUILDING_INFO[b.kind] || { w: 1, h: 1, zh: b.kind };
+        const info = BUILDING_INFO[b.kind];
         const bx = px(b.x);
         const by = py(b.y);
         const bw = b.w * t;
@@ -359,12 +416,10 @@ export function schematicSVG(layout, patches, opts = {}) {
     // legend on its own plate: long belt runs would otherwise cross the text
     const lx = 16;
     let ly = 30;
-    const legend = [];
+    const legend: string[] = [];
     legend.push(`<text x="${lx}" y="${ly}" font-weight="600">图例</text>`);
     ly += 18;
-    const kindsInUse = ["base", "cutHalf", "cutQuad", "rotate", "stack", "paint", "paint4", "mixer", "trash"].filter((kind) =>
-        layout.buildings.some((b) => b.kind === kind)
-    );
+    const kindsInUse = ALL_KINDS.filter((kind) => layout.buildings.some((b) => b.kind === kind));
     for (const kind of kindsInUse) {
         // the same map-view block the drawing uses, so the legend is a key
         if (OVERLAY[kind] || kind === "rotate") {
@@ -405,7 +460,7 @@ export function schematicSVG(layout, patches, opts = {}) {
     out.push(
         `<text x="${width - 16}" y="24" font-size="13" text-anchor="end" fill="#6a7180">tile = ${t}px · 共 ${
             layout.buildings.length
-        } 个建筑${campaign ? ` · ${layout.plans.length} 种图形` : ""} · 传送带约 ${layout.beltEstimate} 格</text>`
+        } 个建筑${campaign ? ` · ${plans.length} 种图形` : ""} · 传送带约 ${layout.beltEstimate} 格</text>`
     );
 
     out.push(`</svg>`);

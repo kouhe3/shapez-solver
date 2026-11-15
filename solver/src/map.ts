@@ -10,18 +10,65 @@
  *   { kind: "color", color: "r" }         (color fluid)
  */
 
+import type { ColorChar, ShapeType } from "./shape.js";
+
 export const MAP_CHUNK_SIZE = 16;
+
+/* ------------------------------------------------------------------ *
+ * deposits / patches
+ * ------------------------------------------------------------------ */
+
+/** a vein of one full uncolored shape, e.g. `CuCuCuCu` */
+export interface ShapeDeposit {
+    kind: "shape";
+    code: string;
+}
+
+/** a color fluid vein */
+export interface ColorDeposit {
+    kind: "color";
+    color: ColorChar;
+}
+
+export type MapItem = ShapeDeposit | ColorDeposit;
+
+/**
+ * One generated resource patch. `x`/`y` are map tiles (the mean of the drawn
+ * tiles); the chunk-local centre, chunk coords, radius and drawn tiles are kept
+ * for the schematic. Only `x`, `y` and `item` are required — the layout and the
+ * tests also build patches by hand.
+ */
+export interface Patch {
+    x: number;
+    y: number;
+    item: MapItem;
+    localX?: number;
+    localY?: number;
+    chunkX?: number;
+    chunkY?: number;
+    size?: number;
+    tiles?: number;
+    cells?: Array<[number, number]>;
+}
+
+/** one generated chunk: the ore grid plus the patches drawn into it */
+export interface Chunk {
+    chunkX: number;
+    chunkY: number;
+    lower: (MapItem | null)[][];
+    patches: Patch[];
+}
 
 /* ------------------------------------------------------------------ *
  * ALEA RNG (port of src/js/core/rng.js)
  * ------------------------------------------------------------------ */
 
-function Mash() {
+function Mash(): (data: string | number) => number {
     let n = 0xefc8249d;
-    return function (data) {
-        data = data.toString();
-        for (let i = 0; i < data.length; i++) {
-            n += data.charCodeAt(i);
+    return function (data: string | number): number {
+        const text = data.toString();
+        for (let i = 0; i < text.length; i++) {
+            n += text.charCodeAt(i);
             let h = 0.02519603282416938 * n;
             n = h >>> 0;
             h -= n;
@@ -34,7 +81,7 @@ function Mash() {
     };
 }
 
-function makeNewRng(seed) {
+function makeNewRng(seed: string | number): () => number {
     let c = 1;
     let mash = Mash();
     let s0 = mash(" ");
@@ -55,25 +102,33 @@ function makeNewRng(seed) {
 }
 
 class RandomNumberGenerator {
-    constructor(seed) {
+    private readonly internalRng: () => number;
+
+    constructor(seed: string | number) {
         this.internalRng = makeNewRng(seed);
     }
-    next() {
+
+    next(): number {
         return this.internalRng();
     }
-    choice(array) {
+
+    choice<T>(array: readonly T[]): T {
         const index = this.nextIntRange(0, array.length);
-        return array[index];
+        const value = array[index];
+        if (value === undefined) throw new Error("RNG choice from an empty array");
+        return value;
     }
-    nextIntRange(min, max) {
+
+    nextIntRange(min: number, max: number): number {
         return Math.floor(this.next() * (max - min) + min);
     }
-    nextRange(min, max) {
+
+    nextRange(min: number, max: number): number {
         return this.next() * (max - min) + min;
     }
 }
 
-const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const clamp = (v: number, min: number, max: number): number => Math.max(min, Math.min(max, v));
 
 /* ------------------------------------------------------------------ *
  * the generator
@@ -82,30 +137,30 @@ const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 const SHAPE_WEIGHT_ORDER = ["R", "C", "S", "W", "C", "R", "W", "S"];
 // the game iterates the weights object; JS keeps string key insertion order,
 // and the game inserts them in this exact order:
-const WEIGHT_KEYS = ["R", "C", "S", "W"];
+const WEIGHT_KEYS: readonly ShapeType[] = ["R", "C", "S", "W"];
 
-function shapeCodeFromQuads(quads) {
+function shapeCodeFromQuads(quads: readonly ShapeType[]): string {
     // getDefinitionFromSimpleShapes(subShapes) → one layer, uncolored
     return quads.map((t) => t + "u").join("");
 }
 
-/**
- * @param {number} seed
- * @param {number} chunkX
- * @param {number} chunkY
- */
-export function generateChunk(seed, chunkX, chunkY) {
+export function generateChunk(seed: number, chunkX: number, chunkY: number): Chunk {
     const rng = new RandomNumberGenerator(`${chunkX}|${chunkY}|${seed}`);
 
     // lowerLayer[x][y] — the game allocates [mapChunkSize][mapChunkSize] but the
     // generator can write y === mapChunkSize (off-by-one in the original), so we
     // keep an extra row/column to stay faithful.
-    const lower = Array.from({ length: MAP_CHUNK_SIZE + 1 }, () =>
-        new Array(MAP_CHUNK_SIZE + 1).fill(null)
+    const lower: (MapItem | null)[][] = Array.from({ length: MAP_CHUNK_SIZE + 1 }, () =>
+        new Array<MapItem | null>(MAP_CHUNK_SIZE + 1).fill(null)
     );
-    const patches = [];
+    const patches: Patch[] = [];
 
-    function internalGeneratePatch(patchSize, item, overrideX = null, overrideY = null) {
+    function internalGeneratePatch(
+        patchSize: number,
+        item: MapItem,
+        overrideX: number | null = null,
+        overrideY: number | null = null
+    ): void {
         const border = Math.ceil(patchSize / 2 + 3);
         let patchX = rng.nextIntRange(border, MAP_CHUNK_SIZE - border - 1);
         let patchY = rng.nextIntRange(border, MAP_CHUNK_SIZE - border - 1);
@@ -115,7 +170,7 @@ export function generateChunk(seed, chunkX, chunkY) {
         let sumX = 0;
         let sumY = 0;
         let patchesDrawn = 0;
-        const cells = [];
+        const cells: Array<[number, number]> = [];
         const numCircles = patchSize;
 
         for (let i = 0; i <= numCircles; ++i) {
@@ -137,8 +192,10 @@ export function generateChunk(seed, chunkX, chunkY) {
                         const originalDx = dx / circleScaleX;
                         const originalDy = dy / circleScaleY;
                         if (originalDx * originalDx + originalDy * originalDy <= circleRadiusSquare) {
-                            if (!lower[x][y]) {
-                                lower[x][y] = item;
+                            // the guard above keeps x inside the [MAP_CHUNK_SIZE + 1]² grid
+                            const row = lower[x]!;
+                            if (!row[y]) {
+                                row[y] = item;
                                 cells.push([x + chunkX * MAP_CHUNK_SIZE, y + chunkY * MAP_CHUNK_SIZE]);
                                 ++patchesDrawn;
                                 sumX += x;
@@ -164,7 +221,7 @@ export function generateChunk(seed, chunkX, chunkY) {
         });
     }
 
-    function internalGenerateRandomSubShape(weights) {
+    function internalGenerateRandomSubShape(weights: Record<ShapeType, number>): ShapeType {
         const keys = WEIGHT_KEYS.filter((k) => weights[k] !== undefined);
         const sum = keys.reduce((a, k) => a + weights[k], 0);
         const chosenNumber = rng.nextIntRange(0, sum - 1);
@@ -176,14 +233,14 @@ export function generateChunk(seed, chunkX, chunkY) {
         return "C";
     }
 
-    function internalGenerateColorPatch(colorPatchSize, distance) {
-        const availableColors = ["r", "g"];
+    function internalGenerateColorPatch(colorPatchSize: number, distance: number): void {
+        const availableColors: ColorChar[] = ["r", "g"];
         if (distance > 2) availableColors.push("b");
         internalGeneratePatch(colorPatchSize, { kind: "color", color: rng.choice(availableColors) });
     }
 
-    function internalGenerateShapePatch(shapePatchSize, distance) {
-        let weights = {
+    function internalGenerateShapePatch(shapePatchSize: number, distance: number): void {
+        const weights: Record<ShapeType, number> = {
             R: 100,
             C: Math.round(50 + clamp(distance * 2, 0, 50)),
             S: Math.round(20 + clamp(distance, 0, 30)),
@@ -193,7 +250,7 @@ export function generateChunk(seed, chunkX, chunkY) {
             weights.S = 0;
             weights.W = 0;
         }
-        let subShapes;
+        let subShapes: ShapeType[];
         if (distance < 10) {
             const a = internalGenerateRandomSubShape(weights);
             subShapes = [a, a, a, a];
@@ -218,7 +275,7 @@ export function generateChunk(seed, chunkX, chunkY) {
         internalGeneratePatch(shapePatchSize, { kind: "shape", code: shapeCodeFromQuads(subShapes) });
     }
 
-    function predefined() {
+    function predefined(): boolean {
         if (chunkX === 0 && chunkY === 0) {
             internalGeneratePatch(2, { kind: "color", color: "r" }, 7, 7);
             return true;
@@ -264,8 +321,17 @@ export function generateChunk(seed, chunkX, chunkY) {
  * world helpers
  * ------------------------------------------------------------------ */
 
-export function scanMap(seed, { chunkRadius = 5, originChunkX = 0, originChunkY = 0 } = {}) {
-    const patches = [];
+export interface ScanOptions {
+    chunkRadius?: number;
+    originChunkX?: number;
+    originChunkY?: number;
+}
+
+export function scanMap(
+    seed: number,
+    { chunkRadius = 5, originChunkX = 0, originChunkY = 0 }: ScanOptions = {}
+): Patch[] {
+    const patches: Patch[] = [];
     for (let cx = originChunkX - chunkRadius; cx <= originChunkX + chunkRadius; cx++) {
         for (let cy = originChunkY - chunkRadius; cy <= originChunkY + chunkRadius; cy++) {
             const chunk = generateChunk(seed, cx, cy);
@@ -285,17 +351,14 @@ export function scanMap(seed, { chunkRadius = 5, originChunkX = 0, originChunkY 
  * almost nothing, a blocky one loses a lot. This is an upper bound: the real
  * count also depends on how the belts are routed out. (Chained miners, unlocked
  * at L11, share one output and skip this.)
- *
- * @param {{cells?: Array<[number, number]>, tiles?: number}} patch
- * @returns {number} upper bound on miners on this deposit
  */
-export function patchMinerCapacity(patch) {
+export function patchMinerCapacity(patch: Pick<Patch, "cells" | "tiles">): number {
     const cells = patch.cells;
     if (!cells || !cells.length) return patch.tiles || 0;
     const inside = new Set(cells.map(([x, y]) => `${x}|${y}`));
-    const exits = new Set();
+    const exits = new Set<string>();
     for (const [x, y] of cells) {
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as Array<[number, number]>) {
             const key = `${x + dx}|${y + dy}`;
             if (!inside.has(key)) exits.add(key);
         }
@@ -304,11 +367,11 @@ export function patchMinerCapacity(patch) {
 }
 
 /** shape letters present in the deposits of a patch list */
-export function depositTypes(patches) {
-    const types = new Set();
+export function depositTypes(patches: readonly Patch[]): Set<string> {
+    const types = new Set<string>();
     for (const p of patches) {
         if (p.item.kind !== "shape") continue;
-        for (let i = 0; i < p.item.code.length; i += 2) types.add(p.item.code[i]);
+        for (let i = 0; i < p.item.code.length; i += 2) types.add(p.item.code.charAt(i));
     }
     return types;
 }
@@ -322,15 +385,27 @@ export function depositTypes(patches) {
  * the radius keeps the common case cheap and still finds them on every seed we
  * have seen; the caller gets the radius that worked and what is still missing.
  *
- * @param {number} seed map seed
- * @param {object} opts
- * @param {Iterable<string>} opts.types shape letters the plan needs (C R S W)
- * @param {number} [opts.startRadius] chunks to scan first
- * @param {number} [opts.maxRadius] hard cap on the expansion
- * @returns {{patches: Array, radius: number, missingTypes: Array<string>}}
+ * `types` are the shape letters the plan needs (C R S W); `startRadius` are the
+ * chunks scanned first and `maxRadius` is the hard cap on the expansion.
  */
-export function scanForTypes(seed, { types, startRadius = 8, maxRadius = 32 } = {}) {
-    const wanted = [...new Set(types || [])];
+export interface ScanTypesOptions {
+    /** shape letters the plan needs, e.g. `requiredTypes(shapes)` */
+    types?: ReadonlySet<string>;
+    startRadius?: number;
+    maxRadius?: number;
+}
+
+export interface ScanResult {
+    patches: Patch[];
+    radius: number;
+    missingTypes: string[];
+}
+
+export function scanForTypes(
+    seed: number,
+    { types, startRadius = 8, maxRadius = 32 }: ScanTypesOptions = {}
+): ScanResult {
+    const wanted = types ? [...new Set(types)] : [];
     let radius = Math.max(1, startRadius);
     let patches = scanMap(seed, { chunkRadius: radius });
     let have = depositTypes(patches);
@@ -344,15 +419,24 @@ export function scanForTypes(seed, { types, startRadius = 8, maxRadius = 32 } = 
     return { patches, radius, missingTypes: missing };
 }
 
-export function itemLabel(item) {
+export function itemLabel(item: MapItem | null | undefined): string {
     if (!item) return "空";
     if (item.kind === "shape") return item.code;
     return "颜色:" + item.color;
 }
 
+export interface NearestPatch {
+    patch: Patch;
+    distance: number;
+}
+
 /** nearest patch of a given predicate */
-export function nearestPatch(patches, predicate, from = { x: 0, y: 0 }) {
-    let best = null;
+export function nearestPatch(
+    patches: readonly Patch[],
+    predicate: (item: MapItem) => boolean,
+    from: { x: number; y: number } = { x: 0, y: 0 }
+): NearestPatch | null {
+    let best: Patch | null = null;
     let bestDist = Infinity;
     for (const p of patches) {
         if (!predicate(p.item)) continue;
@@ -365,10 +449,15 @@ export function nearestPatch(patches, predicate, from = { x: 0, y: 0 }) {
     return best ? { patch: best, distance: bestDist } : null;
 }
 
+export interface AvailableResources {
+    shapes: Map<string, Patch>;
+    colors: Map<string, Patch>;
+}
+
 /** list of distinct available base shapes / colors near the hub */
-export function availableResources(patches) {
-    const shapes = new Map();
-    const colors = new Map();
+export function availableResources(patches: readonly Patch[]): AvailableResources {
+    const shapes = new Map<string, Patch>();
+    const colors = new Map<string, Patch>();
     for (const p of patches) {
         const map = p.item.kind === "shape" ? shapes : colors;
         const key = p.item.kind === "shape" ? p.item.code : p.item.color;

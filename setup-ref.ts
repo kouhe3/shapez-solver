@@ -15,6 +15,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import type { ExecFileSyncOptions } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,11 +28,11 @@ const LINK = path.join(ROOT, "ref");
 const GAME_SRC = path.join("src", "js", "game");
 const SPARSE_PATHS = ["src/js/game", "src/js/core", "src/js/savegame", "src/js/platform"];
 
-function run(cmd, args, opts = {}) {
+function run(cmd: string, args: readonly string[], opts: ExecFileSyncOptions = {}): void {
     execFileSync(cmd, args, { stdio: "inherit", ...opts });
 }
 
-function git(args) {
+function git(args: readonly string[]): string {
     return execFileSync("git", ["-C", CHECKOUT, ...args], { encoding: "utf8" }).trim();
 }
 
@@ -74,7 +75,7 @@ if (stat) {
         fs.unlinkSync(LINK);
     } else if (stat.isFile()) {
         // core.symlinks=false checkouts write the link target as a plain file
-        const stored = fs.readFileSync(LINK, "utf8").trim().split(/\r?\n/)[0];
+        const stored = fs.readFileSync(LINK, "utf8").trim().split(/\r?\n/)[0] ?? "";
         const variants = new Set([linkTarget, linkTarget.split("/").join(path.sep)]);
         if (variants.has(stored)) {
             fs.unlinkSync(LINK);

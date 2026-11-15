@@ -8,7 +8,7 @@
 |---|---|---|---|---|---|
 | F01 | 奖励→零件映射在 `tutorial_goals_mappings.js`：`reward_mixer`→混色器、`reward_stacker`→堆叠器，平衡器/隧道/并带器/分流器也在同一张表里 | L2 | `ref/tutorial_goals_mappings.js`(`enumHubGoalRewardsToContentUnlocked`) | 已证（机制） | 解锁等级表 |
 | F02 | 奖励是「通关后」才发，所以 L8 的混色器奖励从 **L9** 才能用；L10 的堆叠器奖励从 L11 才能用 | L2 | `ref/modes/levels.js` + `ref/tutorial_goals_mappings.js`；`availableLevels()` 的 `level + 1` | 已证（机制） | `可建` 列、`--until` |
-| F03 | 网页试玩版只有 9 关（`WEB_DEMO_LEVELS`），没有 `reward_stacker`，所以试玩版里堆叠器和所有需要它的图形都建不出来 | L2/L4 | `ref/modes/levels.js:18`；实跑 `node cli.js all 47742 --until=9` 得 13 种不可建 | 已证（机制） | 不可建 / 跳过分类 |
+| F03 | 网页试玩版只有 9 关（`WEB_DEMO_LEVELS`），没有 `reward_stacker`，所以试玩版里堆叠器和所有需要它的图形都建不出来 | L2/L4 | `ref/modes/levels.js:18`；实跑 `bun run cli all 47742 --until=9` 得 13 种不可建 | 已证（机制） | 不可建 / 跳过分类 |
 | F04 | 升级档位不跟关卡绑定（`generateUpgrades` 只按档位给形状），所以 L9 玩家买了几档升级无法从关卡推出；只有关卡目标能按关过滤 | L2 | `ref/modes/regular.js:75`、`:395` | 已证（机制） | `--until` 只按「解锁等级 + 关卡来源」过滤 |
 | F05 | 游戏地图视图把建筑画成整块 `getSilhouetteColor` 剪影；采矿机、旋转器、垃圾桶另有 3×3 `getSpecialOverlayRenderMatrix` 挖空；地图视图不画机器图标 | L2 | `ref/map_chunk_view.js:184-215`；`ref/buildings/{miner,rotater,trash}.js` | 已证（机制） | 图纸建筑画法 |
 | F06 | `demo/` 镜像只有 `atlas0_*.png`，没有 `res/sprites.json`，单个建筑贴图的图集坐标不可得；可复现的视觉语言只有地图视图的剪影 | L4 | `ls demo/v/8a79de52/res`；bundle 内无 sprite 名表 | 已证（现象） | 不嵌入游戏贴图 |
@@ -19,10 +19,9 @@
 ## 重放
 
 ```bash
-cd solver
-node test/run-tests.js                 # 182 项，含解锁等级与布线判据
-node cli.js all 47742 --until=9        # 13 种可建 / 26 种需求（试玩版）
-node cli.js solve "RpRp----"           # 色料链必须出现混色器
+bun run test                           # 182 项，含解锁等级与布线判据
+bun run cli all 47742 --until=9        # 13 种可建 / 26 种需求（试玩版）
+bun run cli solve "RpRp----"           # 色料链必须出现混色器
 ```
 
 ## 勘误

@@ -9,6 +9,7 @@ import * as P from "../src/plan.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, availableLevels } from "../src/levels.js";
 import { generateChunk, scanMap, scanForTypes, availableResources, patchMinerCapacity } from "../src/map.js";
+import type { Patch } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree, planBom, createWorld, routeBelt } from "../src/layout.js";
@@ -20,7 +21,7 @@ import { planCampaign } from "../src/campaign.js";
 let failures = 0;
 let checks = 0;
 
-function check(label, actual, expected) {
+function check(label: string, actual: unknown, expected: unknown): void {
     checks++;
     const ok = JSON.stringify(actual) === JSON.stringify(expected);
     if (!ok) {
@@ -29,11 +30,11 @@ function check(label, actual, expected) {
     }
 }
 
-function checkTrue(label, value, extra = "") {
+function checkTrue(label: string, condition: boolean, detail = ""): void {
     checks++;
-    if (!value) {
+    if (!condition) {
         failures++;
-        console.log(`  FAIL ${label} ${extra}`);
+        console.log(`  FAIL ${label} ${detail}`);
     }
 }
 
@@ -41,14 +42,14 @@ console.log("== shape codec ==");
 {
     const shape = S.parse("RuCw--Cw");
     check("hash round-trip", S.hash(shape), "RuCw--Cw");
-    check("q0", shape.layers[0][0], { t: "R", c: "u" });
-    check("q1", shape.layers[0][1], { t: "C", c: "w" });
-    check("q2", shape.layers[0][2], null);
-    check("q3", shape.layers[0][3], { t: "C", c: "w" });
+    check("q0", shape.layers[0]![0], { t: "R", c: "u" });
+    check("q1", shape.layers[0]![1], { t: "C", c: "w" });
+    check("q2", shape.layers[0]![2], null);
+    check("q3", shape.layers[0]![3], { t: "C", c: "w" });
 
     const two = S.parse("RuCw--Cw:----Ru--");
     check("two layers", two.layers.length, 2);
-    check("layer1 q2", two.layers[1][2], { t: "R", c: "u" });
+    check("layer1 q2", two.layers[1]![2], { t: "R", c: "u" });
     check("two layer hash", S.hash(two), "RuCw--Cw:----Ru--");
 
     check("invalid: short", S.tryParse("Cu").ok, false);
@@ -147,9 +148,9 @@ console.log("== blueprint ports (official ItemEjector/ItemAcceptor slots) ==");
 console.log("== blueprint: connections use the right output slot ==");
 {
     // One synthetic circle patch; hub far away so placement stays deterministic.
-    const patches = [{ x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
+    const patches: Patch[] = [{ x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
     const hub = { x: 40, y: 40 };
-    const plans = [
+    const plans: Array<[string, P.PlanNode, number, number]> = [
         [
             "cutHalf side 1",
             P.stackNode(P.cutHalfNode(1, P.baseNode("C")), P.paintNode("w", P.baseNode("C"))),
@@ -171,14 +172,14 @@ console.log("== blueprint: connections use the right output slot ==");
     ];
     for (const [label, plan, slot, dx] of plans) {
         const layout = buildLayout({ plan, patches, hub });
-        const source = layout.steps.find((s) => s.node.op.startsWith("cut"));
+        const source = layout.steps.find((s) => s.node.op.startsWith("cut"))!;
         const connection = layout.connections.find(
-            (c) => c.from === source.id && c.to === layout.steps.at(-1).id
+            (c) => c.from === source.id && c.to === layout.steps.at(-1)!.id
         );
         checkTrue(`${label}: connection exists`, !!connection);
         if (!connection) continue;
         check(`${label}: output slot`, connection.outSlot, slot);
-        const building = layout.buildings.find((b) => b.stepId === source.id);
+        const building = layout.buildings.find((b) => b.stepId === source.id)!;
         check(`${label}: port x`, connection.x1, building.x + dx);
         check(`${label}: port y`, connection.y1, building.y);
     }
@@ -188,7 +189,7 @@ console.log("== blueprint: connections use the right output slot ==");
         patches,
         hub,
     });
-    const painter = paint4.buildings.find((b) => b.kind === "paint4");
+    const painter = paint4.buildings.find((b) => b.kind === "paint4")!;
     check("paint4 colors for port labels", painter.colors, ["r", null, "b", null]);
 }
 
@@ -196,7 +197,7 @@ console.log("== blueprint: the finished product is belted into the hub ==");
 {
     // A bare miner still needs one belt run into the hub; it used to vanish from
     // the layout entirely, leaving 传送带约 0 格 and no flow line on the sheet.
-    const patches = [{ x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
+    const patches: Patch[] = [{ x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
     const hub = { x: 40, y: 40 };
 
     const bare = buildLayout({ plan: P.baseNode("C"), patches, hub });
@@ -224,7 +225,7 @@ console.log("== blueprint: mixed colours get a mixer ==");
     const patches = scanMap(47742, { chunkRadius: 8 });
     const res = solve("RpRp----", { baseCodes: ["CuCuCuCu", "RuRuRuRu"] });
     checkTrue("purple: solved", res.ok, res.error || "");
-    const layout = buildLayout({ plan: res.plan, patches, hub: { x: -2, y: -2 } });
+    const layout = buildLayout({ plan: res.plan!, patches, hub: { x: -2, y: -2 } });
 
     const mixer = layout.buildings.find((b) => b.kind === "mixer");
     const painter = layout.buildings.find((b) => b.kind === "paint");
@@ -252,7 +253,7 @@ console.log("== colour plan: the single-shape recipe names the mixer ==");
     // the plan ops only carry a colour as data; the chain that produces that
     // colour (mixers + colour miners) has to be reported next to them
     const res = solve("RpRp----", { baseCodes: ["CuCuCuCu", "RuRuRuRu"] });
-    const chains = colorChains(res.flat.steps);
+    const chains = colorChains(res.flat!.steps);
     check("colour plan: one chain per colour port", chains.length, 1);
     check("colour plan: chain colour", chains[0] && chains[0].color, "p");
     check(
@@ -266,18 +267,18 @@ console.log("== colour plan: the single-shape recipe names the mixer ==");
         ["y", "w"]
     );
 
-    const bom = planBom(expandPlanTree(res.flat));
-    const byZh = Object.fromEntries(bom.map((b) => [b.zh, b.n]));
+    const bom = planBom(expandPlanTree(res.flat!));
+    const byZh = Object.fromEntries(bom.map((b): [string, number] => [b.zh, b.n]));
     check("colour plan: BOM has one mixer", byZh["混色器"], 1);
     check("colour plan: BOM has three miners", byZh["采矿机"], 3);
     check("colour plan: BOM has one trash can", byZh["垃圾桶"], 1);
     // the recipe and the drawing must count the same machines
     const patches = scanMap(47742, { chunkRadius: 8 });
-    const layout = buildLayout({ plan: res.plan, patches, hub: { x: -2, y: -2 } });
+    const layout = buildLayout({ plan: res.plan!, patches, hub: { x: -2, y: -2 } });
     check(
         "colour plan: BOM equals the drawing BOM",
         Object.entries(byZh).sort(),
-        layout.bom.map((b) => [b.zh, b.n]).sort()
+        layout.bom.map((b): [string, number] => [b.zh, b.n]).sort()
     );
 }
 
@@ -329,7 +330,7 @@ console.log("== router: walls, tunnels, dead ends ==");
 
 console.log("== needs: every shape the game asks for ==");
 {
-    for (const set of ["demo", "full"]) {
+    for (const set of ["demo", "full"] as const) {
         const shapes = neededShapes({ set });
         check(
             `needs ${set}: every code parses`,
@@ -393,7 +394,7 @@ console.log("== solver: atoms cut out of mixed deposits ==");
 
 console.log("== campaign: one map, one hub, no overlaps ==");
 {
-    const patches = [
+    const patches: Patch[] = [
         { x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } },
         { x: 14, y: 14, size: 2, item: { kind: "shape", code: "RuRuRuRu" } },
     ];
@@ -414,7 +415,7 @@ console.log("== campaign: one map, one hub, no overlaps ==");
         res.entries.reduce((n, e) => n + e.buildings, 0)
     );
 
-    const cells = new Set();
+    const cells = new Set<string>();
     let clashes = 0;
     for (const b of res.layout.buildings) {
         for (let dx = 0; dx < b.w; dx++) {
@@ -435,19 +436,19 @@ console.log("== campaign: one map, one hub, no overlaps ==");
     );
     check(
         "campaign: every factory reports a rate",
-        res.entries.map((e) => e.rate > 0),
+        res.entries.map((e) => e.status === "ok" && e.rate > 0),
         [true, true, true]
     );
     check(
         "campaign: a shared colour chain only ever limits, never boosts",
-        res.entries.every((e) => e.supplyFactor > 0 && e.supplyFactor <= 1),
+        res.entries.every((e) => e.status === "ok" && e.supplyFactor > 0 && e.supplyFactor <= 1),
         true
     );
     // an unconnected output port backs up and stalls the machine
     const cans = res.layout.buildings.filter((b) => b.kind === "trash").length;
     check("campaign: cutter offcuts get a trash can", cans, 1);
     check("campaign: every waste belt lands in one", res.layout.connections.filter((c) => c.waste).length, cans);
-    const fanout = new Map();
+    const fanout = new Map<string, number>();
     for (const c of res.layout.connections) {
         if (c.toHub) continue;
         const key = `${c.from}|${c.outSlot}`;
@@ -482,7 +483,7 @@ console.log("== campaign: only the lines buildable by L9 ==");
     );
     // cyan paint needs the mixer, so this factory is L9 and not the painter's L7
     const cyan = res.entries.find((e) => e.code === "ScScScSc");
-    check("campaign L9: cyan is L9 (mixer), not L7", cyan && cyan.availableAt, 9);
+    check("campaign L9: cyan is L9 (mixer), not L7", cyan && ("availableAt" in cyan ? cyan.availableAt : undefined), 9);
     check(
         "campaign L9: every link is routed or reported",
         res.layout.connections.filter((c) => !c.routed).length,
@@ -519,17 +520,18 @@ console.log("== throughput: the game's own rates ==");
     check("rate: 3600 s reads as 1.0h", formatDuration(3600), "1.0h");
 
     // w = mix(mix(r, g), b): 0.8/s of white needs 2 mixers, plus 2 of each base
-    const supply = sizeColorSupply(new Map([["w", 0.8]]));
+    const supply = sizeColorSupply(new Map<S.ColorChar, number>([["w", 0.8]]));
     check("sizing: white needs two mixers", supply.sources.get("w"), 2);
     check("sizing: its first stage (y) also needs two", supply.sources.get("y"), 2);
     check(
         "sizing: every base colour behind it needs two",
-        ["r", "g", "b"].map((c) => supply.sources.get(c)),
+        (["r", "g", "b"] as const).map((c) => supply.sources.get(c)),
         [2, 2, 2]
     );
 
     // a deposit is lossy: every miner needs its own tile to eject into
-    const solid = (w, h) => Array.from({ length: w * h }, (_, i) => [i % w, Math.floor(i / w)]);
+    const solid = (w: number, h: number): Array<[number, number]> =>
+        Array.from({ length: w * h }, (_, i) => [i % w, Math.floor(i / w)]);
     check("capacity: a lone tile takes one miner", patchMinerCapacity({ cells: [[0, 0]] }), 1);
     check("capacity: a solid 5×5 tops out at its 20 border tiles", patchMinerCapacity({ cells: solid(5, 5) }), 20);
     check("capacity: a 1×5 strip is fully usable", patchMinerCapacity({ cells: solid(1, 5) }), 5);
@@ -546,7 +548,7 @@ console.log("== throughput: the game's own rates ==");
     });
     check("tree: the shared miner is copied", shared.steps.filter((s) => s.op === "base").length, 2);
     check("tree: every step id stays unique", new Set(shared.steps.map((s) => s.id)).size, shared.steps.length);
-    const parents = new Map();
+    const parents = new Map<string, number>();
     for (const step of shared.steps) for (const input of step.inputs) parents.set(input.id, (parents.get(input.id) || 0) + 1);
     parents.set(shared.final.id, (parents.get(shared.final.id) || 0) + 1);
     check("tree: no step is referenced twice", Math.max(...parents.values()), 1);
@@ -566,8 +568,8 @@ console.log("== map generator (seed 47742, the demo save) ==");
 {
     // predefined chunks must land exactly where the game puts them
     const patches = scanMap(47742, { chunkRadius: 1 });
-    const near = (x, y) =>
-        patches.find((p) => Math.abs(p.x - x) < 3 && Math.abs(p.y - y) < 3) || null;
+    const near = (x: number, y: number): Patch | null =>
+        patches.find((p) => Math.abs(p.x - x) < 3 && Math.abs(p.y - y) < 3) ?? null;
     const red = near(6, 6);
     checkTrue("red color patch near (6,6)", !!red && red.item.kind === "color" && red.item.color === "r");
     const cu = near(-9, 8);

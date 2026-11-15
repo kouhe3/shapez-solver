@@ -1,5 +1,6 @@
 /vendor/
 /ref
+/node_modules/
 
 # runtime / scratch artifacts
 /server.log
@@ -9,3 +10,7 @@
 /savegame.json
 /preview-cu.svg
 /solver/tmp-sg.mjs
+
+# generated campaign sheets; plan-all.svg is tracked on purpose
+/plan-*.svg
+!/plan-all.svg

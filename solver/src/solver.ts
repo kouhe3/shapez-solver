@@ -22,6 +22,8 @@
 
 import * as S from "./shape.js";
 import * as P from "./plan.js";
+import type { ColorChar, Rotation, Shape, ShapeType } from "./shape.js";
+import type { FlatPlan, PlanNode, Verification } from "./plan.js";
 
 export const ALL_BUILDINGS = [
     "cutter",
@@ -32,21 +34,26 @@ export const ALL_BUILDINGS = [
     "stacker",
     "painter",
     "quadPainter",
-];
+] as const;
 
-export const ROTATION_BUILDING = {
+export type BuildingId = (typeof ALL_BUILDINGS)[number];
+
+/** the rotations a rotater can produce — `Rotation` without the identity */
+export type TurnDirection = Exclude<Rotation, "0">;
+
+export const ROTATION_BUILDING: Record<TurnDirection, BuildingId> = {
     CW: "rotaterCW",
     CCW: "rotaterCCW",
     180: "rotater180",
 };
 
 /** rotating `rotate(shape, dir)` with `OPPOSITE[dir]` gives `shape` back */
-export const OPPOSITE_ROTATION = { CW: "CCW", CCW: "CW", 180: "180" };
+export const OPPOSITE_ROTATION: Record<TurnDirection, Rotation> = { CW: "CCW", CCW: "CW", 180: "180" };
 
-function permuteMask(mask, dir) {
+function permuteMask(mask: number, dir: TurnDirection): number {
     let out = 0;
     for (let q = 0; q < 4; q++) {
-        let src;
+        let src: number;
         if (dir === "CW") src = (q + 3) % 4;
         else if (dir === "CCW") src = (q + 1) % 4;
         else src = (q + 2) % 4;
@@ -55,29 +62,30 @@ function permuteMask(mask, dir) {
     return out;
 }
 
-function maskToQuadrants(mask) {
-    const out = [];
+function maskToQuadrants(mask: number): number[] {
+    const out: number[] = [];
     for (let q = 0; q < 4; q++) if (mask & (1 << q)) out.push(q);
     return out;
 }
 
-function subsetMasks(layer) {
+function subsetMasks(layer: S.Layer): number[][] {
     // all non-empty subsets of the occupied quadrants
     const quads = [0, 1, 2, 3].filter((q) => layer[q]);
-    const out = [];
+    const out: number[][] = [];
     const total = 1 << quads.length;
     for (let bits = 1; bits < total; bits++) {
-        const subset = [];
-        for (let i = 0; i < quads.length; i++) if (bits & (1 << i)) subset.push(quads[i]);
+        const subset: number[] = [];
+        for (let i = 0; i < quads.length; i++) if (bits & (1 << i)) subset.push(quads[i]!);
         out.push(subset);
     }
     return out;
 }
 
-function setPartitions(items) {
-    if (items.length === 0) return [[]];
-    const [first, ...rest] = items;
-    const result = [];
+function setPartitions(items: readonly number[]): number[][][] {
+    const first = items[0];
+    if (first === undefined) return [[]];
+    const rest = items.slice(1);
+    const result: number[][][] = [];
     for (const partition of setPartitions(rest)) {
         // put `first` into an existing block
         for (let i = 0; i < partition.length; i++) {
@@ -90,8 +98,95 @@ function setPartitions(items) {
     return result;
 }
 
+/** one cut piece of a deposit: the quadrant mask it covers and the plan that yields it */
+export interface PatchPiece {
+    mask: number;
+    node: PlanNode;
+    cost: number;
+}
+
+/** all quadrant masks reachable for one shape type, with their cheapest plan */
+export interface PieceTable {
+    nodes: Map<number, PlanNode>;
+    costs: Map<number, number>;
+}
+
+/** the two halves a stacker joins */
+export interface ShapePair {
+    lower: Shape;
+    upper: Shape;
+}
+
+export interface SolverOptions {
+    /** building ids the plan may use — defaults to `ALL_BUILDINGS` */
+    buildings?: Iterable<string> | null;
+    /** deposit shape codes from the scanned map, e.g. "RuRuWuWu" */
+    baseCodes?: Iterable<string> | null;
+    maxAttempts?: number;
+    splitCap?: number;
+    verbose?: boolean;
+    debug?: boolean;
+}
+
+export interface SolverStats {
+    planShapes: number;
+    splitCandidates: number;
+    stackTests: number;
+    aborted: boolean;
+}
+
+/** no plan was found; `error` says why */
+export interface SolveFailure {
+    ok: false;
+    target: Shape;
+    error: string;
+    stats: SolverStats;
+    solver: Solver;
+    /**
+     * never present on a failure — declared so callers can read them from the
+     * union without narrowing first (the CLI's JSON output does)
+     */
+    plan?: undefined;
+    flat?: undefined;
+    cost?: undefined;
+    verification?: undefined;
+}
+
+export interface SolveSuccess {
+    /**
+     * mirrors `verification.ok`, hence `boolean` and not `true`: a plan that
+     * fails its own verification is still returned so callers can report it
+     */
+    ok: boolean;
+    target: Shape;
+    plan: PlanNode;
+    flat: FlatPlan;
+    cost: number;
+    verification: Verification;
+    stats: SolverStats;
+    solver: Solver;
+    /** never present on a success — symmetric with `SolveFailure` */
+    error?: undefined;
+}
+
+export type SolveResult = SolveSuccess | SolveFailure;
+
 export class Solver {
-    constructor(opts = {}) {
+    buildings: Set<string>;
+    memo: Map<string, PlanNode | null>;
+    path: Set<string>;
+    pieceTables: Map<ShapeType, PieceTable>;
+    baseCodes: string[];
+    patchPieces: Map<ShapeType, Map<number, PatchPiece>>;
+    attempts: number;
+    maxAttempts: number;
+    splitCap: number;
+    verbose: boolean;
+    debug: boolean;
+    cycleHits: number;
+    stats: SolverStats;
+
+    constructor(opts: SolverOptions = {}) {
         this.buildings = new Set(opts.buildings || ALL_BUILDINGS);
         this.memo = new Map();
         this.path = new Set();
@@ -107,16 +202,16 @@ export class Solver {
         this.stats = { planShapes: 0, splitCandidates: 0, stackTests: 0, aborted: false };
     }
 
-    has(building) {
+    has(building: string): boolean {
         return this.buildings.has(building);
     }
 
-    hasRotation(dir) {
+    hasRotation(dir: TurnDirection): boolean {
         return this.has(ROTATION_BUILDING[dir]);
     }
 
     /** is a pure 4-quadrant deposit of this type actually on the map? */
-    hasBase(type) {
+    hasBase(type: ShapeType): boolean {
         if (!this.baseCodes.length) return true;
         return this.baseCodes.includes(`${type}u${type}u${type}u${type}u`);
     }
@@ -130,18 +225,21 @@ export class Solver {
      * this the planner can only start from a uniform "XXXX" deposit, which makes
      * shapes needing a windmill or star quadrant unplannable.
      *
-     * @param {string[]} codes deposit shape codes from the scanned map
+     * @param codes deposit shape codes from the scanned map
      */
-    buildPatchPieces(codes) {
-        const byType = new Map();
-        const add = (type, mask, node, cost) => {
-            if (!byType.has(type)) byType.set(type, new Map());
-            const table = byType.get(type);
+    buildPatchPieces(codes: string[]): Map<ShapeType, Map<number, PatchPiece>> {
+        const byType = new Map<ShapeType, Map<number, PatchPiece>>();
+        const add = (type: ShapeType, mask: number, node: PlanNode, cost: number): void => {
+            let table = byType.get(type);
+            if (!table) {
+                table = new Map();
+                byType.set(type, table);
+            }
             const known = table.get(mask);
             if (!known || known.cost > cost) table.set(mask, { mask, node, cost });
         };
         for (const code of codes) {
-            let shape;
+            let shape: Shape;
             try {
                 shape = S.parse(code);
             } catch {
@@ -149,33 +247,47 @@ export class Solver {
             }
             if (shape.layers.length !== 1) continue;
             const layer = shape.layers[0];
-            if (!layer.every((c) => c && c.c === "u" && S.TYPE_CHARS.includes(c.t))) continue;
-            const types = layer.map((c) => c.t);
-            const base = P.baseNode(types[0], code);
-            if (types.every((t) => t === types[0])) add(types[0], 15, base, 0);
+            if (!layer) continue;
+            if (!layer.every((c): c is S.Cell => c !== null && c.c === "u" && S.isTypeChar(c.t))) {
+                continue;
+            }
+            const types: ShapeType[] = layer.map((c) => c.t);
+            const firstType = types[0];
+            if (firstType === undefined) continue;
+            const base = P.baseNode(firstType, code);
+            if (types.every((t) => t === firstType)) add(firstType, 15, base, 0);
             if (this.has("cutter")) {
                 for (const [side, mask] of [
                     [0, 0b1100],
                     [1, 0b0011],
-                ]) {
+                ] as const) {
                     const qs = [0, 1, 2, 3].filter((q) => mask & (1 << q));
-                    if (qs.every((q) => types[q] === types[qs[0]])) {
-                        add(types[qs[0]], mask, P.cutHalfNode(side, base), 1);
+                    const firstQuad = qs[0];
+                    if (firstQuad === undefined) continue;
+                    const halfType = types[firstQuad];
+                    if (halfType === undefined) continue;
+                    if (qs.every((q) => types[q] === halfType)) {
+                        add(halfType, mask, P.cutHalfNode(side, base), 1);
                     }
                 }
             }
             if (this.has("quadCutter")) {
-                for (let q = 0; q < 4; q++) add(types[q], 1 << q, P.cutQuadNode(q, base), 1);
+                for (let q = 0; q < 4; q++) {
+                    const quadType = types[q];
+                    if (quadType === undefined) continue;
+                    add(quadType, 1 << q, P.cutQuadNode(q, base), 1);
+                }
             }
         }
         return byType;
     }
 
-    pieceTable(type) {
-        if (this.pieceTables.has(type)) return this.pieceTables.get(type);
-        const nodes = new Map();
-        const costs = new Map();
-        const seed = (mask, node, cost) => {
+    pieceTable(type: ShapeType): PieceTable {
+        const cached = this.pieceTables.get(type);
+        if (cached) return cached;
+        const nodes = new Map<number, PlanNode>();
+        const costs = new Map<number, number>();
+        const seed = (mask: number, node: PlanNode, cost: number): void => {
             const known = costs.get(mask);
             if (known === undefined || known > cost) {
                 costs.set(mask, cost);
@@ -188,11 +300,12 @@ export class Solver {
         }
         const queue = [...nodes.keys()];
         while (queue.length) {
-            queue.sort((a, b) => costs.get(a) - costs.get(b));
-            const mask = queue.shift();
-            const node = nodes.get(mask);
-            const cost = costs.get(mask);
-            const relax = (nextMask, nextNode) => {
+            // every mask in the queue was seeded with a node and a cost above
+            queue.sort((a, b) => costs.get(a)! - costs.get(b)!);
+            const mask = queue.shift()!;
+            const node = nodes.get(mask)!;
+            const cost = costs.get(mask)!;
+            const relax = (nextMask: number, nextNode: PlanNode): void => {
                 if (!nextMask) return;
                 const known = costs.get(nextMask);
                 if (known === undefined || known > cost + 1) {
@@ -201,7 +314,7 @@ export class Solver {
                     queue.push(nextMask);
                 }
             };
-            for (const dir of ["CW", "CCW", "180"]) {
+            for (const dir of ["CW", "CCW", "180"] as const) {
                 if (!this.hasRotation(dir)) continue;
                 const next = permuteMask(mask, dir);
                 if (next !== mask) relax(next, P.rotateNode(dir, node));
@@ -220,25 +333,35 @@ export class Solver {
         return { nodes, costs };
     }
 
-    pieceNode(type, mask) {
+    pieceNode(type: ShapeType, mask: number): PlanNode | null {
         const { nodes } = this.pieceTable(type);
         return nodes.get(mask) || null;
     }
 
     /* ---------------- single layer atoms ---------------- */
 
-    atomCandidates(shape) {
+    atomCandidates(shape: Shape): PlanNode[] {
         if (shape.layers.length !== 1) return [];
         const layer = shape.layers[0];
+        if (!layer) return [];
         const occupied = [0, 1, 2, 3].filter((q) => layer[q]);
         if (!occupied.length) return [];
-        const out = [];
+        const out: PlanNode[] = [];
         for (const blocks of setPartitions(occupied)) {
             let ok = true;
-            const nodes = [];
+            const nodes: PlanNode[] = [];
             for (const block of blocks) {
-                const first = layer[block[0]];
-                if (!block.every((q) => layer[q].t === first.t && layer[q].c === first.c)) {
+                const firstQuad = block[0];
+                const first = firstQuad === undefined ? null : layer[firstQuad];
+                if (!first) {
+                    ok = false;
+                    break;
+                }
+                const uniform = block.every((q) => {
+                    const c = layer[q];
+                    return c !== null && c !== undefined && c.t === first.t && c.c === first.c;
+                });
+                if (!uniform) {
                     ok = false;
                     break;
                 }
@@ -259,13 +382,15 @@ export class Solver {
                 nodes.push(node);
             }
             if (!ok || !nodes.length) continue;
+            const firstNode = nodes[0];
+            if (!firstNode) continue;
             if (nodes.length === 1) {
-                out.push(nodes[0]);
+                out.push(firstNode);
                 continue;
             }
             if (!this.has("stacker")) continue;
-            let acc = nodes[0];
-            for (let i = 1; i < nodes.length; i++) acc = P.stackNode(acc, nodes[i]);
+            let acc = firstNode;
+            for (let i = 1; i < nodes.length; i++) acc = P.stackNode(acc, nodes[i]!);
             out.push(acc);
         }
         return out;
@@ -278,48 +403,54 @@ export class Solver {
      * level 26 rocket): the bottom piece keeps the cells of a quadrant subset over
      * a prefix of the layers, everything else goes into the upper piece.
      */
-    windowSplits(shape) {
+    windowSplits(shape: Shape): ShapePair[] {
         const L = shape.layers.length;
-        const out = [];
+        const out: ShapePair[] = [];
         for (let mask = 1; mask < 15; mask++) {
             // bottom must start at layer 0
+            const topLayer = shape.layers[0];
+            if (!topLayer) continue;
             let startsAtZero = false;
             for (let q = 0; q < 4; q++) {
-                if (mask & (1 << q) && shape.layers[0][q]) startsAtZero = true;
+                if (mask & (1 << q) && topLayer[q]) startsAtZero = true;
             }
             if (!startsAtZero) continue;
             let maxPrefix = 0;
             while (maxPrefix < L) {
+                const layer = shape.layers[maxPrefix];
+                if (!layer) break;
                 let any = false;
                 for (let q = 0; q < 4; q++) {
-                    if (mask & (1 << q) && shape.layers[maxPrefix][q]) any = true;
+                    if (mask & (1 << q) && layer[q]) any = true;
                 }
                 if (!any) break;
                 maxPrefix++;
             }
             for (let b = 0; b < maxPrefix; b++) {
-                const bLayers = [];
-                const tLayers = [];
+                const bLayers: S.Layer[] = [];
+                const tLayers: S.Layer[] = [];
                 for (let li = 0; li < L; li++) {
                     const src = shape.layers[li];
+                    if (!src) continue;
                     const bLayer = S.makeLayer();
                     const tLayer = S.makeLayer();
                     for (let q = 0; q < 4; q++) {
-                        if (!src[q]) continue;
+                        const cell = src[q];
+                        if (!cell) continue;
                         const toBottom = li <= b && mask & (1 << q);
-                        if (toBottom) bLayer[q] = S.cloneCell(src[q]);
-                        else tLayer[q] = S.cloneCell(src[q]);
+                        if (toBottom) bLayer[q] = S.cloneCell(cell);
+                        else tLayer[q] = S.cloneCell(cell);
                     }
                     if (li <= b) bLayers.push(bLayer);
                     tLayers.push(tLayer);
                 }
                 // trim empty layers from the top of both pieces
-                while (bLayers.length && bLayers[bLayers.length - 1].every((c) => !c)) bLayers.pop();
+                while (bLayers.length && bLayers.at(-1)?.every((c) => !c)) bLayers.pop();
                 // T starts at its first non-empty layer
                 let firstT = tLayers.findIndex((l) => l.some((c) => c));
                 if (firstT < 0) continue;
                 const tPart = tLayers.slice(firstT);
-                while (tPart.length && tPart[tPart.length - 1].every((c) => !c)) tPart.pop();
+                while (tPart.length && tPart.at(-1)?.every((c) => !c)) tPart.pop();
                 if (!bLayers.length || !tPart.length) continue;
                 if (bLayers.some((l) => l.every((c) => !c))) continue;
                 if (tPart.some((l) => l.every((c) => !c))) continue;
@@ -330,60 +461,67 @@ export class Solver {
         return out;
     }
 
-    splitCandidates(shape) {
+    splitCandidates(shape: Shape): ShapePair[] {
         const L = shape.layers.length;
-        const out = [];
+        const out: ShapePair[] = [];
         if (L < 2) return out;
         let produced = 0;
         const limit = this.splitCap;
         for (let k = 0; k < L; k++) {
             for (let m = 1; m <= Math.min(4, L - k); m++) {
                 if (k === 0 && m === L) continue;
-                const options = [];
+                const options: number[][][] = [];
                 let total = 1;
                 for (let i = k; i < k + m; i++) {
-                    const opts = subsetMasks(shape.layers[i]);
+                    const layer = shape.layers[i];
+                    if (!layer) continue;
+                    const opts = subsetMasks(layer);
                     options.push(opts);
                     total *= Math.max(opts.length, 1);
                 }
                 if (total > limit * 4) continue;
-                const choice = new Array(options.length).fill(0);
-                const emit = () => {
+                const choice: number[] = new Array(options.length).fill(0);
+                const emit = (): void => {
                     produced++;
-                    const bLayers = [];
-                    const tLayers = [];
+                    const bLayers: S.Layer[] = [];
+                    const tLayers: S.Layer[] = [];
                     for (let li = 0; li < L; li++) {
                         const layer = shape.layers[li];
+                        if (!layer) continue;
                         if (li < k || li >= k + m) {
                             bLayers.push(layer.map(S.cloneCell));
                             continue;
                         }
-                        const tQuads = options[li - k][choice[li - k]];
+                        // in-window layers: options[li - k] holds this layer's subsets
+                        const tQuads = options[li - k]![choice[li - k]!]!;
                         const bLayer = S.makeLayer();
                         const tLayer = S.makeLayer();
                         for (let q = 0; q < 4; q++) {
-                            if (!layer[q]) continue;
-                            if (tQuads.indexOf(q) >= 0) tLayer[q] = S.cloneCell(layer[q]);
-                            else bLayer[q] = S.cloneCell(layer[q]);
+                            const cell = layer[q];
+                            if (!cell) continue;
+                            if (tQuads.indexOf(q) >= 0) tLayer[q] = S.cloneCell(cell);
+                            else bLayer[q] = S.cloneCell(cell);
                         }
                         bLayers.push(bLayer);
                         tLayers.push(tLayer);
                     }
-                    while (bLayers.length && bLayers[bLayers.length - 1].every((c) => !c)) bLayers.pop();
-                    while (tLayers.length && tLayers[tLayers.length - 1].every((c) => !c)) tLayers.pop();
+                    while (bLayers.length && bLayers.at(-1)?.every((c) => !c)) bLayers.pop();
+                    while (tLayers.length && tLayers.at(-1)?.every((c) => !c)) tLayers.pop();
                     if (!bLayers.length || !tLayers.length) return;
                     if (bLayers.some((l) => l.every((c) => !c))) return;
                     if (tLayers.some((l) => l.every((c) => !c))) return;
                     if (bLayers.length > 4 || tLayers.length > 4) return;
                     out.push({ lower: { layers: bLayers }, upper: { layers: tLayers } });
                 };
-                const rec = (depth) => {
+                const rec = (depth: number): boolean => {
                     if (produced >= limit) return true;
                     if (depth === options.length) {
                         emit();
                         return produced >= limit;
                     }
-                    for (let i = 0; i < options[depth].length; i++) {
+                    const subsets = options[depth];
+                    if (!subsets) return false;
+                    for (let i = 0; i < subsets.length; i++) {
                         choice[depth] = i;
                         if (rec(depth + 1)) return true;
                     }
@@ -397,21 +535,30 @@ export class Solver {
 
     /* ---------------- scaffold for cut targets ---------------- */
 
-    addScaffold(shape, quad, mode, colorMode) {
+    addScaffold(
+        shape: Shape,
+        quad: number,
+        mode: "column" | "first" | "last",
+        colorMode: "u" | "match" | "firstColor"
+    ): Shape | null {
         const L = shape.layers.length;
-        const layers = shape.layers.map((l) => l.map(S.cloneCell));
-        let first = null;
-        for (const c of shape.layers[0]) if (c) { first = c; break; }
+        const layers: S.Layer[] = shape.layers.map((l) => l.map(S.cloneCell));
+        const topLayer = shape.layers[0];
+        if (!topLayer) return null;
+        let first: S.Cell | null = null;
+        for (const c of topLayer) if (c) { first = c; break; }
         if (!first) return null;
         const fill = mode === "column" ? Array.from({ length: L }, (_, i) => i)
             : mode === "first" ? [0]
             : [L - 1];
         for (const li of fill) {
-            if (layers[li][quad]) return null;
-            let t = first.t;
-            let c = "u";
+            const layer = layers[li];
+            if (!layer) continue;
+            if (layer[quad]) return null;
+            let t: ShapeType = first.t;
+            let c: ColorChar = "u";
             if (colorMode === "match") {
-                const sameLayer = shape.layers[li].find((x) => x);
+                const sameLayer = shape.layers[li]?.find((x) => x);
                 if (sameLayer) {
                     t = sameLayer.t;
                     c = sameLayer.c;
@@ -419,19 +566,19 @@ export class Solver {
             } else if (colorMode === "firstColor") {
                 c = first.c;
             }
-            layers[li][quad] = { t, c };
+            layer[quad] = { t, c };
         }
         if (layers.some((l) => l.every((c) => !c))) return null;
-        const out = { layers };
+        const out: Shape = { layers };
         if (S.equals(out, shape)) return null;
         return out;
     }
 
     /* ---------------- main recursive planner ---------------- */
 
-    planShape(shape) {
+    planShape(shape: Shape): PlanNode | null {
         const key = S.hash(shape);
-        if (this.memo.has(key)) return this.memo.get(key);
+        if (this.memo.has(key)) return this.memo.get(key) ?? null;
         if (this.path.has(key)) {
             this.cycleHits++;
             return null;
@@ -443,8 +590,8 @@ export class Solver {
         const cycleHitsBefore = this.cycleHits;
         this.stats.planShapes++;
         this.path.add(key);
-        let best = null;
-        const consider = (node) => {
+        let best: PlanNode | null = null;
+        const consider = (node: PlanNode | null): void => {
             if (node && this.debug) {
                 const out = P.evalNode(node);
                 if (!S.equals(out, shape)) {
@@ -459,11 +606,12 @@ export class Solver {
             /* 1. base */
             if (shape.layers.length === 1) {
                 const layer = shape.layers[0];
-                const t = layer[0] && layer[0].t;
+                const t = layer?.[0]?.t;
                 if (
                     t &&
-                    S.TYPE_CHARS.includes(t) &&
-                    layer.every((c) => c && c.t === t && c.c === "u") &&
+                    S.isTypeChar(t) &&
+                    layer &&
+                    layer.every((c) => c !== null && c.t === t && c.c === "u") &&
                     this.hasBase(t)
                 ) {
                     consider(P.baseNode(t));
@@ -497,7 +645,7 @@ export class Solver {
             }
 
             /* 4. rotations */
-            for (const dir of ["CW", "CCW", "180"]) {
+            for (const dir of ["CW", "CCW", "180"] as const) {
                 if (!this.hasRotation(dir)) continue;
                 const rotated = S.rotate(shape, dir);
                 if (S.hash(rotated) === key) continue;
@@ -509,13 +657,13 @@ export class Solver {
             if (this.has("stacker")) {
                 const L = shape.layers.length;
                 for (let k = 1; k < L; k++) {
-                    const lower = { layers: shape.layers.slice(0, k).map((l) => l.map(S.cloneCell)) };
-                    const upper = { layers: shape.layers.slice(k).map((l) => l.map(S.cloneCell)) };
-                    let merged;
+                    const lower: Shape = { layers: shape.layers.slice(0, k).map((l) => l.map(S.cloneCell)) };
+                    const upper: Shape = { layers: shape.layers.slice(k).map((l) => l.map(S.cloneCell)) };
+                    let merged: Shape;
                     this.stats.stackTests++;
                     try {
                         merged = S.stack(lower, upper);
-                    } catch (e) {
+                    } catch {
                         continue;
                     }
                     if (!S.equals(merged, shape)) continue;
@@ -530,11 +678,11 @@ export class Solver {
             /* 6. build a scaffold shape, then cut it in half */
             if (this.has("cutter")) {
                 const half = S.confinedHalf(shape);
-                if (half !== -1) {
+                if (half === 0 || half === 1) {
                     const discarded = half === 0 ? [0, 1] : [2, 3];
                     for (const quad of discarded) {
-                        for (const mode of ["column", "first", "last"]) {
-                            for (const colorMode of ["u", "match", "firstColor"]) {
+                        for (const mode of ["column", "first", "last"] as const) {
+                            for (const colorMode of ["u", "match", "firstColor"] as const) {
                                 const scaffolded = this.addScaffold(shape, quad, mode, colorMode);
                                 if (!scaffolded) continue;
                                 const sub = this.planShape(scaffolded);
@@ -547,7 +695,7 @@ export class Solver {
 
             /* 7. general splits that merge into the same layers (expensive, last resort) */
             if (this.has("stacker") && shape.layers.length >= 2 && !best) {
-                const families = [
+                const families: (() => ShapePair[])[] = [
                     () => this.windowSplits(shape),
                     () => this.splitCandidates(shape),
                 ];
@@ -556,11 +704,11 @@ export class Solver {
                     for (const candidate of family()) {
                         if (this.stats.aborted) break;
                         this.stats.splitCandidates++;
-                        let merged;
+                        let merged: Shape;
                         this.stats.stackTests++;
                         try {
                             merged = S.stack(candidate.lower, candidate.upper);
-                        } catch (e) {
+                        } catch {
                             continue;
                         }
                         if (!S.equals(merged, shape)) continue;
@@ -587,7 +735,7 @@ export class Solver {
  * public API
  * ------------------------------------------------------------------ */
 
-export function solve(codeOrShape, opts = {}) {
+export function solve(codeOrShape: string | Shape, opts: SolverOptions = {}): SolveResult {
     const target = P.parseTarget(codeOrShape);
     if (S.isEntirelyEmpty(target)) throw new Error("target shape is empty");
     const solver = new Solver(opts);

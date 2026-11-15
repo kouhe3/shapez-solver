@@ -11,20 +11,34 @@
  * multiply the whole column, so a rate at level N is `rate × upgradeMultiplier`.
  */
 
+import type { PlanOp } from "./plan.js";
+
+/** the only field a rate reads off a plan step */
+export interface RatedStep {
+    op: PlanOp;
+}
+
+/** the machine that caps a chain — the one to upgrade or duplicate first */
+export interface Bottleneck {
+    op: PlanOp;
+    zh: string;
+    rate: number;
+}
+
 /** items/s a single belt carries */
-export const BELT_RATE = 2;
+export const BELT_RATE: number = 2;
 
 /** items/s a single miner produces */
-export const MINER_RATE = 0.4;
+export const MINER_RATE: number = 0.4;
 
 /** items/s a single colour source (miner on a deposit, or one mixer) produces */
-export const SOURCE_RATE = 0.4;
+export const SOURCE_RATE: number = 0.4;
 
 /** a 4×4 hub has 12 perimeter tiles, so at most 12 belts can enter it directly */
-export const HUB_SIDES = 12;
+export const HUB_SIDES: number = 12;
 
 /** items/s each plan op processes; `base` is the miner */
-export const STEP_RATE = {
+export const STEP_RATE: Record<PlanOp | "mixer", number> = {
     base: MINER_RATE,
     cutHalf: 0.5,
     cutQuad: 0.5,
@@ -36,7 +50,7 @@ export const STEP_RATE = {
 };
 
 /** Chinese label per kind, for the bottleneck line */
-const KIND_ZH = {
+const KIND_ZH: Record<PlanOp | "mixer", string> = {
     base: "采矿机",
     cutHalf: "切割机",
     cutQuad: "四向切割机",
@@ -50,11 +64,8 @@ const KIND_ZH = {
 /**
  * A factory is one chain: every machine sees every item, so the slowest machine
  * sets the output rate. `steps` is a flattened plan (`plan.js` `flatten`).
- *
- * @param {Array<{op: string}>} steps
- * @returns {number} items/s
  */
-export function chainRate(steps) {
+export function chainRate(steps: readonly RatedStep[]): number {
     let rate = Infinity;
     for (const step of steps) {
         const r = STEP_RATE[step.op];
@@ -64,14 +75,9 @@ export function chainRate(steps) {
     return Number.isFinite(rate) ? rate : 0;
 }
 
-/**
- * The machine that caps the chain — the one to upgrade or duplicate first.
- *
- * @param {Array<{op: string}>} steps
- * @returns {{op: string, zh: string, rate: number}|null}
- */
-export function bottleneck(steps) {
-    let worst = null;
+/** the slowest machine of a chain, or `null` for an empty one */
+export function bottleneck(steps: readonly RatedStep[]): Bottleneck | null {
+    let worst: Bottleneck | null = null;
     for (const step of steps) {
         const r = STEP_RATE[step.op];
         if (r === undefined) continue;
@@ -81,13 +87,13 @@ export function bottleneck(steps) {
 }
 
 /** items/s → "15.0/分" */
-export function formatRate(rate) {
+export function formatRate(rate: number): string {
     if (!Number.isFinite(rate) || rate <= 0) return "—";
     return `${(rate * 60).toFixed(1)}/分`;
 }
 
 /** seconds → "42s" / "18m" / "3.2h" / "2.1d" */
-export function formatDuration(seconds) {
+export function formatDuration(seconds: number): string {
     if (!Number.isFinite(seconds) || seconds <= 0) return "—";
     if (seconds < 90) return `${seconds.toFixed(0)}s`;
     if (seconds < 3600) return `${(seconds / 60).toFixed(0)}m`;

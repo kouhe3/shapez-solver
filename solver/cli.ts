@@ -1,34 +1,39 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * shapez 通用机器求解器 CLI
  *
- *   node cli.js solve "RuCw--Cw:----Ru--"
- *   node cli.js solve "RuCw--Cw:----Ru--" --json
- *   node cli.js solve "Cu------" --level=demo:6
- *   node cli.js levels
- *   node cli.js render "RuCw--Cw"
- *   node cli.js check
+ *   bun run cli solve "RuCw--Cw:----Ru--"
+ *   bun run cli solve "RuCw--Cw:----Ru--" --json
+ *   bun run cli solve "Cu------" --level=demo:6
+ *   bun run cli levels
+ *   bun run cli render "RuCw--Cw"
+ *   bun run cli check
  */
 
 import * as S from "./src/shape.js";
 import * as P from "./src/plan.js";
+import type { PlanStep } from "./src/plan.js";
 import { shapeASCII } from "./src/render.js";
 import { solve, ALL_BUILDINGS } from "./src/solver.js";
+import type { SolveSuccess } from "./src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "./src/levels.js";
 import { scanMap, scanForTypes, itemLabel, availableResources } from "./src/map.js";
 import { decodeSavegame, savegameMapInfo } from "./src/savegame.js";
+import type { SavegameInfo, SavegamePoint } from "./src/savegame.js";
 import { schematicSVG } from "./src/schematic.js";
 import { neededShapes, requiredTypes, describeSource, NEED_SETS } from "./src/needs.js";
+import type { NeedSet, NeedSetName, NeededShape } from "./src/needs.js";
 import { planCampaign } from "./src/campaign.js";
 import { formatRate, formatDuration, HUB_SIDES } from "./src/rates.js";
 import { colorChains } from "./src/color.js";
 import { planBom, expandPlanTree } from "./src/layout.js";
 import fs from "node:fs";
+import path from "node:path";
 
 const args = process.argv.slice(2);
 const command = args[0];
-const flags = new Map();
-const positional = [];
+const flags = new Map<string, string | true>();
+const positional: string[] = [];
 for (const arg of args.slice(1)) {
     if (arg.startsWith("--")) {
         const eq = arg.indexOf("=");
@@ -37,12 +42,36 @@ for (const arg of args.slice(1)) {
     } else positional.push(arg);
 }
 
-function label(step) {
+/** `--k=v` holds a string, a bare `--k` holds `true` */
+function flagString(name: string): string | undefined {
+    const value = flags.get(name);
+    return typeof value === "string" ? value : undefined;
+}
+
+/** numeric flags keep `Number(value)` semantics, so a bare `--k` counts as 1 */
+function flagNumber(name: string): number | undefined {
+    const value = flags.get(name);
+    return value === undefined ? undefined : Number(value);
+}
+
+/** a `--set` the CLI knows; null keeps the raw string for the label */
+function needSetConf(name: string): NeedSet | null {
+    if (name === "demo" || name === "full") return NEED_SETS[name];
+    return null;
+}
+
+/** `neededShapes` rejects an unknown set, and so does the CLI */
+function needSetName(name: string): NeedSetName {
+    if (name === "demo" || name === "full") return name;
+    throw new Error(`unknown need set: ${name}`);
+}
+
+function label(step: PlanStep): string {
     const zh = P.OP_LABELS[step.op] || step.op;
     return zh;
 }
 
-function printPlan(res) {
+function printPlan(res: SolveSuccess): void {
     const flat = res.flat;
     console.log(`目标: ${S.hash(res.target)}`);
     console.log(`建筑数(成本): ${res.cost}   步骤: ${flat.steps.length}`);
@@ -51,7 +80,7 @@ function printPlan(res) {
     for (const step of flat.steps) {
         const inputs = step.inputs.map((i) => i.id).join(", ") || "-";
         const detail =
-            step.op === "paint4"
+            step.node.op === "paint4"
                 ? "按象限上色: " + step.node.colors.map((c) => c || "-").join("/")
                 : step.detail;
         console.log(
@@ -82,10 +111,10 @@ function printPlan(res) {
     }
 }
 
-function resolveBuildings() {
-    const levelSpec = flags.get("level");
+function resolveBuildings(): Set<string> {
+    const levelSpec = flagString("level");
     if (levelSpec) {
-        const [which, num] = String(levelSpec).split(":");
+        const [which, num] = levelSpec.split(":");
         const levels = which === "demo" ? DEMO_LEVELS : FULL_LEVELS;
         return buildingsForLevel(levels, Number(num));
     }
@@ -93,10 +122,10 @@ function resolveBuildings() {
     return new Set(ALL_BUILDINGS);
 }
 
-function cmdSolve() {
+function cmdSolve(): void {
     const code = positional[0];
     if (!code) {
-        console.error("用法: node cli.js solve <shape-code> [--json] [--level=demo:6]");
+        console.error("用法: bun run cli solve <shape-code> [--json] [--level=demo:6]");
         process.exit(2);
     }
     const buildings = resolveBuildings();
@@ -143,10 +172,10 @@ function cmdSolve() {
     console.log(`\n用时 ${ms} ms`);
 }
 
-function cmdRender() {
+function cmdRender(): void {
     const code = positional[0];
     if (!code) {
-        console.error("用法: node cli.js render <shape-code>");
+        console.error("用法: bun run cli render <shape-code>");
         process.exit(2);
     }
     const parsed = S.tryParse(code);
@@ -160,7 +189,7 @@ function cmdRender() {
     console.log(S.describeShape(parsed.shape));
 }
 
-function cmdLevels() {
+function cmdLevels(): void {
     const levels = flags.get("game") ? FULL_LEVELS : DEMO_LEVELS;
     for (const lvl of levels) {
         const buildings = buildingsForLevel(levels, lvl.level);
@@ -172,31 +201,47 @@ function cmdLevels() {
     }
 }
 
-async function cmdCheck() {
+async function cmdCheck(): Promise<void> {
     const { spawnSync } = await import("node:child_process");
-    const res = spawnSync(process.execPath, ["./test/run-tests.js"], { stdio: "inherit" });
+    const res = spawnSync(process.execPath, [path.join(import.meta.dir, "test/run-tests.ts")], {
+        stdio: "inherit",
+    });
     process.exit(res.status || 0);
 }
 
+/** seed + hub position read from a savegame */
+interface SaveMapContext extends SavegameInfo {
+    savePath: string;
+}
+
+/** seed + hub position given on the command line */
+interface SeedMapContext {
+    seed: number;
+    hub: SavegamePoint;
+    dump: null;
+}
+
+type MapContext = SaveMapContext | SeedMapContext;
+
 /** seed + hub position either from a savegame file, --seed or a positional seed */
-function loadMapContext(seedOverride) {
+function loadMapContext(seedOverride?: string): MapContext {
     const savePath = flags.get("save");
     if (savePath) {
         const raw = fs.readFileSync(String(savePath), "utf8");
         const { payload } = decodeSavegame(raw);
-        return { ...savegameMapInfo(payload), savePath };
+        return { ...savegameMapInfo(payload), savePath: String(savePath) };
     }
     const seedFlag = seedOverride ?? flags.get("seed");
     if (seedFlag === undefined) {
-        console.error("需要地图种子：node cli.js all <seed>（或 --seed=<n> / --save=<savegame.bin>）");
+        console.error("需要地图种子：bun run cli all <seed>（或 --seed=<n> / --save=<savegame.bin>）");
         process.exit(2);
     }
     return { seed: Number(seedFlag), hub: { x: -2, y: -2 }, dump: null };
 }
 
-function cmdMap() {
+function cmdMap(): void {
     const ctx = loadMapContext();
-    const radius = Number(flags.get("radius") ?? 3);
+    const radius = flagNumber("radius") ?? 3;
     const patches = scanMap(ctx.seed, { chunkRadius: radius });
     const hubX = ctx.hub.x + 2;
     const hubY = ctx.hub.y + 2;
@@ -219,7 +264,7 @@ function cmdMap() {
 }
 
 /** terminal column width: CJK glyphs take two cells */
-function displayWidth(text) {
+function displayWidth(text: string | number): number {
     let n = 0;
     for (const ch of String(text)) {
         n += /[\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1;
@@ -227,32 +272,33 @@ function displayWidth(text) {
     return n;
 }
 
-function pad(text, width) {
+function pad(text: string | number, width: number): string {
     const s = String(text);
     const w = displayWidth(s);
     return w >= width ? s : s + " ".repeat(width - w);
 }
 
-function cmdAll() {
+function cmdAll(): void {
     const set = String(flags.get("set") ?? "demo");
-    const untilLevel = flags.has("until") ? Number(flags.get("until")) : null;
+    const setConf = needSetConf(set);
+    const untilLevel = flagNumber("until") ?? null;
     if (untilLevel !== null && (!Number.isInteger(untilLevel) || untilLevel < 1)) {
         console.error("--until 需要正整数关卡号，例如 --until=9");
         process.exit(2);
     }
-    // `node cli.js all 47742` — the seed is the whole input of the campaign sheet
+    // `bun run cli all 47742` — the seed is the whole input of the campaign sheet
     const positionalSeed = positional[0] !== undefined && /^\d+$/.test(positional[0]) ? positional[0] : undefined;
     const custom = flags.get("code") ?? (positionalSeed ? undefined : positional[0]);
-    const shapes = custom
+    const shapes: NeededShape[] = custom
         ? String(custom)
               .split(",")
               .map((c) => c.trim())
               .filter(Boolean)
               .map((code) => ({ code, sources: [] }))
-        : neededShapes({ set });
+        : neededShapes({ set: needSetName(set) });
 
     const ctx = loadMapContext(positionalSeed);
-    const fixedRadius = flags.has("radius") ? Number(flags.get("radius")) : null;
+    const fixedRadius = flags.has("radius") ? flagNumber("radius") : null;
     const scan = scanForTypes(ctx.seed, {
         types: requiredTypes(shapes),
         startRadius: fixedRadius ?? (set === "full" ? 10 : 8),
@@ -263,10 +309,10 @@ function cmdAll() {
         shapes,
         patches,
         hub: ctx.hub,
-        maxAttempts: Number(flags.get("budget") ?? 30000),
+        maxAttempts: flagNumber("budget") ?? 30000,
         buildings: flags.get("level") ? resolveBuildings() : null,
         untilLevel,
-        levels: NEED_SETS[set] ? NEED_SETS[set].levels : undefined,
+        levels: setConf ? setConf.levels : undefined,
     });
 
     if (flags.get("json")) {
@@ -296,7 +342,7 @@ function cmdAll() {
             )
         );
     } else {
-        const label = NEED_SETS[set] ? NEED_SETS[set].label : set;
+        const label = setConf ? setConf.label : set;
         const scope = untilLevel === null ? "" : ` · 只画 L≤${untilLevel} 可建的`;
         console.log(`种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · 中心 (${ctx.hub.x},${ctx.hub.y})`);
         console.log(`全部需求图形（${label}${scope}）: ${res.totals.shapes} 种可建 / ${shapes.length} 种需求\n`);
@@ -387,7 +433,7 @@ function cmdAll() {
         console.log(`材料: ${res.layout.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
         for (const c of res.layout.colors) {
             if (c.direct) console.log(`颜色 ${c.color}: 地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`);
-            else console.log(`颜色 ${c.color}: 无直接矿脉，需混合 ${c.mix.join("+")}`);
+            else console.log(`颜色 ${c.color}: 无直接矿脉，需混合 ${c.mix ? c.mix.join("+") : "—"}`);
         }
         for (const m of res.layout.missing) console.log(`缺失资源: ${m}`);
     }
@@ -427,10 +473,10 @@ switch (command) {
 输入一个地图种子，解出整条战役需要的所有图形，输出一张共用同一张地图、
 同一个中心的图纸（建筑坐标 + 物料流 + 材料表）。
 
-  node cli.js all 47742                  # → plan-47742.svg（DEMO 需求表 26 种）
-  node cli.js all 47742 --set=full       # 完整版需求表 34 种
-  node cli.js all 47742 --until=9        # 只画第 9 关时能建的产线
-  node cli.js all --save=../savegame.bin # 用存档里的真实种子和中心
+  bun run cli all 47742                  # → plan-47742.svg（DEMO 需求表 26 种）
+  bun run cli all 47742 --set=full       # 完整版需求表 34 种
+  bun run cli all 47742 --until=9        # 只画第 9 关时能建的产线
+  bun run cli all --save=../savegame.bin # 用存档里的真实种子和中心
 
 其他命令:
   solve <shape>     单个 shape → 建筑方案（步骤 + 复算校验）
