@@ -17,7 +17,7 @@
  */
 
 import { DEMO_LEVELS, FULL_LEVELS } from "./levels.js";
-import type { Level } from "./levels.js";
+import type { GameVersion, Level } from "./levels.js";
 import * as S from "./shape.js";
 
 export const PREPAREMENT_SHAPE = "CpRpCp--:SwSwSwSw";
@@ -104,7 +104,8 @@ export const ENDGAME_TIERS: UpgradeRequirement[][] = [
     ],
 ];
 
-export type NeedSetName = "demo" | "full";
+/** the requirement sets are keyed by game version — one vocabulary only */
+export type NeedSetName = GameVersion;
 
 export interface NeedSet {
     label: string;

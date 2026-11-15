@@ -69,11 +69,12 @@ function esc(text: string): string {
 }
 
 // Palette read off the game's own art (res/atlas0_hq.png) and its map view:
-// building bodies are #dee1ea plates with #64666e ink, belts are solid
-// #797a80 runs (#d2d4d9 ribbons once zoomed in).
+// building bodies are #dee1ea plates with #64666e ink; the chunk overview —
+// the game's zoomed-out "thumbnail" view — paints belts in
+// `themes/light.json` → `chunkOverview.beltColor` (#777).
 const INK = {
     line: "#64666e",
-    belt: "#797a80",
+    belt: "#777",
 };
 
 const r2 = (v: number): number => Math.round(v * 100) / 100;
@@ -212,9 +213,12 @@ export function schematicSVG(
     const spanX = Math.max(1, maxX - minX);
     const spanY = Math.max(1, maxY - minY);
     // 18 px per tile keeps the game pictograms legible on a campaign sheet;
-    // below that the icons collapse into the body plate.
+    // below that the icons collapse into the body plate. The game's chunk
+    // overview is 3 px per tile, so the automatic size snaps to that grid and
+    // a 1/3-tile belt band lands on whole sheet pixels.
     const minTile = opts.minTile ?? (campaign ? 22 : 12);
-    const t = opts.tile ?? Math.max(minTile, Math.min(30, Math.floor(1150 / Math.max(spanX, spanY))));
+    const autoTile = Math.max(minTile, Math.min(30, Math.floor(1150 / Math.max(spanX, spanY))));
+    const t = opts.tile ?? Math.max(3, Math.round(autoTile / 3) * 3);
 
     const width = Math.ceil((maxX - minX) * t + pad * 2);
     const height = Math.ceil((maxY - minY) * t + pad * 2);
@@ -313,17 +317,103 @@ export function schematicSVG(
         }
     }
 
-    // Belts first (under buildings): the exact polyline the router laid, in the
-    // grey the game uses for belts on the map. Direction is read off the
-    // machine tabs (socket = in, arrow = out). A link with no legal route is
-    // dashed red instead of pretending a belt could go there.
+    // Tunnels, because the belt pass needs their underground runs: the chunk
+    // overview paints the sender as a blue block and the receiver as a green
+    // one, each cut into the 3×3 shape `getSpecialOverlayRenderMatrix` returns
+    // in `ref/buildings/underground_belt.js:28-30,68-88`. One tunnel can stay
+    // underground under several over-belts: crossings closer than two tiles are
+    // one span (a receiver and a sender need distinct surface tiles), while a
+    // turn between two crossings keeps them apart (a tunnel is straight).
+    const TUNNEL_SENDER = "#6d9dff";
+    const TUNNEL_RECEIVER = "#71ff9c";
+    // the two 3×3 matrices as tile-local (0..1) outlines; the flat bar faces
+    // the other half of the tunnel
+    const SENDER_BLOCK = "M 0 0 H 1 V 0.3333 H 0.6667 V 1 H 0.3333 V 0.3333 H 0 Z";
+    const RECEIVER_BLOCK = "M 0 1 H 1 V 0.6667 H 0.6667 V 0 H 0.3333 V 0.6667 H 0 Z";
+    /** the entity rotation that points the flat bar along the flow, as in
+     *  `enumDirectionToAngle` (top=0, right=90, bottom=180, left=270) */
+    const flowAngle = (vx: number, vy: number): number => (vy === -1 ? 0 : vx === 1 ? 90 : vy === 1 ? 180 : 270);
+    const tunnelBlock = (cell: Tile, color: string, block: string, deg: number): string =>
+        `<path d="${block}" fill="${color}" transform="translate(${r2(px(cell.x) + t / 2)} ${r2(
+            py(cell.y) + t / 2
+        )}) rotate(${deg}) scale(${r2(t)}) translate(-0.5 -0.5)"/>`;
+    const tunnelBlocks: string[] = [];
+
+    // Belts (under buildings): the chunk overview paints each belt tile as a
+    // band of `chunkOverview.beltColor` exactly 1/3 of a tile wide —
+    // square-ended, full-length into a port, elbow at a turn. Direction is read
+    // off the machine tabs (socket = in, arrow = out). A tunneled tile carries
+    // the belt underground, so it is not painted here; the tunnel blocks take
+    // its place. A link with no legal route stays dashed red.
     out.push(
-        `<g fill="none" stroke="${INK.belt}" stroke-width="${r2(Math.max(1.5, t * 0.14))}" stroke-linecap="round" stroke-linejoin="round">`
+        `<g fill="none" stroke="${INK.belt}" stroke-width="${r2(t / 3)}" stroke-linecap="butt" stroke-linejoin="miter">`
     );
     for (const c of layout.connections) {
         if (!c.routed || !c.path) continue;
-        const pts = c.path.map((p): [number, number] => [px(p.x + 0.5), py(p.y + 0.5)]);
-        out.push(`<path d="${polylinePath(pts, px(c.x1), py(c.y1), px(c.x2), py(c.y2))}"/>`);
+        const cells = c.path;
+        const crossings = c.tunnelCells || [];
+        const crossingIdx = cells
+            .map((cell, i) => (crossings.some((x) => x.x === cell.x && x.y === cell.y) ? i : -1))
+            .filter((i) => i >= 0);
+        const spans: Array<[number, number]> = [];
+        for (const i of crossingIdx) {
+            const last = spans[spans.length - 1];
+            if (!last) {
+                spans.push([i, i]);
+                continue;
+            }
+            const gap = i - last[1];
+            const a = cells[last[1]]!;
+            const b = cells[i]!;
+            const mid = gap === 2 ? cells[last[1] + 1]! : null;
+            const straight = mid !== null && mid.x - a.x === b.x - mid.x && mid.y - a.y === b.y - mid.y;
+            if (gap === 1 || (gap === 2 && straight)) last[1] = i;
+            else spans.push([i, i]);
+        }
+        const underground = new Set<number>();
+        for (const [a, b] of spans) for (let k = a; k <= b; k++) underground.add(k);
+
+        const pts: Array<[number, number]> = [
+            [px(c.x1), py(c.y1)],
+            ...cells.map((p): [number, number] => [px(p.x + 0.5), py(p.y + 0.5)]),
+            [px(c.x2), py(c.y2)],
+        ];
+        let chunk: Array<[number, number]> = [];
+        const emit = (): void => {
+            if (chunk.length >= 2) {
+                const first = chunk[0]!;
+                const last = chunk[chunk.length - 1]!;
+                out.push(`<path d="${polylinePath(chunk.slice(1, -1), first[0], first[1], last[0], last[1])}"/>`);
+            }
+            chunk = [];
+        };
+        for (let i = 0; i < pts.length; i++) {
+            if (underground.has(i - 1)) emit();
+            else chunk.push(pts[i]!);
+        }
+        emit();
+
+        for (const [a, b] of spans) {
+            const head = cells[a]!;
+            const tail = cells[b]!;
+            if (a > 0) {
+                const sender = cells[a - 1]!;
+                tunnelBlocks.push(
+                    tunnelBlock(sender, TUNNEL_SENDER, SENDER_BLOCK, flowAngle(head.x - sender.x, head.y - sender.y))
+                );
+            }
+            if (b + 1 < cells.length) {
+                const receiver = cells[b + 1]!;
+                tunnelBlocks.push(
+                    tunnelBlock(
+                        receiver,
+                        TUNNEL_RECEIVER,
+                        RECEIVER_BLOCK,
+                        flowAngle(receiver.x - tail.x, receiver.y - tail.y)
+                    )
+                );
+            }
+        }
     }
     out.push(`</g>`);
     out.push(
@@ -341,17 +431,7 @@ export function schematicSVG(
         out.push(`<path d="M ${r2(x1)} ${r2(y1)} L ${r2(midX)} ${r2(y1)} L ${r2(midX)} ${r2(y2)} L ${r2(x2)} ${r2(y2)}"/>`);
     }
     out.push(`</g>`);
-    // tunnel crossings: a white notch where one belt passes under another
-    for (const c of layout.connections) {
-        for (const cell of c.tunnelCells || []) {
-            const size = Math.max(3, t * 0.32);
-            out.push(
-                `<rect x="${r2(px(cell.x + 0.5) - size / 2)}" y="${r2(py(cell.y + 0.5) - size / 2)}" width="${r2(
-                    size
-                )}" height="${r2(size)}" rx="1" fill="#f8f9ff" stroke="${INK.belt}" stroke-width="1"/>`
-            );
-        }
-    }
+    out.push(...tunnelBlocks);
 
     // hub: the game's red 4×4 building with its "中心" badge, above the belts
     {
@@ -433,7 +513,7 @@ export function schematicSVG(
         ly += 18;
     }
     legend.push(
-        `<line x1="${lx}" y1="${ly - 4}" x2="${lx + 16}" y2="${ly - 4}" stroke="${INK.belt}" stroke-width="5" stroke-linecap="round"/><text x="${lx + 22}" y="${ly}">传送带走向（沿线铺设）</text>`
+        `<rect x="${lx}" y="${ly - 9}" width="16" height="6" fill="${INK.belt}"/><text x="${lx + 22}" y="${ly}">传送带（1/3 格宽带）</text>`
     );
     ly += 18;
     legend.push(
@@ -442,7 +522,9 @@ export function schematicSVG(
     ly += 16;
     legend.push(`${arrowHead(lx + 10, ly - 5, 9, 0)}<text x="${lx + 22}" y="${ly}">输出口</text>`);
     ly += 14;
-    legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">白色小方块：隧道（两条带交叉）</text>`);
+    legend.push(
+        `<rect x="${lx + 1}" y="${ly - 10}" width="7" height="7" fill="${TUNNEL_SENDER}"/><rect x="${lx + 9}" y="${ly - 10}" width="7" height="7" fill="${TUNNEL_RECEIVER}"/><text x="${lx + 22}" y="${ly}">隧道：蓝=入口 绿=出口</text>`
+    );
     ly += 12;
     legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">红色虚线：布线失败（端口被堵住）</text>`);
     ly += 12;

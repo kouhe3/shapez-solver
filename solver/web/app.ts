@@ -3,8 +3,7 @@ import * as P from "../src/plan.js";
 import { shapeSVG } from "../src/render.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import type { SolveResult } from "../src/solver.js";
-import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, REWARD_BUILDINGS } from "../src/levels.js";
-import type { Level } from "../src/levels.js";
+import { levelsForVersion, buildingsForLevel } from "../src/levels.js";
 import { scanMap, scanForTypes, itemLabel } from "../src/map.js";
 import type { Patch } from "../src/map.js";
 import { decodeSavegame, savegameMapInfo } from "../src/savegame.js";
@@ -86,12 +85,8 @@ function setBuildings(set: Iterable<string>): void {
  * levels
  * ------------------------------------------------------------------ */
 
-function levelsFor(setName: string): Level[] {
-    return setName === "game" ? FULL_LEVELS : DEMO_LEVELS;
-}
-
 function renderLevelPick(): void {
-    const levels = levelsFor(levelSet.value);
+    const levels = levelsForVersion(levelSet.value as NeedSetName);
     levelPick.innerHTML = "";
     const placeholder = document.createElement("option");
     placeholder.value = "";
@@ -109,7 +104,7 @@ function renderLevelPick(): void {
 
 function onLevelChange(): void {
     if (!levelPick.value) return;
-    const levels = levelsFor(levelSet.value);
+    const levels = levelsForVersion(levelSet.value as NeedSetName);
     const lvl = levels.find((l) => String(l.level) === levelPick.value);
     if (!lvl) return;
     shapeInput.value = lvl.shape;
@@ -123,7 +118,7 @@ function onLevelChange(): void {
 
 /** "全部关卡" plus every level of the selected need set */
 function renderAllLevels(): void {
-    const levels = levelsFor(mustGet<HTMLSelectElement>("all-set").value);
+    const levels = levelsForVersion(mustGet<HTMLSelectElement>("all-set").value as NeedSetName);
     const sel = mustGet<HTMLSelectElement>("all-until");
     const keep = sel.value;
     sel.innerHTML = "";
@@ -641,7 +636,7 @@ async function onAll(): Promise<void> {
             hub: ctx.hub,
             buildings: new Set(ALL_BUILDINGS),
             untilLevel,
-            levels: set === "full" ? FULL_LEVELS : DEMO_LEVELS,
+            levels: levelsForVersion(set),
         });
         const usedPatches: Patch[] = [];
         for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);

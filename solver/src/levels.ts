@@ -93,6 +93,18 @@ export const FULL_LEVELS: Level[] = [
 ];
 
 /**
+ * The two versions the game ships: the 9-level web demo and the 26-level full
+ * game. Requirement-set names (`NeedSetName`) use the same vocabulary, so a
+ * caller can never pass a value this table does not know.
+ */
+export type GameVersion = "demo" | "full";
+
+/** the level table a game version plays */
+export function levelsForVersion(version: GameVersion): Level[] {
+    return version === "full" ? FULL_LEVELS : DEMO_LEVELS;
+}
+
+/**
  * Buildings available while working on a given level: rewards of all
  * previously completed levels (extractors are always available). A part that
  * appears in no level of this version — the demo ends before the stacker — is

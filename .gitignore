@@ -3,6 +3,7 @@
 /node_modules/
 
 # runtime / scratch artifacts
+/work/
 /server.log
 /solver-server.log
 /tree.json

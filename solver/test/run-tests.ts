@@ -13,6 +13,9 @@ import type { Patch } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree, planBom, createWorld, routeBelt } from "../src/layout.js";
+import type { Connection, Tile } from "../src/layout.js";
+import { schematicSVG } from "../src/schematic.js";
+import type { SchematicLayout } from "../src/schematic.js";
 import { colorChain, colorChains } from "../src/color.js";
 import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
@@ -619,6 +622,88 @@ console.log("== savegame map info ==");
         level: 7,
     });
     check("bare dump also accepted", savegameMapInfo(payload.dump).seed, 12345);
+}
+
+console.log("== schematic (game chunk-overview representation) ==");
+{
+    const path: Tile[] = [
+        { x: 5, y: 2 },
+        { x: 6, y: 2 },
+        { x: 7, y: 2 },
+        { x: 8, y: 2 },
+        { x: 9, y: 2 },
+    ];
+    const connection: Connection = {
+        from: "src",
+        to: "dst",
+        toHub: false,
+        merged: false,
+        slot: 0,
+        fromLabel: "切割机",
+        toLabel: "堆叠器",
+        outSlot: 0,
+        outCount: 1,
+        x1: 4.5,
+        y1: 2.5,
+        x2: 9.5,
+        y2: 2.5,
+        length: 5,
+        routed: true,
+        path,
+        tunnels: 1,
+        tunnelCells: [{ x: 7, y: 2 }],
+        beltTiles: 7,
+    };
+    const layout: SchematicLayout = {
+        hub: { x: 0, y: 0 },
+        buildings: [],
+        connections: [connection],
+        beltEstimate: 7,
+    };
+    const svg = schematicSVG(layout, [], { tile: 30 });
+    checkTrue("belt band uses the game's #777", svg.includes('stroke="#777"'));
+    checkTrue("belt band is one third of a tile", svg.includes('stroke-width="10"'));
+    checkTrue("tunnel sender is the game's blue", svg.includes('fill="#6d9dff"'));
+    checkTrue("tunnel receiver is the game's green", svg.includes('fill="#71ff9c"'));
+    checkTrue("tunnel blocks face the flow (rightward ⇒ rotate 90°)", svg.includes("rotate(90)"));
+    check("old white tunnel notch is gone", svg.includes("#f8f9ff"), false);
+    checkTrue("sender precedes receiver in path order", svg.indexOf('fill="#6d9dff"') < svg.indexOf('fill="#71ff9c"'));
+
+    // one tunnel may run under several belts: two crossings two tiles apart are
+    // a single span, so the drawing gets one sender and one receiver instead of
+    // an overlapping pair on the tile between them
+    const under: Tile[] = [
+        { x: 2, y: 5 },
+        { x: 3, y: 5 },
+        { x: 4, y: 5 },
+        { x: 5, y: 5 },
+        { x: 6, y: 5 },
+    ];
+    const longSpan: SchematicLayout = {
+        hub: { x: 0, y: 0 },
+        buildings: [],
+        connections: [
+            {
+                ...connection,
+                x1: 2.0,
+                y1: 5.5,
+                x2: 6.5,
+                y2: 5.5,
+                path: under,
+                tunnels: 2,
+                tunnelCells: [
+                    { x: 3, y: 5 },
+                    { x: 5, y: 5 },
+                ],
+                beltTiles: 7,
+            },
+        ],
+        beltEstimate: 7,
+    };
+    const spanSvg = schematicSVG(longSpan, [], { tile: 30 });
+    // the legend swatch carries the same fill but no transform
+    check("one span → one sender", spanSvg.split('fill="#6d9dff" transform=').length - 1, 1);
+    check("one span → one receiver", spanSvg.split('fill="#71ff9c" transform=').length - 1, 1);
 }
 
 const quick = process.argv.includes("--quick");
