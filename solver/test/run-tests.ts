@@ -1,7 +1,9 @@
 /**
  * Regression + corpus tests.
- *   node test/run-tests.js            # everything
- *   node test/run-tests.js --quick    # unit tests only
+ *   bun run test                     # everything
+ *   bun run test --quick             # unit tests only
+ *   bun run test --timings           # one check/fail/ms line per section
+ *   bun run test --filter=<regex>    # only checks whose section or label matches
  */
 
 import * as S from "../src/shape.js";
@@ -21,27 +23,90 @@ import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
 
+const argv = process.argv.slice(2);
+const quick = argv.includes("--quick");
+const timings = argv.includes("--timings");
+
+let filter: RegExp | null = null;
+const filterArg = argv.find((a) => a.startsWith("--filter="));
+if (argv.includes("--filter")) {
+    console.log("usage: bun run test [--quick] [--timings] [--filter=<regex>]");
+    process.exit(2);
+}
+if (filterArg !== undefined) {
+    const pattern = filterArg.slice("--filter=".length);
+    if (!pattern) {
+        console.log("usage: --filter needs a non-empty regular expression");
+        process.exit(2);
+    }
+    try {
+        filter = new RegExp(pattern);
+    } catch {
+        console.log(`bad --filter regular expression: ${pattern}`);
+        process.exit(2);
+    }
+}
+
 let failures = 0;
 let checks = 0;
+let skipped = 0;
+let matched = 0;
+let section = "";
+let sectionChecks = 0;
+let sectionFailures = 0;
+let sectionStart = 0;
+
+/** `--timings` prints one line per section; the next section flushes the previous one. */
+function sectionSummary(): void {
+    if (!timings || !section) return;
+    const ms = performance.now() - sectionStart;
+    console.log(`  (${sectionChecks} checks, ${sectionFailures} fail, ${ms.toFixed(1)} ms)`);
+}
+
+function beginSection(name: string): void {
+    sectionSummary();
+    section = name;
+    sectionChecks = 0;
+    sectionFailures = 0;
+    sectionStart = performance.now();
+    console.log(`== ${name} ==`);
+}
+
+/** `--filter` keeps a check only when the section name or the check label matches. */
+function selected(label: string): boolean {
+    if (!filter) return true;
+    if (filter.test(section) || filter.test(label)) {
+        matched++;
+        return true;
+    }
+    skipped++;
+    return false;
+}
 
 function check(label: string, actual: unknown, expected: unknown): void {
+    if (!selected(label)) return;
     checks++;
+    sectionChecks++;
     const ok = JSON.stringify(actual) === JSON.stringify(expected);
     if (!ok) {
         failures++;
+        sectionFailures++;
         console.log(`  FAIL ${label}\n    expected: ${JSON.stringify(expected)}\n    actual:   ${JSON.stringify(actual)}`);
     }
 }
 
 function checkTrue(label: string, condition: boolean, detail = ""): void {
+    if (!selected(label)) return;
     checks++;
+    sectionChecks++;
     if (!condition) {
         failures++;
+        sectionFailures++;
         console.log(`  FAIL ${label} ${detail}`);
     }
 }
 
-console.log("== shape codec ==");
+beginSection("shape codec");
 {
     const shape = S.parse("RuCw--Cw");
     check("hash round-trip", S.hash(shape), "RuCw--Cw");
@@ -62,7 +127,7 @@ console.log("== shape codec ==");
     check("invalid: 5 layers", S.tryParse("CuCuCuCu:CuCuCuCu:CuCuCuCu:CuCuCuCu:CuCuCuCu").ok, false);
 }
 
-console.log("== rotations (game order: 0=TR 1=BR 2=BL 3=TL) ==");
+beginSection("rotations (game order: 0=TR 1=BR 2=BL 3=TL)");
 {
     const top = S.parse("Cu----Cu"); // q0 + q3 = top row
     check("CW(top row) = right column", S.hash(S.rotateCW(top)), "CuCu----");
@@ -75,7 +140,7 @@ console.log("== rotations (game order: 0=TR 1=BR 2=BL 3=TL) ==");
     check("180 bevel", S.hash(S.rotate180(bevel)), "--CwRuCw");
 }
 
-console.log("== cutting ==");
+beginSection("cutting");
 {
     const circle = S.parse("CuCuCuCu");
     const [left, right] = S.cutHalf(circle);
@@ -89,7 +154,7 @@ console.log("== cutting ==");
     check("rotated half cut", [S.hash(a), S.hash(b)], ["----Cu--", "--Cu----"]);
 }
 
-console.log("== stacker (issues #313 recipe) ==");
+beginSection("stacker (issues #313 recipe)");
 {
     const p1 = S.parse("Ru----Cw");
     const p2 = S.parse("Ru--Ru--");
@@ -106,7 +171,7 @@ console.log("== stacker (issues #313 recipe) ==");
     check("reverse stack also works", S.hash(S.stack(S.parse("RuCw----"), S.parse("------Cw:----Ru--"))), "RuCw--Cw:----Ru--");
 }
 
-console.log("== blueprint ports (official ItemEjector/ItemAcceptor slots) ==");
+beginSection("blueprint ports (official ItemEjector/ItemAcceptor slots)");
 {
     // Coordinates are tile boundary midpoints relative to the building origin,
     // y growing down. Mirrors src/js/game/buildings/*.js (default rotation).
@@ -148,7 +213,7 @@ console.log("== blueprint ports (official ItemEjector/ItemAcceptor slots) ==");
     ]);
 }
 
-console.log("== blueprint: connections use the right output slot ==");
+beginSection("blueprint: connections use the right output slot");
 {
     // One synthetic circle patch; hub far away so placement stays deterministic.
     const patches: Patch[] = [{ x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
@@ -196,7 +261,7 @@ console.log("== blueprint: connections use the right output slot ==");
     check("paint4 colors for port labels", painter.colors, ["r", null, "b", null]);
 }
 
-console.log("== blueprint: the finished product is belted into the hub ==");
+beginSection("blueprint: the finished product is belted into the hub");
 {
     // A bare miner still needs one belt run into the hub; it used to vanish from
     // the layout entirely, leaving 传送带约 0 格 and no flow line on the sheet.
@@ -221,7 +286,7 @@ console.log("== blueprint: the finished product is belted into the hub ==");
     );
 }
 
-console.log("== blueprint: mixed colours get a mixer ==");
+beginSection("blueprint: mixed colours get a mixer");
 {
     // RpRp---- needs purple paint, which the map only has as red + blue. The
     // sheet used to print "需混合 r+b" and leave the painter's colour port bare.
@@ -251,7 +316,7 @@ console.log("== blueprint: mixed colours get a mixer ==");
     check("purple: nothing missing", layout.missing, []);
 }
 
-console.log("== colour plan: the single-shape recipe names the mixer ==");
+beginSection("colour plan: the single-shape recipe names the mixer");
 {
     // the plan ops only carry a colour as data; the chain that produces that
     // colour (mixers + colour miners) has to be reported next to them
@@ -285,7 +350,7 @@ console.log("== colour plan: the single-shape recipe names the mixer ==");
     );
 }
 
-console.log("== levels: when each part unlocks ==");
+beginSection("levels: when each part unlocks");
 {
     const demo = availableLevels(DEMO_LEVELS);
     check("demo: cutter usable from L2", demo.get("cutter"), 2);
@@ -304,7 +369,7 @@ console.log("== levels: when each part unlocks ==");
     check("full L11 has the stacker", buildingsForLevel(FULL_LEVELS, 11).has("stacker"), true);
 }
 
-console.log("== router: walls, tunnels, dead ends ==");
+beginSection("router: walls, tunnels, dead ends");
 {
     const world = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     // a vertical wall with exactly one gap at y = 0
@@ -331,7 +396,7 @@ console.log("== router: walls, tunnels, dead ends ==");
     );
 }
 
-console.log("== router: tunnel legality (span limit, straight ends, own tile) ==");
+beginSection("router: tunnel legality (span limit, straight ends, own tile)");
 {
     /** a one-row corridor with walls on every other tile, so only y = 0 is usable */
     const sealedCorridor = (world: World, fromX: number, toX: number): void => {
@@ -439,7 +504,7 @@ console.log("== router: tunnel legality (span limit, straight ends, own tile) ==
     ]);
 }
 
-console.log("== needs: every shape the game asks for ==");
+beginSection("needs: every shape the game asks for");
 {
     for (const set of ["demo", "full"] as const) {
         const shapes = neededShapes({ set });
@@ -466,7 +531,7 @@ console.log("== needs: every shape the game asks for ==");
     );
 }
 
-console.log("== needs: the map scan finds every letter the campaign needs ==");
+beginSection("needs: the map scan finds every letter the campaign needs");
 {
     const types = requiredTypes(neededShapes({ set: "demo" }));
     check("needs demo: letters used by the targets", [...types].sort(), ["C", "R", "S", "W"]);
@@ -482,7 +547,7 @@ console.log("== needs: the map scan finds every letter the campaign needs ==");
     check("scan: a fixed radius reports the missing letter", tight.missingTypes, ["W"]);
 }
 
-console.log("== solver: atoms cut out of mixed deposits ==");
+beginSection("solver: atoms cut out of mixed deposits");
 {
     // The map generator never puts four windmill quadrants in one deposit (it
     // caps a patch at a single W), so a windmill can only be cut out of a mixed
@@ -503,7 +568,7 @@ console.log("== solver: atoms cut out of mixed deposits ==");
     checkTrue("a map without windmills refuses", !solve("WuWuWuWu", { baseCodes: ["CuCuCuCu"] }).ok);
 }
 
-console.log("== campaign: one map, one hub, no overlaps ==");
+beginSection("campaign: one map, one hub, no overlaps");
 {
     const patches: Patch[] = [
         { x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } },
@@ -568,7 +633,7 @@ console.log("== campaign: one map, one hub, no overlaps ==");
     check("campaign: no output port feeds two belts", Math.max(0, ...fanout.values()), 1);
 }
 
-console.log("== campaign: only the lines buildable by L9 ==");
+beginSection("campaign: only the lines buildable by L9");
 {
     const shapes = neededShapes({ set: "demo" });
     const scan = scanForTypes(47742, { types: requiredTypes(shapes), startRadius: 8, maxRadius: 32 });
@@ -619,7 +684,7 @@ console.log("== campaign: only the lines buildable by L9 ==");
     );
 }
 
-console.log("== throughput: the game's own rates ==");
+beginSection("throughput: the game's own rates");
 {
     check("rate: a bare miner makes 0.4/s", chainRate([{ op: "base" }]), 0.4);
     check("rate: a stacker caps the chain at 0.25/s", chainRate([{ op: "base" }, { op: "stack" }]), 0.25);
@@ -665,7 +730,7 @@ console.log("== throughput: the game's own rates ==");
     check("tree: no step is referenced twice", Math.max(...parents.values()), 1);
 }
 
-console.log("== planner: level 20 ==");
+beginSection("planner: level 20");
 {
     const res = solve("RuCw--Cw:----Ru--");
     checkTrue("level 20 solvable", res.ok, res.error || "");
@@ -675,7 +740,7 @@ console.log("== planner: level 20 ==");
     }
 }
 
-console.log("== map generator (seed 47742, the demo save) ==");
+beginSection("map generator (seed 47742, the demo save)");
 {
     // predefined chunks must land exactly where the game puts them
     const patches = scanMap(47742, { chunkRadius: 1 });
@@ -700,7 +765,7 @@ console.log("== map generator (seed 47742, the demo save) ==");
     check("chunk deterministic", a.patches.length, b.patches.length);
 }
 
-console.log("== savegame codec (lz + key/value interning) ==");
+beginSection("savegame codec (lz + key/value interning)");
 {
     const sample = { hello: "world", list: [1, 2, 3], nested: { a: "world" } };
     const packed = compressObject(sample);
@@ -710,7 +775,7 @@ console.log("== savegame codec (lz + key/value interning) ==");
     check("lz roundtrip", decompressX64(compressX64(text)), text);
 }
 
-console.log("== savegame map info ==");
+beginSection("savegame map info");
 {
     const payload = {
         version: 1010,
@@ -732,7 +797,7 @@ console.log("== savegame map info ==");
     check("bare dump also accepted", savegameMapInfo(payload.dump).seed, 12345);
 }
 
-console.log("== schematic (game chunk-overview representation) ==");
+beginSection("schematic (game chunk-overview representation)");
 {
     const path: Tile[] = [
         { x: 5, y: 2 },
@@ -828,9 +893,8 @@ console.log("== schematic (game chunk-overview representation) ==");
     check("one span → one receiver", spanSvg.split('fill="#71ff9c" transform=').length - 1, 1);
 }
 
-const quick = process.argv.includes("--quick");
 if (!quick) {
-    console.log("== demo levels (buildings unlocked at that level) ==");
+    beginSection("demo levels (buildings unlocked at that level)");
     for (const lvl of DEMO_LEVELS) {
         const buildings = buildingsForLevel(DEMO_LEVELS, lvl.level);
         const res = solve(lvl.shape, { buildings });
@@ -846,7 +910,7 @@ if (!quick) {
         }
     }
 
-    console.log("== full game levels (all buildings) ==");
+    beginSection("full game levels (all buildings)");
     for (const lvl of FULL_LEVELS) {
         const res = solve(lvl.shape, { buildings: ALL_BUILDINGS });
         const flag = res.ok ? "ok  " : "FAIL";
@@ -862,5 +926,7 @@ if (!quick) {
     }
 }
 
-console.log(`\n${checks} checks, ${failures} failure(s)`);
-process.exit(failures ? 1 : 0);
+sectionSummary();
+if (filter && matched === 0) console.log(`\nno check matched --filter=${filter.source}`);
+console.log(`\n${checks} checks, ${failures} failure(s)${skipped ? `, ${skipped} skipped` : ""}`);
+process.exit(failures || (filter && matched === 0) ? 1 : 0);
