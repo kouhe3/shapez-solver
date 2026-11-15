@@ -275,6 +275,34 @@ export function scanMap(seed, { chunkRadius = 5, originChunkX = 0, originChunkY 
     return patches;
 }
 
+/**
+ * How many miners a deposit can actually carry.
+ *
+ * A miner ejects on one side, and that side needs a free tile for a belt; one
+ * belt takes one tile, so N miners need N distinct neighbouring tiles. A solid
+ * 5×5 deposit is 25 tiles but only 20 tiles ring its border, so at most 20
+ * miners fit — the rest would have nowhere to eject. A long thin deposit loses
+ * almost nothing, a blocky one loses a lot. This is an upper bound: the real
+ * count also depends on how the belts are routed out. (Chained miners, unlocked
+ * at L11, share one output and skip this.)
+ *
+ * @param {{cells?: Array<[number, number]>, tiles?: number}} patch
+ * @returns {number} upper bound on miners on this deposit
+ */
+export function patchMinerCapacity(patch) {
+    const cells = patch.cells;
+    if (!cells || !cells.length) return patch.tiles || 0;
+    const inside = new Set(cells.map(([x, y]) => `${x}|${y}`));
+    const exits = new Set();
+    for (const [x, y] of cells) {
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const key = `${x + dx}|${y + dy}`;
+            if (!inside.has(key)) exits.add(key);
+        }
+    }
+    return Math.min(cells.length, exits.size);
+}
+
 /** shape letters present in the deposits of a patch list */
 export function depositTypes(patches) {
     const types = new Set();

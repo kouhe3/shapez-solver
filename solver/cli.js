@@ -269,15 +269,12 @@ function cmdAll() {
         const label = NEED_SETS[set] ? NEED_SETS[set].label : set;
         console.log(`种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · 中心 (${ctx.hub.x},${ctx.hub.y})`);
         console.log(`全部需求图形（${label}）: ${shapes.length} 种\n`);
-        console.log(` ${pad("#", 4)}${pad("图形", 28)}${pad("建筑", 6)}${pad("传送带", 8)}来源`);
         for (const e of res.entries) {
             const why = e.sources.map(describeSource).join(" / ");
             if (!e.ok) {
-                console.log(` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}无法求解: ${e.error}`);
                 continue;
             }
             const gap = e.missing.length ? `  ⚠ 缺矿脉 ${e.missing.map((m) => m.replace(/^shape:/, "")).join(", ")}` : "";
-            console.log(` ${pad(e.index, 4)}${pad(e.code, 28)}${pad(e.buildings, 6)}${pad(e.belts, 8)}${why}${gap}`);
         }
         console.log(
             `\n合计: ${res.totals.shapes} 种 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +

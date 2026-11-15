@@ -11,7 +11,16 @@
  */
 
 import * as P from "./plan.js";
+import { SOURCE_RATE } from "./rates.js";
 
+/**
+ * Geometry of every part this solver places — port positions in tile units,
+ * straight from the game's `ref/buildings/*.js`.
+ *
+ * The game ships 28 parts. The ones deliberately left out (balancer, tunnel,
+ * storage, block, the sandbox-only producers, and the whole wire layer) and why
+ * are listed in README under "零件清单".
+ */
 export const BUILDING_INFO = {
     base: {
         w: 1,
@@ -92,6 +101,21 @@ export const BUILDING_INFO = {
         ],
         outs: [{ x: 0.5, y: 0 }],
     },
+    // Not part of a plan: an unconnected output port backs up and stalls the
+    // machine, so every unused cutter slot has to be vented. The game's trash
+    // can (1×1, unlocked with the cutter at L1) accepts on all four sides.
+    trash: {
+        w: 1,
+        h: 1,
+        zh: "垃圾桶",
+        ins: [
+            { x: 0.5, y: 0 },
+            { x: 1, y: 0.5 },
+            { x: 0.5, y: 1 },
+            { x: 0, y: 0.5 },
+        ],
+        outs: [],
+    },
 };
 
 /** how a plan node maps to a game building */
@@ -149,6 +173,37 @@ function mixColor(a, b) {
     return BITS_COLOR[(COLOR_BITS[a] || 0) | (COLOR_BITS[b] || 0)] || "u";
 }
 
+/**
+ * How many colour sources a campaign needs, given what the painters pull.
+ *
+ * One source — a miner on a deposit, or one mixer — carries `SOURCE_RATE`
+ * items/s. A mixed colour pushes its own inputs upstream: a mixer consumes
+ * `SOURCE_RATE` of each input for every `SOURCE_RATE` it produces, and `w` is
+ * built as mix(mix(r, g), b), so it consumes `y` and `b`.
+ *
+ * @param {Map<string, number>} demand items/s per colour, summed over every
+ *   colour port of every painter
+ * @returns {{need: Map<string, number>, sources: Map<string, number>}} how many
+ *   items/s each colour has to produce, and how many sources that takes
+ */
+export function sizeColorSupply(demand) {
+    const need = new Map(demand);
+    const sources = new Map();
+    const bump = (color, amount) => need.set(color, (need.get(color) || 0) + amount);
+    const count = (amount) => Math.max(0, Math.ceil(amount / SOURCE_RATE - 1e-9));
+
+    // `w` first: it is the only colour whose chain consumes another mixed
+    // colour, so its demand has to reach `y` before `y` is counted.
+    for (const color of ["w", "y", "p", "c"]) {
+        const n = count(need.get(color) || 0);
+        sources.set(color, n);
+        if (!n) continue;
+        for (const part of color === "w" ? ["y", "b"] : COLOR_NEEDS[color]) bump(part, n * SOURCE_RATE);
+    }
+    for (const color of ["r", "g", "b"]) sources.set(color, count(need.get(color) || 0));
+    return { need, sources };
+}
+
 /** the hub occupies a 4×4 tile block; belts may enter it on any side */
 const HUB_SIZE = 4;
 
@@ -199,7 +254,7 @@ export function createWorld({ hub, patches }) {
     for (let dx = 0; dx < HUB_SIZE; dx++) {
         for (let dy = 0; dy < HUB_SIZE; dy++) occupied.add(cellKey(hub.x + dx, hub.y + dy));
     }
-    return { hub, patches, occupied, deposits, blocks: [], colorChains: new Map(), colorCursor: null };
+    return { hub, patches, occupied, deposits, blocks: [] };
 }
 
 /** a processor may only sit on bare ground */
@@ -275,6 +330,35 @@ function allocateBlock(world, width, height) {
 }
 
 /**
+ * Turn a plan DAG into a tree by copying any sub-plan that feeds more than one
+ * consumer.
+ *
+ * The search memoises identical sub-shapes, so the same node can hang under
+ * several parents. In the game one output port feeds exactly one belt, so a
+ * shared node would need a splitter — and splitters only unlock at L4. Parts are
+ * free, so the legal answer is a second copy of that sub-plan.
+ *
+ * @param {{steps: Array, final: object}} flat a `plan.js` flatten result
+ * @returns {{steps: Array, final: object}} a tree, inputs before their parent
+ */
+export function expandPlanTree(flat) {
+    const byId = new Map(flat.steps.map((step) => [step.id, step]));
+    const seen = new Map();
+    const steps = [];
+    const visit = (id) => {
+        const src = byId.get(id);
+        const n = (seen.get(id) || 0) + 1;
+        seen.set(id, n);
+        const inputs = src.inputs.map((input) => ({ ...input, id: visit(input.id).id }));
+        const copy = { ...src, id: n === 1 ? id : `${id}#${n}`, inputs };
+        steps.push(copy);
+        return copy;
+    };
+    const final = visit(flat.final.id);
+    return { steps, final };
+}
+
+/**
  * @param {object} args
  * @param {object} args.plan   plan AST root
  * @param {Array} args.patches map patches (from map.js)
@@ -294,7 +378,8 @@ export function buildLayout({
     tag = null,
 }) {
     const shared = world || createWorld({ hub, patches });
-    const flat = P.flatten(plan);
+    // one output port = one belt, so shared sub-plans get their own copy
+    const flat = expandPlanTree(P.flatten(plan));
     // dependency depth
     const depth = new Map();
     const stepById = new Map(flat.steps.map((s) => [s.id, s]));
@@ -319,6 +404,8 @@ export function buildLayout({
     const missing = new Set();
     const connections = [];
     let beltEstimate = 0;
+    /** colour chains are per consumer port, so their ids need to stay unique */
+    let colorSerial = 0;
 
     /** first free spot for `info` around an anchor tile, nearest ring first */
     function placeNear(info, anchor) {
@@ -333,8 +420,8 @@ export function buildLayout({
         return null;
     }
 
-    /** colour feeds have no plan step; the same chain feeds every painter */
-    function pushColorConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot) {
+    /** one belt run between two ports; `extra` says what the link carries */
+    function pushConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, extra = {}) {
         const outPort = srcInfo.outs[outSlot] || srcInfo.outs[0];
         const inPort = dstInfo.ins[inSlot];
         if (!outPort || !inPort) return;
@@ -359,97 +446,94 @@ export function buildLayout({
             y2,
             length: len,
             beltTiles,
-            color: true,
+            ...extra,
         });
     }
 
-    /**
-     * Colour supply for one colour: a miner on a deposit of a base colour, or a
-     * chain of mixers. The game ORs colour bits (r+g=y, r+b=p, g+b=c, +b=w), so
-     * w learns two mixers. Built once per map: every painter shares the chain.
-     */
-    function ensureColor(color) {
-        if (!color || color === "u") return null;
-        if (shared.colorChains.has(color)) return shared.colorChains.get(color);
-        const parts = COLOR_NEEDS[color];
-        let chain;
-        if (!parts) {
-            const found = placeExtractor(shared, (item) => item.kind === "color" && item.color === color, {
-                x: hub.x + 2,
-                y: hub.y + 2,
-            });
-            if (!found) {
-                missing.add(`颜色:${color}`);
-                chain = { color, ok: false };
-            } else {
-                const b = {
-                    step: `color:${color}:miner`,
-                    stepId: `${idPrefix}color:${color}:miner`,
-                    kind: "base",
-                    zh: "采矿机",
-                    x: found.x,
-                    y: found.y,
-                    w: 1,
-                    h: 1,
-                    patch: found.patch,
-                    distance: found.distance,
-                    color,
-                };
-                buildings.push(b);
-                sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color });
-                for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
-                chain = { color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 };
-            }
-        } else {
-            let acc = ensureColor(parts[0]);
-            for (let i = 1; i < parts.length; i++) {
-                const rhs = ensureColor(parts[i]);
-                if (!acc || !rhs || !acc.ok || !rhs.ok) {
-                    acc = null;
-                    break;
-                }
-                const info = BUILDING_INFO.mixer;
-                const anchor = shared.colorCursor || { x: hub.x - 8, y: hub.y + HUB_SIZE + 2 };
-                const pos = placeNear(info, anchor);
-                if (!pos) {
-                    acc = null;
-                    break;
-                }
-                const mixed = mixColor(acc.color, rhs.color);
-                const b = {
-                    step: `color:${mixed}:mixer`,
-                    stepId: `${idPrefix}color:${mixed}:mixer`,
-                    kind: "mixer",
-                    zh: info.zh,
-                    x: pos.x,
-                    y: pos.y,
-                    w: info.w,
-                    h: info.h,
-                    detail: `${acc.color}+${rhs.color}`,
-                    colors: [acc.color, rhs.color],
-                };
-                buildings.push(b);
-                for (const c of portCells(info, pos.x, pos.y)) shared.occupied.add(cellKey(c.x, c.y));
-                pushColorConnection(acc.building, acc.info, acc.outSlot, b, info, 0);
-                pushColorConnection(rhs.building, rhs.info, rhs.outSlot, b, info, 1);
-                shared.colorCursor = { x: pos.x + info.w + 1, y: pos.y };
-                acc = { color: mixed, ok: true, building: b, info, outSlot: 0 };
-                shared.colorChains.set(mixed, acc);
-            }
-            chain = acc || { color, ok: false };
-            if (!chain.ok) missing.add(`颜色:${color}`);
-        }
-        shared.colorChains.set(color, chain);
-        return chain;
+    /** colour feeds have no plan step: one chain head feeds one painter port */
+    function pushColorConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot) {
+        pushConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, { color: true });
     }
 
-    // colour supply goes down before the factories so its mixers sit near the hub
+    /**
+     * One colour chain per consumer port.
+     *
+     * A machine's output port takes exactly one belt, so one chain can feed one
+     * painter and no more. Parts and ground are free in shapez, so the cheap
+     * legal answer is to grow the chain again next to each painter instead of
+     * splitting a shared one — and before the balancer unlock (L4) splitting is
+     * impossible anyway. The chain is anchored at its consumer, so belts stay short.
+     *
+     * @param {string} color
+     * @param {{x: number, y: number}} anchor tile to grow the chain around
+     * @returns {{ok: boolean, color: string, building?: object, info?: object, outSlot?: number}|null}
+     */
+    function buildColorChain(color, anchor) {
+        if (!color || color === "u") return null;
+        const parts = COLOR_NEEDS[color];
+        if (!parts) {
+            const found = placeExtractor(shared, (item) => item.kind === "color" && item.color === color, anchor);
+            if (!found) {
+                missing.add(`颜色:${color}`);
+                return { color, ok: false };
+            }
+            const serial = ++colorSerial;
+            const b = {
+                step: `color:${color}:miner#${serial}`,
+                stepId: `${idPrefix}color:${color}:miner#${serial}`,
+                kind: "base",
+                zh: "采矿机",
+                x: found.x,
+                y: found.y,
+                w: 1,
+                h: 1,
+                patch: found.patch,
+                distance: found.distance,
+                color,
+            };
+            buildings.push(b);
+            sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color });
+            for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
+            return { color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 };
+        }
+        let acc = buildColorChain(parts[0], anchor);
+        for (let i = 1; i < parts.length; i++) {
+            const rhs = buildColorChain(parts[i], anchor);
+            if (!acc || !rhs || !acc.ok || !rhs.ok) return { color, ok: false };
+            const info = BUILDING_INFO.mixer;
+            const pos = placeNear(info, anchor);
+            if (!pos) {
+                missing.add(`颜色:${color}`);
+                return { color, ok: false };
+            }
+            const mixed = mixColor(acc.color, rhs.color);
+            const serial = ++colorSerial;
+            const b = {
+                step: `color:${mixed}:mixer#${serial}`,
+                stepId: `${idPrefix}color:${mixed}:mixer#${serial}`,
+                kind: "mixer",
+                zh: info.zh,
+                x: pos.x,
+                y: pos.y,
+                w: info.w,
+                h: info.h,
+                detail: `${acc.color}+${rhs.color}`,
+                colors: [acc.color, rhs.color],
+            };
+            buildings.push(b);
+            for (const c of portCells(info, pos.x, pos.y)) shared.occupied.add(cellKey(c.x, c.y));
+            pushColorConnection(acc.building, acc.info, acc.outSlot, b, info, 0);
+            pushColorConnection(rhs.building, rhs.info, rhs.outSlot, b, info, 1);
+            acc = { color: mixed, ok: true, building: b, info, outSlot: 0 };
+        }
+        return acc || { color, ok: false };
+    }
+
     const paintColorsUsed = new Set();
     for (const step of flat.steps) {
         if (step.op === "paint") paintColorsUsed.add(step.node.color);
         else if (step.op === "paint4") for (const c of step.node.colors) if (c && c !== "u") paintColorsUsed.add(c);
     }
-    for (const color of paintColorsUsed) ensureColor(color);
 
     const hasProcessors = flat.steps.some((s) => s.op !== "base");
     const block = hasProcessors ? allocateBlock(shared, blockWidth, blockHeight) : null;
@@ -620,13 +704,56 @@ export function buildLayout({
         const colors = step.op === "paint4" ? step.node.colors : [step.node.color];
         colors.forEach((color, i) => {
             if (!color || color === "u") return;
-            const chain = ensureColor(color);
+            // one chain per port, grown next to the painter that consumes it
+            const chain = buildColorChain(color, { x: painter.x + info.w / 2, y: painter.y + info.h / 2 });
             if (!chain || !chain.ok) {
                 missing.add(`颜色:${color}`);
                 return;
             }
             pushColorConnection(chain.building, chain.info, chain.outSlot, painter, info, i + 1);
         });
+    }
+
+    // 3d) an output port with nowhere to go backs up and stalls the machine, so
+    // every cutter slot the plan does not use gets a trash can. The game unlocks
+    // the can together with the cutter at L1, so this is legal from the start.
+    for (const step of flat.steps) {
+        const info = BUILDING_INFO[step.op];
+        if (!info || !info.outs || info.outs.length < 2) continue;
+        const source = buildingByStep.get(step.id);
+        if (!source) continue;
+        const used = outputSlot(step);
+        for (let slot = 0; slot < info.outs.length; slot++) {
+            if (slot === used) continue;
+            const port = info.outs[slot];
+            const pos = placeNear(BUILDING_INFO.trash, {
+                x: Math.floor(source.x + port.x),
+                y: Math.floor(source.y + port.y),
+            });
+            if (!pos) {
+                missing.add("垃圾桶");
+                continue;
+            }
+            const can = {
+                step: `trash:${step.id}:${slot}`,
+                stepId: `${idPrefix}trash:${step.id}:${slot}`,
+                kind: "trash",
+                zh: "垃圾桶",
+                x: pos.x,
+                y: pos.y,
+                w: 1,
+                h: 1,
+            };
+            buildings.push(can);
+            for (const cell of portCells(BUILDING_INFO.trash, pos.x, pos.y)) shared.occupied.add(cellKey(cell.x, cell.y));
+            // feed the side of the can that faces the machine
+            const px = source.x + port.x;
+            const py = source.y + port.y;
+            const cx = pos.x + 0.5;
+            const cy = pos.y + 0.5;
+            const inSlot = Math.abs(px - cx) > Math.abs(py - cy) ? (px < cx ? 3 : 1) : py < cy ? 0 : 2;
+            pushConnection(source, info, slot, can, BUILDING_INFO.trash, inSlot, { waste: true });
+        }
     }
 
     // 4) colors: which ones are on the map, which need mixing

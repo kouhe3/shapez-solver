@@ -85,3 +85,32 @@ export function buildingsForLevel(levels, levelNumber) {
     }
     return set;
 }
+
+/**
+ * The first level each building can actually be used on. A reward is granted
+ * for *completing* a level, so a level-3 reward is usable from level 4 on —
+ * which is why the balancer (reward of L3) is a level-4 building.
+ *
+ * Transport pieces are not buildings in `REWARD_BUILDINGS`, so they are listed
+ * here under the names the throughput report uses.
+ *
+ * @param {Array<{level:number, reward:string}>} levels
+ * @returns {Map<string, number>} building → first usable level
+ */
+export function availableLevels(levels) {
+    const map = new Map();
+    for (const lvl of levels) {
+        for (const b of REWARD_BUILDINGS[lvl.reward] || []) if (!map.has(b)) map.set(b, lvl.level + 1);
+    }
+    const transport = {
+        reward_balancer: "balancer",
+        reward_splitter: "splitter",
+        reward_tunnel: "tunnel",
+        reward_merger: "merger",
+    };
+    for (const lvl of levels) {
+        const key = transport[lvl.reward];
+        if (key && !map.has(key)) map.set(key, lvl.level + 1);
+    }
+    return map;
+}

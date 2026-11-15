@@ -8,10 +8,11 @@ import * as S from "../src/shape.js";
 import * as P from "../src/plan.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "../src/levels.js";
-import { generateChunk, scanMap, scanForTypes, availableResources } from "../src/map.js";
+import { generateChunk, scanMap, scanForTypes, availableResources, patchMinerCapacity } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
-import { buildLayout, BUILDING_INFO } from "../src/layout.js";
+import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree } from "../src/layout.js";
+import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
 
@@ -351,6 +352,72 @@ console.log("== campaign: one map, one hub, no overlaps ==");
         res.totals.belts,
         res.layout.connections.reduce((n, c) => n + c.beltTiles, 0)
     );
+    check(
+        "campaign: every factory reports a rate",
+        res.entries.map((e) => e.rate > 0),
+        [true, true, true]
+    );
+    check(
+        "campaign: a shared colour chain only ever limits, never boosts",
+        res.entries.every((e) => e.supplyFactor > 0 && e.supplyFactor <= 1),
+        true
+    );
+    // an unconnected output port backs up and stalls the machine
+    const cans = res.layout.buildings.filter((b) => b.kind === "trash").length;
+    check("campaign: cutter offcuts get a trash can", cans, 1);
+    check("campaign: every waste belt lands in one", res.layout.connections.filter((c) => c.waste).length, cans);
+    const fanout = new Map();
+    for (const c of res.layout.connections) {
+        if (c.toHub) continue;
+        const key = `${c.from}|${c.outSlot}`;
+        fanout.set(key, (fanout.get(key) || 0) + 1);
+    }
+    check("campaign: no output port feeds two belts", Math.max(0, ...fanout.values()), 1);
+}
+
+console.log("== throughput: the game's own rates ==");
+{
+    check("rate: a bare miner makes 0.4/s", chainRate([{ op: "base" }]), 0.4);
+    check("rate: a stacker caps the chain at 0.25/s", chainRate([{ op: "base" }, { op: "stack" }]), 0.25);
+    check(
+        "rate: a painter chain runs at 2/6 per second",
+        Math.round(chainRate([{ op: "base" }, { op: "paint" }]) * 1e6) / 1e6,
+        Math.round((2 / 6) * 1e6) / 1e6
+    );
+    check("rate: 3600 s reads as 1.0h", formatDuration(3600), "1.0h");
+
+    // w = mix(mix(r, g), b): 0.8/s of white needs 2 mixers, plus 2 of each base
+    const supply = sizeColorSupply(new Map([["w", 0.8]]));
+    check("sizing: white needs two mixers", supply.sources.get("w"), 2);
+    check("sizing: its first stage (y) also needs two", supply.sources.get("y"), 2);
+    check(
+        "sizing: every base colour behind it needs two",
+        ["r", "g", "b"].map((c) => supply.sources.get(c)),
+        [2, 2, 2]
+    );
+
+    // a deposit is lossy: every miner needs its own tile to eject into
+    const solid = (w, h) => Array.from({ length: w * h }, (_, i) => [i % w, Math.floor(i / w)]);
+    check("capacity: a lone tile takes one miner", patchMinerCapacity({ cells: [[0, 0]] }), 1);
+    check("capacity: a solid 5×5 tops out at its 20 border tiles", patchMinerCapacity({ cells: solid(5, 5) }), 20);
+    check("capacity: a 1×5 strip is fully usable", patchMinerCapacity({ cells: solid(1, 5) }), 5);
+
+    // one output port = one belt: a shared sub-plan has to be duplicated
+    const shared = expandPlanTree({
+        steps: [
+            { id: "a", op: "base", inputs: [] },
+            { id: "b", op: "cutHalf", inputs: [{ id: "a" }] },
+            { id: "c", op: "cutHalf", inputs: [{ id: "a" }] },
+            { id: "d", op: "stack", inputs: [{ id: "b" }, { id: "c" }] },
+        ],
+        final: { id: "d" },
+    });
+    check("tree: the shared miner is copied", shared.steps.filter((s) => s.op === "base").length, 2);
+    check("tree: every step id stays unique", new Set(shared.steps.map((s) => s.id)).size, shared.steps.length);
+    const parents = new Map();
+    for (const step of shared.steps) for (const input of step.inputs) parents.set(input.id, (parents.get(input.id) || 0) + 1);
+    parents.set(shared.final.id, (parents.get(shared.final.id) || 0) + 1);
+    check("tree: no step is referenced twice", Math.max(...parents.values()), 1);
 }
 
 console.log("== planner: level 20 ==");

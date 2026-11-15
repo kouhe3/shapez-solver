@@ -8,6 +8,7 @@ import { decodeSavegame, savegameMapInfo } from "../src/savegame.js";
 import { schematicSVG } from "../src/schematic.js";
 import { neededShapes, requiredTypes, describeSource } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
+import { formatRate, formatDuration } from "../src/rates.js";
 
 const BUILDING_LABELS = {
     cutter: "切割机",
@@ -445,20 +446,24 @@ function renderCampaign(res, meta) {
         `全部需求图形（${res.totals.shapes} 种${meta && meta.seed !== undefined ? ` · 种子 ${meta.seed}` : ""}）`
     );
     const table = document.createElement("table");
-    table.innerHTML = `<thead><tr><th>#</th><th>图形</th><th>建筑</th><th>传送带</th><th>来源</th></tr></thead>`;
+    table.innerHTML = `<thead><tr><th>#</th><th>图形</th><th>建筑</th><th>传送带</th><th>产能</th><th>交付</th><th>可建</th><th>来源</th></tr></thead>`;
     const tbody = document.createElement("tbody");
     for (const e of res.entries) {
         const tr = document.createElement("tr");
         const why = e.sources.map(describeSource).join(" / ");
         if (!e.ok) {
-            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td colspan="2">无法求解</td><td>${
+            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td colspan="4">无法求解</td><td>${
                 e.error || ""
             }</td>`;
         } else {
             const gap = e.missing.length
                 ? ` ⚠ 缺 ${e.missing.map((m) => m.replace(/^shape:/, "")).join(", ")}`
                 : "";
-            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td>${e.buildings}</td><td>${e.belts}</td><td>${why}${gap}</td>`;
+            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td>${e.buildings}</td><td>${
+                e.belts
+            }</td><td>${formatRate(e.effectiveRate)}</td><td>${formatDuration(e.eta)}</td><td>L${
+                e.availableAt
+            }</td><td>${why}${gap}</td>`;
         }
         tbody.appendChild(tr);
     }
@@ -477,6 +482,34 @@ function renderCampaign(res, meta) {
         );
     }
     for (const m of res.layout.missing) lines.push(`⚠ 缺失资源：${m}`);
+    const perf = res.totals.throughput;
+    lines.push(
+        `产能（游戏额定速度 · 升级 1）：传送带 ${perf.beltRate}/s、采矿机 ${perf.minerRate}/s、色料源 ${perf.sourceRate}/s`
+    );
+    if (perf.demandTotal > 0) {
+        lines.push(
+            `色料：每口一链共 ${perf.builtSourceCount} 台（需求 ${perf.demandTotal.toFixed(2)}/s，供给 ${perf.supplyAvailable.toFixed(
+                2
+            )}/s）；按需求只需 ${perf.demandSizedCount} 台 —— L4 后共享色料厂能省 ${
+                perf.builtSourceCount - perf.demandSizedCount
+            } 台，代价是要自己接分流`
+        );
+    }
+    if (perf.extraSources > 0) {
+        lines.push(
+            `色料源缺口：还需 ${perf.extraSources} 台（${perf.colorGap
+                .map((g) => `${g.color} ${g.have}→${g.need} ${g.kind}`)
+                .join("、")}）`
+        );
+    }
+    for (const g of perf.capacityGap) {
+        lines.push(`⚠ 矿脉放不下：${g.color} 需要 ${g.need} 台，图上可达上限 ${g.capacity} 台`);
+    }
+    lines.push(
+        `运输缺口：分流节点 ${perf.splitters} 个（最坏一个出口 ${perf.worstFanout} 条）、中心并带 ${perf.hubMerges} 个（${perf.hubInbound} 条带进 12 个面）`
+    );
+    if (perf.balancerAt) lines.push(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多 12 条带`);
+    if (perf.tunnelAt) lines.push(`隧道 L${perf.tunnelAt} 解锁：在此之前走线不能交叉`);
     bomCard.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
 }
 
@@ -502,6 +535,7 @@ async function onAll() {
             patches: scan.patches,
             hub: ctx.hub,
             buildings: new Set(currentBuildings),
+            levels: set === "full" ? FULL_LEVELS : DEMO_LEVELS,
         });
         const usedPatches = [];
         for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
