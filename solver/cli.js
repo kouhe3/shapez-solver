@@ -20,6 +20,7 @@ import { decodeSavegame, savegameMapInfo } from "./src/savegame.js";
 import { schematicSVG } from "./src/schematic.js";
 import { neededShapes, requiredTypes, describeSource, NEED_SETS } from "./src/needs.js";
 import { planCampaign } from "./src/campaign.js";
+import { formatRate, formatDuration, HUB_SIDES } from "./src/rates.js";
 import fs from "node:fs";
 
 const args = process.argv.slice(2);
@@ -239,6 +240,7 @@ function cmdAll() {
         hub: ctx.hub,
         maxAttempts: Number(flags.get("budget") ?? 30000),
         buildings: flags.get("level") ? resolveBuildings() : null,
+        levels: NEED_SETS[set] ? NEED_SETS[set].levels : undefined,
     });
 
     if (flags.get("json")) {
@@ -260,6 +262,7 @@ function cmdAll() {
                     ),
                     missing: res.layout.missing,
                     belts: res.layout.beltEstimate,
+                    throughput: res.totals.throughput,
                 },
                 null,
                 2
@@ -269,18 +272,68 @@ function cmdAll() {
         const label = NEED_SETS[set] ? NEED_SETS[set].label : set;
         console.log(`种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · 中心 (${ctx.hub.x},${ctx.hub.y})`);
         console.log(`全部需求图形（${label}）: ${shapes.length} 种\n`);
+        console.log(
+            ` ${pad("#", 4)}${pad("图形", 28)}${pad("建筑", 6)}${pad("传送带", 8)}${pad("产能", 9)}${pad(
+                "交付",
+                8
+            )}${pad("可建", 6)}来源`
+        );
         for (const e of res.entries) {
             const why = e.sources.map(describeSource).join(" / ");
             if (!e.ok) {
+                console.log(
+                    ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
+                        "-",
+                        8
+                    )}${pad("-", 6)}无法求解: ${e.error}`
+                );
                 continue;
             }
             const gap = e.missing.length ? `  ⚠ 缺矿脉 ${e.missing.map((m) => m.replace(/^shape:/, "")).join(", ")}` : "";
+            console.log(
+                ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad(e.buildings, 6)}${pad(e.belts, 8)}${pad(
+                    formatRate(e.effectiveRate),
+                    9
+                )}${pad(formatDuration(e.eta), 8)}${pad(`L${e.availableAt}`, 6)}${why}${gap}`
+            );
         }
         console.log(
             `\n合计: ${res.totals.shapes} 种 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
                 (res.totals.failed ? ` · ${res.totals.failed} 种无法求解` : "") +
                 (res.totals.unbuildable ? ` · ${res.totals.unbuildable} 种缺矿脉` : "")
         );
+        const perf = res.totals.throughput;
+        console.log(
+            `产能（游戏额定速度 · 升级等级 1）: 传送带 ${perf.beltRate}/s · 采矿机 ${perf.minerRate}/s · 色料源 ${perf.sourceRate}/s`
+        );
+        if (perf.demandTotal > 0) {
+            console.log(
+                `色料: 每口一链共 ${perf.builtSourceCount} 台（需求 ${perf.demandTotal.toFixed(2)}/s，供给 ${perf.supplyAvailable.toFixed(
+                    2
+                )}/s）· 按需求只需 ${perf.demandSizedCount} 台；L4 后共享色料厂能省 ${
+                    perf.builtSourceCount - perf.demandSizedCount
+                } 台，代价是要自己接分流`
+            );
+        }
+        if (perf.extraSources > 0) {
+            console.log(
+                `色料源缺口: 还需 ${perf.extraSources} 台（${perf.colorGap
+                    .map((g) => `${g.color} ${g.have}→${g.need} ${g.kind}`)
+                    .join("、")}）`
+            );
+        }
+        for (const g of perf.capacityGap) {
+            console.log(
+                `⚠ 矿脉放不下: ${g.color} 需要 ${g.need} 台矿机，图上可达上限 ${g.capacity} 台 —— 升采矿等级，或等 L11 链式采矿机`
+            );
+        }
+        console.log(
+            `运输缺口: 同一出口挂多条带要 ${perf.splitters} 个分流节点（最坏一个口 ${perf.worstFanout} 条）；中心 ${perf.hubInbound} 条带入 ${HUB_SIDES} 个面，要 ${perf.hubMerges} 个并带`
+        );
+        if (perf.balancerAt) {
+            console.log(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多进 ${HUB_SIDES} 条带`);
+        }
+        if (perf.tunnelAt) console.log(`隧道 L${perf.tunnelAt} 解锁：在此之前走线不能交叉`);
         for (const t of scan.missingTypes) {
             console.log(`⚠ 半径 ${scan.radius} 内没有 ${t} 矿脉：需要它的图形无法建造`);
         }
