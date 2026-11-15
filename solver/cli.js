@@ -15,11 +15,10 @@ import * as P from "./src/plan.js";
 import { shapeASCII } from "./src/render.js";
 import { solve, ALL_BUILDINGS } from "./src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "./src/levels.js";
-import { scanMap, itemLabel, availableResources } from "./src/map.js";
+import { scanMap, scanForTypes, itemLabel, availableResources } from "./src/map.js";
 import { decodeSavegame } from "./src/savegame.js";
-import { buildLayout } from "./src/layout.js";
 import { schematicSVG } from "./src/schematic.js";
-import { neededShapes, describeSource, NEED_SETS } from "./src/needs.js";
+import { neededShapes, requiredTypes, describeSource, NEED_SETS } from "./src/needs.js";
 import { planCampaign } from "./src/campaign.js";
 import fs from "node:fs";
 
@@ -158,8 +157,8 @@ async function cmdCheck() {
     process.exit(res.status || 0);
 }
 
-/** seed + hub position either from a savegame file or --seed */
-function loadMapContext() {
+/** seed + hub position either from a savegame file, --seed or a positional seed */
+function loadMapContext(seedOverride) {
     const savePath = flags.get("save");
     if (savePath) {
         const raw = fs.readFileSync(String(savePath), "utf8");
@@ -174,9 +173,9 @@ function loadMapContext() {
         }
         return { seed, hub, dump, savePath };
     }
-    const seedFlag = flags.get("seed");
+    const seedFlag = seedOverride ?? flags.get("seed");
     if (seedFlag === undefined) {
-        console.error("需要 --save=<savegame.bin> 或 --seed=<number>");
+        console.error("需要地图种子：node cli.js all <seed>（或 --seed=<n> / --save=<savegame.bin>）");
         process.exit(2);
     }
     return { seed: Number(seedFlag), hub: { x: -2, y: -2 }, dump: null };
@@ -206,53 +205,6 @@ function cmdMap() {
     }
 }
 
-function cmdBlueprint() {
-    const code = positional[0];
-    if (!code) {
-        console.error("用法: node cli.js blueprint <shape-code> --save=<savegame.bin> [--radius=4] [--out=plan.svg]");
-        process.exit(2);
-    }
-    const ctx = loadMapContext();
-    const radius = Number(flags.get("radius") ?? 4);
-    const patches = scanMap(ctx.seed, { chunkRadius: radius });
-    const buildings = flags.get("level") ? resolveBuildings() : new Set(ALL_BUILDINGS);
-    const baseCodes = [...new Set(patches.filter((p) => p.item.kind === "shape").map((p) => p.item.code))];
-    const res = solve(code, { buildings, baseCodes, maxAttempts: Number(flags.get("budget") ?? 30000) });
-    if (!res.ok) {
-        console.error(`无法求解: ${res.error}`);
-        process.exit(1);
-    }
-    const layout = buildLayout({ plan: res.plan, patches, hub: ctx.hub });
-    console.log(`目标: ${S.hash(res.target)}  建筑数 ${layout.buildings.length}`);
-    console.log(`\n放置清单 (tile 坐标, 右下为 +x/+y):`);
-    for (const b of layout.buildings) {
-        const extra = b.kind === "base" ? `  矿脉 ${itemLabel(b.patch && b.patch.item)}  距离 ${b.distance.toFixed(1)}` : b.detail ? `  ${b.detail}` : "";
-        console.log(`  (${String(b.x).padStart(4)},${String(b.y).padStart(4)})  ${b.zh.padEnd(6)}  ${b.stepId}${extra}`);
-    }
-    console.log(`\n物料流 (来源 → 目标, 传送带格数):`);
-    for (const c of layout.connections) {
-        const out = c.outCount > 1 ? ` 输出#${c.outSlot}` : "";
-        const dest = c.toHub ? "HUB (枢纽)" : `${c.to} (${c.toLabel}) 输入#${c.slot}`;
-        console.log(`  ${c.from} (${c.fromLabel})${out} → ${dest}   ${c.beltTiles} 格`);
-    }
-    console.log(`\n建筑清单: ${layout.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
-    console.log(`传送带约 ${layout.beltEstimate} 格`);
-    for (const c of layout.colors) {
-        if (c.direct) console.log(`颜色 ${c.color}: 地图上有矿脉 (${c.patch.x.toFixed(1)},${c.patch.y.toFixed(1)})`);
-        else console.log(`颜色 ${c.color}: 无直接矿脉，需混合 ${c.mix.join("+")}`);
-    }
-    for (const m of layout.missing) console.log(`缺失资源: ${m}`);
-    const outPath = flags.get("out");
-    const usedPatches = [];
-    for (const s of layout.sources) if (s.patch) usedPatches.push(s.patch);
-    for (const c of layout.colors) if (c.patch) usedPatches.push(c.patch);
-    const svg = schematicSVG(layout, usedPatches);
-    if (outPath) {
-        fs.writeFileSync(String(outPath), svg, "utf8");
-        console.log(`\n图纸已写入 ${outPath}`);
-    }
-}
-
 /** terminal column width: CJK glyphs take two cells */
 function displayWidth(text) {
     let n = 0;
@@ -270,7 +222,9 @@ function pad(text, width) {
 
 function cmdAll() {
     const set = String(flags.get("set") ?? "demo");
-    const custom = flags.get("code") ?? positional[0];
+    // `node cli.js all 47742` — the seed is the whole input of the campaign sheet
+    const positionalSeed = positional[0] !== undefined && /^\d+$/.test(positional[0]) ? positional[0] : undefined;
+    const custom = flags.get("code") ?? (positionalSeed ? undefined : positional[0]);
     const shapes = custom
         ? String(custom)
               .split(",")
@@ -279,9 +233,14 @@ function cmdAll() {
               .map((code) => ({ code, sources: [] }))
         : neededShapes({ set });
 
-    const ctx = loadMapContext();
-    const radius = Number(flags.get("radius") ?? 8);
-    const patches = scanMap(ctx.seed, { chunkRadius: radius });
+    const ctx = loadMapContext(positionalSeed);
+    const fixedRadius = flags.has("radius") ? Number(flags.get("radius")) : null;
+    const scan = scanForTypes(ctx.seed, {
+        types: requiredTypes(shapes),
+        startRadius: fixedRadius ?? (set === "full" ? 10 : 8),
+        maxRadius: fixedRadius ?? 32,
+    });
+    const patches = scan.patches;
     const res = planCampaign({
         shapes,
         patches,
@@ -297,6 +256,8 @@ function cmdAll() {
                     set: custom ? "custom" : set,
                     seed: ctx.seed,
                     hub: ctx.hub,
+                    radius: scan.radius,
+                    missingTypes: scan.missingTypes,
                     totals: res.totals,
                     entries: res.entries,
                     bom: res.layout.bom,
@@ -314,6 +275,7 @@ function cmdAll() {
         );
     } else {
         const label = NEED_SETS[set] ? NEED_SETS[set].label : set;
+        console.log(`种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · 中心 (${ctx.hub.x},${ctx.hub.y})`);
         console.log(`全部需求图形（${label}）: ${shapes.length} 种\n`);
         console.log(` ${pad("#", 4)}${pad("图形", 28)}${pad("建筑", 6)}${pad("传送带", 8)}来源`);
         for (const e of res.entries) {
@@ -330,6 +292,9 @@ function cmdAll() {
                 (res.totals.failed ? ` · ${res.totals.failed} 种无法求解` : "") +
                 (res.totals.unbuildable ? ` · ${res.totals.unbuildable} 种缺矿脉` : "")
         );
+        for (const t of scan.missingTypes) {
+            console.log(`⚠ 半径 ${scan.radius} 内没有 ${t} 矿脉：需要它的图形无法建造`);
+        }
         console.log(`材料: ${res.layout.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
         for (const c of res.layout.colors) {
             if (c.direct) console.log(`颜色 ${c.color}: 地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`);
@@ -338,7 +303,7 @@ function cmdAll() {
         for (const m of res.layout.missing) console.log(`缺失资源: ${m}`);
     }
 
-    const outPath = flags.get("out");
+    const outPath = flags.get("out") ?? (flags.get("json") ? null : `plan-${ctx.seed}.svg`);
     if (outPath) {
         const usedPatches = [];
         for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
@@ -364,33 +329,34 @@ switch (command) {
     case "map":
         cmdMap();
         break;
-    case "blueprint":
-        cmdBlueprint();
-        break;
     case "all":
         cmdAll();
         break;
     default:
-        console.log(`shapez 通用机器求解器
+        console.log(`shapez ALL SHAPE YOU NEED 求解器
 
-命令:
-  solve <shape>     生成生产该 shape 的建筑方案
+输入一个地图种子，解出整条战役需要的所有图形，输出一张共用同一张地图、
+同一个中心的图纸（建筑坐标 + 物料流 + 材料表）。
+
+  node cli.js all 47742                  # → plan-47742.svg（DEMO 需求表 26 种）
+  node cli.js all 47742 --set=full       # 完整版需求表 34 种
+  node cli.js all --save=../savegame.bin # 用存档里的真实种子和中心
+
+其他命令:
+  solve <shape>     单个 shape → 建筑方案（步骤 + 复算校验）
+  map               列出种子附近的矿脉与颜色
   render <shape>    打印 shape 的形状与说明
   levels            列出游戏关卡目标(默认 demo)
   check             运行回归测试(单元 + 全关卡)
-  map               读取地图(矿脉/颜色)  --save=<savegame.bin> 或 --seed=N
-  blueprint <shape> 输出放置清单 + SVG 图纸
-  all               一次解出所有需要的图形(关卡+升级), 共用地图与 HUB
 
 选项:
-  --json            输出机器可读的 JSON
-  --level=demo:6    只使用该关卡时已解锁的建筑
-  --demo|--game     配合 levels 使用
-  --save=<file>     shapez 存档 (.bin, IndexedDB 里的原始内容)
-  --seed=<n>        直接用地图种子
-  --radius=<n>      扫描的 chunk 半径
-  --out=<file.svg>  blueprint: 输出图纸
   --set=demo|full   all: 需求集合 (默认 demo)
+  --out=<file.svg>  all: 图纸路径 (默认 plan-<seed>.svg)
+  --radius=<n>      扫描的 chunk 半径 (默认自动扩展，直到需要的矿脉出现)
+  --seed=<n>        地图种子 (all 也可直接写位置参数)
+  --save=<file>     shapez 存档 (.bin, IndexedDB 里的原始内容)，取真实种子/中心
+  --level=demo:6    只使用该关卡时已解锁的建筑
+  --json            输出机器可读的 JSON
   --code=A,B,C      all: 只解指定图形
 `);
 }

@@ -5,16 +5,16 @@
 Two artefacts in one repo:
 
 1. `demo/` — an offline mirror of the official shapez.io **web DEMO**, build `8a79de52` (`1.5.7`). Prebuilt upstream bundle; not our code.
-2. `solver/` — a **general-purpose construction solver**. Input: any shapez shape code. Output: a building plan (miner / cutter / rotater / stacker / painter) that provably produces it, plus a blueprint with tile coordinates, ports and a BOM.
+2. `solver/` — the **ALL SHAPE YOU NEED solver**. Input: a map seed (`node cli.js all 47742`). Output: one campaign sheet — tile-accurate building placements, port-to-port material flow and a BOM for every shape the campaign needs, all factories on one shared map delivering into the same hub.
 
-The solver targets *arbitrary* shapes; the 26 full-game levels and 9 demo levels are only the regression corpus. Everything runs on bare Node with **zero dependencies, no build step, no package manager**.
+The underlying solver still targets *arbitrary* shapes (single shapes remain available through `node cli.js solve`); the 26 full-game levels and 9 demo levels are only the regression corpus. Everything runs on bare Node with **zero dependencies, no build step, no package manager**.
 
 ## Architecture & Data Flow
 
 Two loosely coupled halves live under `solver/src/`:
 
 - **Shape algebra + planning (pure, no I/O):** `shape.js` → `plan.js` → `solver.js`.
-- **World/blueprint (reads savegames, writes SVG):** `savegame.js`, `lz_factory.js`, `map.js`, `layout.js`, `schematic.js`, `render.js`.
+- **World/layout (reads savegames, writes SVG):** `savegame.js`, `lz_factory.js`, `map.js`, `layout.js`, `schematic.js`, `render.js`.
 
 ### Solve pipeline
 
@@ -69,8 +69,8 @@ Run from `solver/` unless noted.
 
 ```bash
 # Verification (the gate)
-node test/run-tests.js          # 121 checks, <1 s
-node test/run-tests.js --quick  # 86 checks, skips both level loops
+node test/run-tests.js          # 127 checks, seconds
+node test/run-tests.js --quick  # 92 checks, skips both level loops
 node cli.js check               # spawns test/run-tests.js; cwd must be solver/
 node test/fuzz.js --n=40 --seed=1234 --budget=30000
 
@@ -80,13 +80,14 @@ node cli.js solve "Cu------" --level=demo:6    # only buildings unlocked by that
 node cli.js render "RuCw--Cw"                  # canonical code + ASCII layers
 node cli.js levels --game
 
-# Map / blueprint
+# Map / campaign sheet
 node cli.js map --seed=47742 --radius=3
 node cli.js map --save=../savegame.bin --radius=2
-node cli.js blueprint "RuCw--Cw:----Ru--" --save=../savegame.bin --out=plan.svg
 
 # Every shape the campaign asks for (levels + upgrade tiers), one shared map/HUB
-node cli.js all --set=demo --save=../savegame.bin --out=plan-all.svg
+# seed is the input; the vein scan widens until every needed shape letter exists
+node cli.js all 47742 --out=plan-all.svg
+node cli.js all 47742 --set=full
 
 # UI + API
 node server.js --port=8099   # /web/index.html, GET /api/solve, static under solver/
@@ -103,7 +104,7 @@ cd demo && python -m http.server 8087   # demo at /, solver UI at /solver/web/
 
 There are no npm scripts, no `npm install`, and no lint/format step.
 
-CLI gotcha: `solve` **ignores `--budget`** (`cli.js:98` passes only `buildings`). Budget is wired only in `blueprint` (`:217`), `fuzz.js`, and the server's `?budget=` param. To widen the search for a plain solve, use `blueprint` or call `solve(code, { maxAttempts })` directly.
+CLI gotcha: `solve` **ignores `--budget`** (`cli.js:98` passes only `buildings`). Budget is wired in `all` (`--budget`), `fuzz.js`, and the server's `?budget=` param. To widen the search for a plain solve, call `solve(code, { maxAttempts })` directly.
 
 ## Code Conventions & Common Patterns
 
@@ -152,7 +153,7 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 - `git` + network needed for `setup-ref.mjs` (sparse clone) and `fetch-demo.sh`.
 - Windows: `ref` is a directory junction, handled by `setup-ref.mjs`; don't create it by hand.
 - Generated / never committed: `vendor/`, `ref`, `*.log`, `tree.json`, `savegame.raw.json`, `savegame.json`, `preview-cu.svg`, `solver/tmp-sg.mjs`.
-- Generated but **tracked** (regenerate + commit when source changes): `demo/**` including `demo/solver/**`, `plan.svg`, `plan-all.svg`, `solver/plan.svg`, `savegame.bin`.
+- Generated but **tracked** (regenerate + commit when source changes): `demo/**` including `demo/solver/**`, `plan-all.svg`, `savegame.bin`.
 
 ## Testing & QA
 

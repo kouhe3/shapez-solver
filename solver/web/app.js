@@ -3,11 +3,10 @@ import * as P from "../src/plan.js";
 import { shapeSVG } from "../src/render.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, REWARD_BUILDINGS } from "../src/levels.js";
-import { scanMap, itemLabel } from "../src/map.js";
+import { scanMap, scanForTypes, itemLabel } from "../src/map.js";
 import { decodeSavegame } from "../src/savegame.js";
-import { buildLayout } from "../src/layout.js";
 import { schematicSVG } from "../src/schematic.js";
-import { neededShapes, describeSource } from "../src/needs.js";
+import { neededShapes, requiredTypes, describeSource } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
 
 const BUILDING_LABELS = {
@@ -324,7 +323,7 @@ shapeInput.value = "RuCw--Cw:----Ru--";
 onInputChanged();
 
 /* ------------------------------------------------------------------ *
- * map → blueprint
+ * seed → campaign sheet
  * ------------------------------------------------------------------ */
 
 let gameCtx = null;
@@ -399,7 +398,7 @@ function renderMapSummary() {
     chipLevel.textContent = `第 ${gameCtx.level} 关`;
     const chipHub = document.createElement("span");
     chipHub.className = "chip";
-    chipHub.textContent = `HUB (${gameCtx.hub.x},${gameCtx.hub.y})`;
+    chipHub.textContent = `中心 (${gameCtx.hub.x},${gameCtx.hub.y})`;
     meta.append(chipSeed, chipLevel, chipHub);
 
     const hx = gameCtx.hub.x + 2;
@@ -425,6 +424,7 @@ async function onLoadSave() {
     btn.disabled = true;
     try {
         gameCtx = await readGameSave();
+        $("seed-input").value = String(gameCtx.seed);
         renderMapSummary();
     } catch (e) {
         $("map-summary").textContent = e.message;
@@ -434,107 +434,18 @@ async function onLoadSave() {
     }
 }
 
-function renderPlacement(layout) {
-    const el = $("placement");
-    el.innerHTML = "";
-
-    const makeCard = (title) => {
-        const card = document.createElement("div");
-        card.className = "card";
-        card.innerHTML = `<h3>${title}</h3>`;
-        el.appendChild(card);
-        return card;
-    };
-
-    // placement list
-    const place = makeCard("放置清单（tile 坐标）");
-    const table = document.createElement("table");
-    table.innerHTML = `<thead><tr><th>坐标</th><th>建筑</th><th>步骤</th><th>备注</th></tr></thead>`;
-    const tbody = document.createElement("tbody");
-    for (const b of layout.buildings) {
-        const tr = document.createElement("tr");
-        const note =
-            b.kind === "base"
-                ? `矿脉 ${b.patch ? itemLabel(b.patch.item) : "缺失"} · ${b.distance ? b.distance.toFixed(0) + " 格" : ""}`
-                : b.detail || "";
-        tr.innerHTML = `<td><code>${b.x},${b.y}</code></td><td>${b.zh}</td><td><code>${b.stepId}</code></td><td>${note}</td>`;
-        tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    place.appendChild(table);
-
-    // material flow
-    const flow = makeCard("物料流（按此铺传送带）");
-    const ft = document.createElement("table");
-    ft.innerHTML = `<thead><tr><th>来源</th><th>输出口</th><th>目标</th><th>输入口</th><th>格数</th></tr></thead>`;
-    const fb = document.createElement("tbody");
-    for (const c of layout.connections) {
-        const tr = document.createElement("tr");
-        const dest = c.toHub ? "<b>HUB</b> 枢纽" : `<code>${c.to}</code> ${c.toLabel}`;
-        const inPort = c.toHub ? "—" : `#${c.slot}`;
-        tr.innerHTML = `<td><code>${c.from}</code> ${c.fromLabel}</td><td>${
-            c.outCount > 1 ? "#" + c.outSlot : "—"
-        }</td><td>${dest}</td><td>${inPort}</td><td>${c.beltTiles}</td>`;
-        fb.appendChild(tr);
-    }
-    ft.appendChild(fb);
-    flow.appendChild(ft);
-
-    // bill of materials
-    const bom = makeCard("材料 / 颜色");
-    const lines = [];
-    lines.push(`建筑：${layout.bom.map((b) => `${b.zh}×${b.n}`).join("、") || "无"}`);
-    lines.push(`传送带约 ${layout.beltEstimate} 格`);
-    for (const c of layout.colors) {
-        lines.push(
-            c.direct
-                ? `颜色 ${c.color}：地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`
-                : `颜色 ${c.color}：无直接矿脉，需用混合器按 ${c.mix.join("+")} 调色`
-        );
-    }
-    for (const m of layout.missing) lines.push(`⚠ 缺失资源：${m}`);
-    bom.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
+/**
+ * Map the drawing button works on: the seed field is the input, and a loaded
+ * save only contributes its real hub position when its seed matches.
+ */
+function mapContext() {
+    const seed = Number($("seed-input").value);
+    if (!Number.isInteger(seed) || seed < 0 || seed > 999999) throw new Error("地图种子应是 0–999999 的整数");
+    const hub = gameCtx && gameCtx.seed === seed ? gameCtx.hub : { x: -2, y: -2 };
+    return { seed, hub };
 }
 
-async function onBlueprint() {
-    const parsed = S.tryParse(shapeInput.value.trim());
-    if (!parsed.ok) return;
-    if (!gameCtx) await onLoadSave();
-    if (!gameCtx) return;
-
-    const btn = $("blueprint-btn");
-    btn.disabled = true;
-    const box = $("schematic");
-    box.innerHTML = `<div style="padding:16px;color:#6b7280">求解并排布中…</div>`;
-    await new Promise((r) => setTimeout(r, 30));
-    try {
-        const baseCodes = [
-            ...new Set(gameCtx.patches.filter((p) => p.item.kind === "shape").map((p) => p.item.code)),
-        ];
-        const res = solve(parsed.shape, {
-            buildings: new Set(currentBuildings),
-            baseCodes,
-            maxAttempts: 30000,
-        });
-        if (!res.ok) {
-            box.innerHTML = `<div style="padding:16px;color:#a5342f">${res.error || "无法求解"}</div>`;
-            $("placement").innerHTML = "";
-            return;
-        }
-        const layout = buildLayout({ plan: res.plan, patches: gameCtx.patches, hub: gameCtx.hub });
-        const usedPatches = [];
-        for (const s of layout.sources) if (s.patch) usedPatches.push(s.patch);
-        for (const c of layout.colors) if (c.patch) usedPatches.push(c.patch);
-        box.innerHTML = schematicSVG(layout, usedPatches);
-        renderPlacement(layout);
-    } catch (e) {
-        box.innerHTML = `<div style="padding:16px;color:#a5342f">${e.message}</div>`;
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-function renderCampaign(res) {
+function renderCampaign(res, meta) {
     const el = $("placement");
     el.innerHTML = "";
     const makeCard = (title) => {
@@ -545,7 +456,9 @@ function renderCampaign(res) {
         return card;
     };
 
-    const tableCard = makeCard(`全部需求图形（${res.totals.shapes} 种）`);
+    const tableCard = makeCard(
+        `全部需求图形（${res.totals.shapes} 种${meta && meta.seed !== undefined ? ` · 种子 ${meta.seed}` : ""}）`
+    );
     const table = document.createElement("table");
     table.innerHTML = `<thead><tr><th>#</th><th>图形</th><th>建筑</th><th>传送带</th><th>来源</th></tr></thead>`;
     const tbody = document.createElement("tbody");
@@ -583,34 +496,45 @@ function renderCampaign(res) {
 }
 
 async function onAll() {
-    if (!gameCtx) await onLoadSave();
-    if (!gameCtx) return;
-
     const btn = $("all-btn");
     btn.disabled = true;
     const box = $("schematic");
+    const status = $("all-status");
+    status.textContent = "";
     box.innerHTML = `<div style="padding:16px;color:#6b7280">求解全部需求图形中…</div>`;
     await new Promise((r) => setTimeout(r, 30));
     try {
-        const set = $("level-set").value === "game" ? "full" : "demo";
+        const ctx = mapContext();
+        const set = $("all-set").value;
+        const shapes = neededShapes({ set });
+        const scan = scanForTypes(ctx.seed, {
+            types: requiredTypes(shapes),
+            startRadius: set === "full" ? 10 : 8,
+            maxRadius: 32,
+        });
         const res = planCampaign({
-            shapes: neededShapes({ set }),
-            patches: gameCtx.patches,
-            hub: gameCtx.hub,
+            shapes,
+            patches: scan.patches,
+            hub: ctx.hub,
             buildings: new Set(currentBuildings),
         });
         const usedPatches = [];
         for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
         for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
         box.innerHTML = schematicSVG(res.layout, usedPatches, { campaign: true });
-        renderCampaign(res);
+        renderCampaign(res, { set, seed: ctx.seed, radius: scan.radius });
+        status.textContent =
+            `种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · ` +
+            (res.totals.failed ? `${res.totals.failed} 种无法求解 · ` : "") +
+            `${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
+            (scan.missingTypes.length ? ` · ⚠ 缺 ${scan.missingTypes.join("/")} 矿脉` : "");
     } catch (e) {
         box.innerHTML = `<div style="padding:16px;color:#a5342f">${e.message}</div>`;
+        $("placement").innerHTML = "";
     } finally {
         btn.disabled = false;
     }
 }
 
 $("load-save-btn").addEventListener("click", onLoadSave);
-$("blueprint-btn").addEventListener("click", onBlueprint);
 $("all-btn").addEventListener("click", onAll);

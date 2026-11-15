@@ -17,6 +17,7 @@
  */
 
 import { DEMO_LEVELS, FULL_LEVELS } from "./levels.js";
+import * as S from "./shape.js";
 
 export const PREPAREMENT_SHAPE = "CpRpCp--:SwSwSwSw";
 export const FINAL_GAME_SHAPE = "RuCw--Cw:----Ru--";
@@ -140,6 +141,26 @@ export function neededShapes({ set = "demo" } = {}) {
         });
     }
     return [...byCode.values()];
+}
+
+/**
+ * Shape letters (C R S W) a list of targets needs from the map. A letter that
+ * never appears as a deposit cannot be built, so the map scan has to know about
+ * it before planning: `S`/`W` deposits only start a few chunks out.
+ *
+ * @param {Array<{code: string}>} shapes
+ * @returns {Set<string>}
+ */
+export function requiredTypes(shapes) {
+    const types = new Set();
+    for (const need of shapes) {
+        const parsed = S.tryParse(need.code);
+        if (!parsed.ok) continue;
+        for (const layer of parsed.shape.layers) {
+            for (const cell of layer) if (cell) types.add(cell.t);
+        }
+    }
+    return types;
 }
 
 /** one-line Chinese description of why a shape is needed */

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>shapez 通用机器求解器</title>
+<title>shapez ALL SHAPE YOU NEED 求解器</title>
 <link rel="stylesheet" href="./style.css"/>
 </head>
 <body>
@@ -11,8 +11,8 @@
   <div class="brand">
     <span class="logo">◧</span>
     <div>
-      <h1>shapez 通用机器求解器</h1>
-      <p class="sub">输入任意 shape code，输出能把它造出来的建筑方案（可验证）</p>
+      <h1>shapez ALL SHAPE YOU NEED 求解器</h1>
+      <p class="sub">输入地图种子，输出整条战役需要的所有图形的一张图纸</p>
     </div>
   </div>
   <div class="topstats" id="topstats"></div>
@@ -69,23 +69,32 @@
     <div id="steps" class="steps"></div>
   </section>
 
-  <section class="panel wide" id="blueprint-panel">
+  <section class="panel wide" id="sheet-panel">
     <div class="result-head">
       <h2>地图 → 建筑图纸</h2>
       <div id="map-meta" class="meta"></div>
     </div>
     <p class="hint">
-      读取当前游戏的存档得到地图种子，按目标 shape 选最近的矿脉，输出放置清单 + 图纸。
-      需要在和游戏同一个源下打开本页（<code>http://127.0.0.1:8087/solver/web/</code>）才能读到游戏的 IndexedDB。
+      <b>输入地图种子就能出全体图纸</b>：一次解出关卡目标 + 升级线要的所有 shape，共用同一张地图和同一个中心
+      —— 游戏会把您生产过的所有图形都用于解锁升级，所以旧工厂别拆。
     </p>
     <div class="field">
-      <button id="load-save-btn">读取游戏存档</button>
-      <button id="blueprint-btn" class="primary">生成图纸</button>
-      <button id="all-btn">全部需求图形</button>
+      <label class="seed-label">地图种子
+        <input id="seed-input" type="number" min="0" max="999999" step="1" value="47742"/>
+      </label>
+      <select id="all-set">
+        <option value="demo">DEMO 需求表 · 26 种</option>
+        <option value="full">正式版需求表 · 34 种</option>
+      </select>
+      <button id="all-btn" class="primary">生成全体图纸</button>
     </div>
+    <div class="field">
+      <button id="load-save-btn">读取游戏存档（可选）</button>
+    </div>
+    <p class="hint" id="all-status"></p>
     <p class="hint">
-      「全部需求图形」一次解出关卡目标 + 升级线要的所有 shape，共用一张地图和同一个 HUB：
-      游戏会把您生产过的所有图形都用于解锁升级，所以旧工厂别拆。
+      存档只在想用真实中心位置时读；需要和游戏同源打开本页
+      （<code>http://127.0.0.1:8087/solver/web/</code>）才能读到游戏的 IndexedDB。
     </p>
     <div id="map-summary" class="hint"></div>
     <div id="schematic" class="schematic"></div>

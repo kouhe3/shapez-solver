@@ -8,11 +8,11 @@ import * as S from "../src/shape.js";
 import * as P from "../src/plan.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "../src/levels.js";
-import { generateChunk, scanMap, availableResources } from "../src/map.js";
+import { generateChunk, scanMap, scanForTypes, availableResources } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject } from "../src/savegame.js";
 import { buildLayout, BUILDING_INFO } from "../src/layout.js";
-import { neededShapes } from "../src/needs.js";
+import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
 
 let failures = 0;
@@ -215,6 +215,36 @@ console.log("== blueprint: the finished product is belted into the hub ==");
     );
 }
 
+console.log("== blueprint: mixed colours get a mixer ==");
+{
+    // RpRp---- needs purple paint, which the map only has as red + blue. The
+    // sheet used to print "需混合 r+b" and leave the painter's colour port bare.
+    const patches = scanMap(47742, { chunkRadius: 8 });
+    const res = solve("RpRp----", { baseCodes: ["CuCuCuCu", "RuRuRuRu"] });
+    checkTrue("purple: solved", res.ok, res.error || "");
+    const layout = buildLayout({ plan: res.plan, patches, hub: { x: -2, y: -2 } });
+
+    const mixer = layout.buildings.find((b) => b.kind === "mixer");
+    const painter = layout.buildings.find((b) => b.kind === "paint");
+    checkTrue("purple: mixer placed", !!mixer);
+    checkTrue("purple: painter placed", !!painter);
+    check(
+        "purple: mixer fed by two colour miners",
+        mixer ? layout.connections.filter((c) => c.color && c.to === mixer.stepId).length : 0,
+        2
+    );
+    checkTrue(
+        "purple: painter colour input is belted",
+        !!painter && layout.connections.some((c) => c.color && c.to === painter.stepId && c.slot === 1)
+    );
+    check(
+        "purple: colour summary",
+        layout.colors.map((c) => [c.color, c.mix]),
+        [["p", ["r", "b"]]]
+    );
+    check("purple: nothing missing", layout.missing, []);
+}
+
 console.log("== needs: every shape the game asks for ==");
 {
     for (const set of ["demo", "full"]) {
@@ -240,6 +270,22 @@ console.log("== needs: every shape the game asks for ==");
         "rocket shape is full-version only",
         !neededShapes({ set: "demo" }).some((s) => s.code === "CbCuCbCu:Sr------:--CrSrCr:CwCwCwCw")
     );
+}
+
+console.log("== needs: the map scan finds every letter the campaign needs ==");
+{
+    const types = requiredTypes(neededShapes({ set: "demo" }));
+    check("needs demo: letters used by the targets", [...types].sort(), ["C", "R", "S", "W"]);
+
+    // seeds 7 and 1234 have no windmill deposit near the hub; a fixed radius
+    // used to leave their windmill shapes unsolvable
+    for (const seed of [7, 1234]) {
+        const scan = scanForTypes(seed, { types, startRadius: 8, maxRadius: 32 });
+        check(`scan seed ${seed}: nothing missing`, scan.missingTypes, []);
+        checkTrue(`scan seed ${seed}: radius expanded`, scan.radius > 8);
+    }
+    const tight = scanForTypes(1234, { types, startRadius: 8, maxRadius: 8 });
+    check("scan: a fixed radius reports the missing letter", tight.missingTypes, ["W"]);
 }
 
 console.log("== solver: atoms cut out of mixed deposits ==");
