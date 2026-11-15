@@ -7,11 +7,12 @@
 import * as S from "../src/shape.js";
 import * as P from "../src/plan.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
-import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "../src/levels.js";
+import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, availableLevels } from "../src/levels.js";
 import { generateChunk, scanMap, scanForTypes, availableResources, patchMinerCapacity } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
-import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree } from "../src/layout.js";
+import { buildLayout, BUILDING_INFO, sizeColorSupply, expandPlanTree, planBom, createWorld, routeBelt } from "../src/layout.js";
+import { colorChain, colorChains } from "../src/color.js";
 import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
@@ -246,6 +247,86 @@ console.log("== blueprint: mixed colours get a mixer ==");
     check("purple: nothing missing", layout.missing, []);
 }
 
+console.log("== colour plan: the single-shape recipe names the mixer ==");
+{
+    // the plan ops only carry a colour as data; the chain that produces that
+    // colour (mixers + colour miners) has to be reported next to them
+    const res = solve("RpRp----", { baseCodes: ["CuCuCuCu", "RuRuRuRu"] });
+    const chains = colorChains(res.flat.steps);
+    check("colour plan: one chain per colour port", chains.length, 1);
+    check("colour plan: chain colour", chains[0] && chains[0].color, "p");
+    check(
+        "colour plan: chain ops (dependencies first)",
+        chains[0] && chains[0].ops.map((op) => [op.kind, op.color]),
+        [["base", "r"], ["base", "b"], ["mixer", "p"]]
+    );
+    check(
+        "colour chain: white needs two mixers",
+        colorChain("w").filter((op) => op.kind === "mixer").map((op) => op.color),
+        ["y", "w"]
+    );
+
+    const bom = planBom(expandPlanTree(res.flat));
+    const byZh = Object.fromEntries(bom.map((b) => [b.zh, b.n]));
+    check("colour plan: BOM has one mixer", byZh["混色器"], 1);
+    check("colour plan: BOM has three miners", byZh["采矿机"], 3);
+    check("colour plan: BOM has one trash can", byZh["垃圾桶"], 1);
+    // the recipe and the drawing must count the same machines
+    const patches = scanMap(47742, { chunkRadius: 8 });
+    const layout = buildLayout({ plan: res.plan, patches, hub: { x: -2, y: -2 } });
+    check(
+        "colour plan: BOM equals the drawing BOM",
+        Object.entries(byZh).sort(),
+        layout.bom.map((b) => [b.zh, b.n]).sort()
+    );
+}
+
+console.log("== levels: when each part unlocks ==");
+{
+    const demo = availableLevels(DEMO_LEVELS);
+    check("demo: cutter usable from L2", demo.get("cutter"), 2);
+    check("demo: painter usable from L7", demo.get("painter"), 7);
+    check("demo: mixer usable from L9", demo.get("mixer"), 9);
+    check("demo: stacker never unlocks", demo.has("stacker"), false);
+    const full = availableLevels(FULL_LEVELS);
+    check("full: mixer usable from L9", full.get("mixer"), 9);
+    check("full: stacker usable from L11", full.get("stacker"), 11);
+    check(
+        "demo L9 building set",
+        [...buildingsForLevel(DEMO_LEVELS, 9)].sort(),
+        ["balancer", "cutter", "mixer", "painter", "rotaterCCW", "rotaterCW", "tunnel"].sort()
+    );
+    check("full L10 has no stacker yet", buildingsForLevel(FULL_LEVELS, 10).has("stacker"), false);
+    check("full L11 has the stacker", buildingsForLevel(FULL_LEVELS, 11).has("stacker"), true);
+}
+
+console.log("== router: walls, tunnels, dead ends ==");
+{
+    const world = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    // a vertical wall with exactly one gap at y = 0
+    for (let y = -5; y <= 5; y++) if (y !== 0) world.walls.add("0|" + y);
+    const through = routeBelt(world, world.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
+    checkTrue("router: uses the gap in a wall", !!through && through.cells.some((c) => c.x === 0 && c.y === 0));
+    check("router: gap route is the straight run", through && through.cells.length, 5);
+
+    const sealed = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let y = -30; y <= 30; y++) sealed.walls.add("0|" + y);
+    const dead = routeBelt(sealed, sealed.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
+    check("router: a sealed wall has no route", dead, null);
+
+    // a belt across the only straight run: crossing needs a tunnel, and the
+    // tunnel only goes under a perpendicular belt
+    const crossing = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let y = -1; y <= 1; y++) crossing.belts.set("0|" + y, "v");
+    const tunnel = routeBelt(crossing, crossing.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
+    check("router: crosses a perpendicular belt", tunnel && tunnel.crossings, [{ x: 0, y: 0 }]);
+    const noTunnel = routeBelt(crossing, crossing.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, dryRun: true });
+    checkTrue(
+        "router: before L6 it goes around",
+        !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
+    );
+}
+
 console.log("== needs: every shape the game asks for ==");
 {
     for (const set of ["demo", "full"]) {
@@ -373,6 +454,57 @@ console.log("== campaign: one map, one hub, no overlaps ==");
         fanout.set(key, (fanout.get(key) || 0) + 1);
     }
     check("campaign: no output port feeds two belts", Math.max(0, ...fanout.values()), 1);
+}
+
+console.log("== campaign: only the lines buildable by L9 ==");
+{
+    const shapes = neededShapes({ set: "demo" });
+    const scan = scanForTypes(47742, { types: requiredTypes(shapes), startRadius: 8, maxRadius: 32 });
+    const res = planCampaign({
+        shapes,
+        patches: scan.patches,
+        hub: { x: -2, y: -2 },
+        levels: DEMO_LEVELS,
+        untilLevel: 9,
+    });
+    checkTrue(
+        "campaign L9: every drawn factory is buildable by L9",
+        res.entries.every((e) => e.status !== "ok" || e.availableAt <= 9)
+    );
+    checkTrue(
+        "campaign L9: the demo's stacker shapes are impossible",
+        res.entries.some((e) => e.status === "impossible")
+    );
+    check(
+        "campaign L9: statuses add up",
+        res.totals.shapes + res.totals.deferred + res.totals.impossible + res.totals.failed,
+        res.totals.requested
+    );
+    // cyan paint needs the mixer, so this factory is L9 and not the painter's L7
+    const cyan = res.entries.find((e) => e.code === "ScScScSc");
+    check("campaign L9: cyan is L9 (mixer), not L7", cyan && cyan.availableAt, 9);
+    check(
+        "campaign L9: every link is routed or reported",
+        res.layout.connections.filter((c) => !c.routed).length,
+        res.layout.routingGaps.length
+    );
+
+    // a lower cap has to skip the level goals that are still ahead
+    const early = planCampaign({
+        shapes: shapes.filter((s) => s.code === "CrCrCrCr" || s.code === "RuRu----"),
+        patches: scan.patches,
+        hub: { x: -2, y: -2 },
+        levels: DEMO_LEVELS,
+        untilLevel: 6,
+    });
+    check(
+        "campaign L6: the L7 factory is deferred, the L4 one is drawn",
+        early.entries.map((e) => [e.code, e.status]),
+        [
+            ["RuRu----", "ok"],
+            ["CrCrCrCr", "deferred"],
+        ]
+    );
 }
 
 console.log("== throughput: the game's own rates ==");

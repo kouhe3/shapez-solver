@@ -9,6 +9,8 @@ import { schematicSVG } from "../src/schematic.js";
 import { neededShapes, requiredTypes, describeSource } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
 import { formatRate, formatDuration } from "../src/rates.js";
+import { colorChains } from "../src/color.js";
+import { planBom, expandPlanTree } from "../src/layout.js";
 
 const BUILDING_LABELS = {
     cutter: "切割机",
@@ -105,6 +107,25 @@ function onLevelChange() {
         `第 ${lvl.level} 关需要 ${lvl.required} 个；可用建筑：` +
         ([...buildings].map((b) => BUILDING_LABELS[b] || b).join("、") || "仅采矿机");
     onInputChanged();
+}
+
+/** "全部关卡" plus every level of the selected need set */
+function renderAllLevels() {
+    const levels = levelsFor($("all-set").value);
+    const sel = $("all-until");
+    const keep = sel.value;
+    sel.innerHTML = "";
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "全部关卡";
+    sel.appendChild(all);
+    for (const lvl of levels) {
+        const opt = document.createElement("option");
+        opt.value = String(lvl.level);
+        opt.textContent = `只画 L≤${lvl.level}`;
+        sel.appendChild(opt);
+    }
+    sel.value = levels.some((lvl) => String(lvl.level) === keep) ? keep : "";
 }
 
 /* ------------------------------------------------------------------ *
@@ -261,6 +282,41 @@ function renderPlan(res) {
     final.appendChild(copy);
     stepsEl.appendChild(final);
 
+    const chains = colorChains(res.flat.steps);
+    if (chains.length) {
+        const head = document.createElement("div");
+        head.className = "status ok";
+        head.style.marginTop = "14px";
+        head.textContent = "色料供应：每个上色口一条链；混色器不是 plan 步骤，但不建就出不了这个颜色";
+        stepsEl.appendChild(head);
+        for (const chain of chains) {
+            const row = document.createElement("div");
+            row.className = "step";
+            row.style.gridTemplateColumns = "120px 1fr";
+            const id = document.createElement("div");
+            id.className = "id";
+            id.textContent = `${chain.stepId} 颜色口${chain.slot}`;
+            const body = document.createElement("div");
+            const title = document.createElement("div");
+            title.className = "op";
+            title.textContent = `颜色 ${chain.color}`;
+            const detail = document.createElement("div");
+            detail.className = "detail";
+            detail.textContent = chain.ops
+                .map((op) => (op.kind === "mixer" ? `混色器 ${op.parts.join("+")}` : `采矿机 ${op.color}`))
+                .join(" → ");
+            body.append(title, detail);
+            row.append(id, body);
+            stepsEl.appendChild(row);
+        }
+    }
+    const bomChip = document.createElement("span");
+    bomChip.className = "chip";
+    bomChip.textContent = `材料 ${planBom(expandPlanTree(res.flat))
+        .map((b) => `${b.zh}×${b.n}`)
+        .join("、")}`;
+    resultMeta.appendChild(bomChip);
+
     lastResult = res;
 }
 
@@ -317,9 +373,11 @@ solveBtn.addEventListener("click", doSolve);
 levelSet.addEventListener("change", renderLevelPick);
 levelPick.addEventListener("change", onLevelChange);
 $("reset-buildings").addEventListener("click", () => setBuildings(new Set(ALL_BUILDINGS)));
+$("all-set").addEventListener("change", renderAllLevels);
 
 renderBuildings();
 renderLevelPick();
+renderAllLevels();
 shapeInput.value = "RuCw--Cw:----Ru--";
 onInputChanged();
 
@@ -412,6 +470,9 @@ async function onLoadSave() {
     try {
         gameCtx = await readSaveFile(file);
         $("seed-input").value = String(gameCtx.seed);
+        if (gameCtx.level && [...$("all-until").options].some((o) => Number(o.value) === gameCtx.level)) {
+            $("all-until").value = String(gameCtx.level);
+        }
         renderMapSummary();
     } catch (e) {
         gameCtx = null;
@@ -442,8 +503,11 @@ function renderCampaign(res, meta) {
         return card;
     };
 
+    const scope = res.totals.untilLevel ? ` · 只画 L≤${res.totals.untilLevel}` : "";
     const tableCard = makeCard(
-        `全部需求图形（${res.totals.shapes} 种${meta && meta.seed !== undefined ? ` · 种子 ${meta.seed}` : ""}）`
+        `全部需求图形（需求 ${res.totals.requested} 种${scope}）：${res.totals.shapes} 种可建${
+            meta && meta.seed !== undefined ? ` · 种子 ${meta.seed}` : ""
+        }`
     );
     const table = document.createElement("table");
     table.innerHTML = `<thead><tr><th>#</th><th>图形</th><th>建筑</th><th>传送带</th><th>产能</th><th>交付</th><th>可建</th><th>来源</th></tr></thead>`;
@@ -451,7 +515,10 @@ function renderCampaign(res, meta) {
     for (const e of res.entries) {
         const tr = document.createElement("tr");
         const why = e.sources.map(describeSource).join(" / ");
-        if (!e.ok) {
+        if (e.status === "deferred" || e.status === "impossible") {
+            const at = e.status === "deferred" ? `L${e.availableAt}+` : "不可建";
+            tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td colspan="4">${e.reason}</td><td>${at}</td><td>${why}</td>`;
+        } else if (!e.ok) {
             tr.innerHTML = `<td>${e.index}</td><td><code>${e.code}</code></td><td colspan="4">无法求解</td><td>${
                 e.error || ""
             }</td>`;
@@ -508,6 +575,9 @@ function renderCampaign(res, meta) {
     lines.push(
         `运输缺口：分流节点 ${perf.splitters} 个（最坏一个出口 ${perf.worstFanout} 条）、中心并带 ${perf.hubMerges} 个（${perf.hubInbound} 条带进 12 个面）`
     );
+    if (res.totals.routingGaps) {
+        lines.push(`⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住（图纸上用红色虚线标出）`);
+    }
     if (perf.balancerAt) lines.push(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多 12 条带`);
     if (perf.tunnelAt) lines.push(`隧道 L${perf.tunnelAt} 解锁：在此之前走线不能交叉`);
     bomCard.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
@@ -524,6 +594,7 @@ async function onAll() {
     try {
         const ctx = mapContext();
         const set = $("all-set").value;
+        const untilLevel = $("all-until").value ? Number($("all-until").value) : null;
         const shapes = neededShapes({ set });
         const scan = scanForTypes(ctx.seed, {
             types: requiredTypes(shapes),
@@ -534,7 +605,8 @@ async function onAll() {
             shapes,
             patches: scan.patches,
             hub: ctx.hub,
-            buildings: new Set(currentBuildings),
+            buildings: new Set(ALL_BUILDINGS),
+            untilLevel,
             levels: set === "full" ? FULL_LEVELS : DEMO_LEVELS,
         });
         const usedPatches = [];
@@ -545,7 +617,9 @@ async function onAll() {
         status.textContent =
             `种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · ` +
             (res.totals.failed ? `${res.totals.failed} 种无法求解 · ` : "") +
-            `${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
+            (res.totals.deferred ? `${res.totals.deferred} 种要更高关卡 · ` : "") +
+            (res.totals.impossible ? `${res.totals.impossible} 种本版本没有对应机器 · ` : "") +
+            `${res.totals.shapes} 种可建 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
             (scan.missingTypes.length ? ` · ⚠ 缺 ${scan.missingTypes.join("/")} 矿脉` : "");
     } catch (e) {
         box.innerHTML = `<div style="padding:16px;color:#a5342f">${e.message}</div>`;

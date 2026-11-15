@@ -3,6 +3,16 @@
  * Used as a regression corpus and as ready-made targets in the UI.
  */
 
+/**
+ * Which part a reward unlocks, straight from the game's
+ * `tutorial_goals_mappings.js` (`enumHubGoalRewardsToContentUnlocked`). A
+ * reward is granted for *completing* a level, so L8's mixer reward is usable
+ * from L9 on — `availableLevels` adds the one level.
+ *
+ * Rewards that unlock nothing this solver models (wire layer, storage, the
+ * endless upgrades) stay empty. Transport pieces count too: the balancer, the
+ * splitter, the merger and the tunnel gate what a belt layout can do.
+ */
 export const REWARD_BUILDINGS = {
     reward_cutter_and_trash: ["cutter"],
     reward_rotater: ["rotaterCW"],
@@ -12,17 +22,17 @@ export const REWARD_BUILDINGS = {
     reward_cutter_quad: ["quadCutter"],
     reward_rotater_180: ["rotater180"],
     reward_wires_painter_and_levers: ["quadPainter"],
+    reward_mixer: ["mixer"],
+    reward_balancer: ["balancer"],
+    reward_tunnel: ["tunnel"],
+    reward_merger: ["merger"],
+    reward_splitter: ["splitter"],
     reward_painter_double: [],
-    reward_mixer: [],
-    reward_balancer: [],
-    reward_tunnel: [],
-    reward_merger: [],
     reward_blueprints: [],
     reward_miner_chainable: [],
     reward_underground_belt_tier_2: [],
     reward_belt_reader: [],
     reward_storage: [],
-    reward_splitter: [],
     reward_filter: [],
     reward_display: [],
     reward_logic_gates: [],
@@ -75,7 +85,9 @@ export const FULL_LEVELS = [
 
 /**
  * Buildings available while working on a given level: rewards of all
- * previously completed levels (extractors are always available).
+ * previously completed levels (extractors are always available). A part that
+ * appears in no level of this version — the demo ends before the stacker — is
+ * absent, which callers must read as "never", not "from L1".
  */
 export function buildingsForLevel(levels, levelNumber) {
     const set = new Set();
@@ -89,10 +101,8 @@ export function buildingsForLevel(levels, levelNumber) {
 /**
  * The first level each building can actually be used on. A reward is granted
  * for *completing* a level, so a level-3 reward is usable from level 4 on —
- * which is why the balancer (reward of L3) is a level-4 building.
- *
- * Transport pieces are not buildings in `REWARD_BUILDINGS`, so they are listed
- * here under the names the throughput report uses.
+ * which is why the balancer (reward of L3) is a level-4 building. Transport
+ * pieces are in the table too, under the names the throughput report uses.
  *
  * @param {Array<{level:number, reward:string}>} levels
  * @returns {Map<string, number>} building → first usable level
@@ -102,15 +112,6 @@ export function availableLevels(levels) {
     for (const lvl of levels) {
         for (const b of REWARD_BUILDINGS[lvl.reward] || []) if (!map.has(b)) map.set(b, lvl.level + 1);
     }
-    const transport = {
-        reward_balancer: "balancer",
-        reward_splitter: "splitter",
-        reward_tunnel: "tunnel",
-        reward_merger: "merger",
-    };
-    for (const lvl of levels) {
-        const key = transport[lvl.reward];
-        if (key && !map.has(key)) map.set(key, lvl.level + 1);
-    }
     return map;
 }
+

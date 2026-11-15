@@ -20,6 +20,7 @@ import {
     rotate,
     stack,
 } from "./shape.js";
+import { colorChains } from "./color.js";
 
 /* ------------------------------------------------------------------ *
  * builders
@@ -254,5 +255,8 @@ export function planToJSON(root) {
             detail: s.detail,
             out: s.outKey,
         })),
+        // every painter colour port needs its own chain; without this a purple
+        // shape looks like it only needs one painter
+        colors: colorChains(flat.steps),
     };
 }

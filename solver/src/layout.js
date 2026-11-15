@@ -12,6 +12,7 @@
 
 import * as P from "./plan.js";
 import { SOURCE_RATE } from "./rates.js";
+import { COLOR_NEEDS, COLOR_OP_LABELS, colorChain, colorChains } from "./color.js";
 
 /**
  * Geometry of every part this solver places — port positions in tile units,
@@ -138,6 +139,24 @@ export function portCells(info, x, y) {
 }
 
 /**
+ * The tile beyond each port — where the belt serving that port has to run.
+ * Keeping it free is what makes a port connectable at all; a part placed there
+ * would wall the port in.
+ */
+export function portApproachCells(info, x, y) {
+    const cells = [];
+    for (const port of [...(info.ins || []), ...(info.outs || [])]) {
+        const px = x + port.x;
+        const py = y + port.y;
+        if (py === y) cells.push({ x: Math.floor(px), y: y - 2 });
+        else if (py === y + info.h) cells.push({ x: Math.floor(px), y: y + info.h + 1 });
+        else if (px === x) cells.push({ x: x - 2, y: Math.floor(py) });
+        else cells.push({ x: x + info.w + 1, y: Math.floor(py) });
+    }
+    return cells;
+}
+
+/**
  * Ejector slot carrying this step's product. The cutter's two halves and the
  * quad cutter's four quadrants are bound to fixed slots by the game:
  * cutHalf slot 0 = {2,3}, slot 1 = {0,1}; cutQuad slot i = quadrant i.
@@ -147,6 +166,136 @@ export function outputSlot(step) {
     if (step.node.op === "cutHalf") return step.node.side;
     if (step.node.op === "cutQuad") return step.node.quad;
     return 0;
+}
+
+const ROUTE_DIRS = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+];
+
+/**
+ * Shortest legal belt run between two port tiles, as the game would lay it.
+ *
+ * Every cell has to stay off machines, the hub and other parts' ports. Running
+ * into an existing belt is only legal with a tunnel: the two belts must cross
+ * at a right angle, and the game only hands the tunnel out at L6, which the
+ * caller passes as `allowCross`. When no legal run exists the link is reported
+ * as unroutable instead of being drawn as if it worked.
+ *
+ * Turns cost 2 so the result reads as a few straight runs instead of a
+ * staircase; crossings cost 3 (the tunnel plus the extra tile).
+ *
+ * @param {object} world shared world; `belts` maps a tile to "h"|"v"|"turn"
+ * @param {Set<string>} blocked machine, hub and port tiles
+ * @param {{x:number,y:number}} start output port tile
+ * @param {{x:number,y:number}} goal input port tile
+ * @param {{allowCross?: boolean, margin?: number}} [opts]
+ * @returns {{cells: Array<{x:number,y:number}>, crossings: Array<{x:number,y:number}>}|null}
+ */
+export function routeBelt(world, blocked, start, goal, opts = {}) {
+    const margin = opts.margin ?? 20;
+    const minX = Math.min(start.x, goal.x) - margin;
+    const maxX = Math.max(start.x, goal.x) + margin;
+    const minY = Math.min(start.y, goal.y) - margin;
+    const maxY = Math.max(start.y, goal.y) + margin;
+    const width = maxX - minX + 1;
+    const size = width * (maxY - minY + 1);
+    const indexOf = (x, y) => (y - minY) * width + (x - minX);
+    const startIndex = indexOf(start.x, start.y);
+    const goalIndex = indexOf(goal.x, goal.y);
+
+    // state = tile * 4 + heading; the heading is what makes a turn cost extra
+    const dist = new Float64Array(size * 4).fill(Infinity);
+    const from = new Int32Array(size * 4).fill(-1);
+    const buckets = [];
+    const push = (state, cost) => {
+        (buckets[cost] || (buckets[cost] = [])).push(state);
+    };
+    for (let d = 0; d < 4; d++) {
+        dist[startIndex * 4 + d] = 0;
+        push(startIndex * 4 + d, 0);
+    }
+
+    let best = -1;
+    search: for (let cost = 0; cost < buckets.length; cost++) {
+        const bucket = buckets[cost];
+        if (!bucket) continue;
+        while (bucket.length) {
+            const state = bucket.pop();
+            if (dist[state] !== cost) continue;
+            const cell = state >> 2;
+            const heading = state & 3;
+            if (cell === goalIndex) {
+                best = state;
+                break search;
+            }
+            const cx = (cell % width) + minX;
+            const cy = Math.floor(cell / width) + minY;
+            for (let d = 0; d < 4; d++) {
+                const nx = cx + ROUTE_DIRS[d][0];
+                const ny = cy + ROUTE_DIRS[d][1];
+                if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue;
+                const endpoint = (nx === start.x && ny === start.y) || (nx === goal.x && ny === goal.y);
+                const free = endpoint || (opts.exempt && opts.exempt.has(cellKey(nx, ny)));
+                if (!free && blocked.has(cellKey(nx, ny))) continue;
+                const joinsGoal = opts.goalMayJoin && nx === goal.x && ny === goal.y;
+                let step = 1 + (d === heading ? 0 : 2);
+                const belt = world.belts.get(cellKey(nx, ny));
+                if (belt && !joinsGoal) {
+                    // the tunnel runs under a perpendicular belt, never along one
+                    const across = d < 2 ? "v" : "h";
+                    if (!opts.allowCross || belt !== across || world.tunnelCells.has(cellKey(nx, ny))) continue;
+                    step += 3;
+                }
+                const next = indexOf(nx, ny) * 4 + d;
+                const total = cost + step;
+                if (total < dist[next]) {
+                    dist[next] = total;
+                    from[next] = state;
+                    push(next, total);
+                }
+            }
+        }
+    }
+    if (best < 0) return null;
+
+    const cells = [];
+    for (let state = best; state >= 0; state = from[state]) {
+        const cell = state >> 2;
+        cells.push({ x: (cell % width) + minX, y: Math.floor(cell / width) + minY });
+    }
+    cells.reverse();
+    if (opts.dryRun) {
+        return { cells, crossings: cells.filter(({ x, y }) => world.belts.has(cellKey(x, y))) };
+    }
+
+    // claim the run: a tile that already holds a belt is a tunnel crossing
+    const crossings = [];
+    for (let i = 0; i < cells.length; i++) {
+        const { x, y } = cells[i];
+        const key = cellKey(x, y);
+        if (world.belts.has(key)) {
+            // the merge case joins the belt already entering the hub; no tunnel
+            if (opts.goalMayJoin && i === cells.length - 1) continue;
+            if (!world.tunnelCells.has(key)) {
+                world.tunnelCells.add(key);
+                crossings.push({ x, y });
+            }
+            continue;
+        }
+        let heading;
+        if (cells.length === 1) heading = "h";
+        else if (i === 0) heading = cells[1].y === cells[0].y ? "h" : "v";
+        else if (i === cells.length - 1) heading = cells[i].y === cells[i - 1].y ? "h" : "v";
+        else if (cells[i - 1].y === cells[i + 1].y) heading = "h";
+        else if (cells[i - 1].x === cells[i + 1].x) heading = "v";
+        else heading = "turn";
+        world.belts.set(key, heading);
+        world.occupied.add(key);
+    }
+    return { cells, crossings };
 }
 
 
@@ -160,17 +309,6 @@ function patchCells(patch) {
         }
     }
     return cells;
-}
-
-const COLOR_NEEDS = { y: ["r", "g"], p: ["r", "b"], c: ["g", "b"], w: ["r", "g", "b"] };
-
-// The game mixes colors by OR-ing their red/green/blue bits (colors.js:
-// enumColorMixingResults is built from the same bitfield table).
-const COLOR_BITS = { u: 0, r: 1, g: 2, y: 3, b: 4, p: 5, c: 6, w: 7 };
-const BITS_COLOR = ["u", "r", "g", "y", "b", "p", "c", "w"];
-
-function mixColor(a, b) {
-    return BITS_COLOR[(COLOR_BITS[a] || 0) | (COLOR_BITS[b] || 0)] || "u";
 }
 
 /**
@@ -208,26 +346,27 @@ export function sizeColorSupply(demand) {
 const HUB_SIZE = 4;
 
 /**
- * Tile centre on the hub's border closest to (x, y) — where the last belt
- * enters the hub. Entry points sit on the border ring so the arrow lands on
- * the hub itself rather than inside it.
+ * The tiles a belt can stand on to feed the hub: one per side of every border
+ * tile (16 total). Two belts cannot share one — each border tile takes one
+ * belt — so a campaign with more factories than that needs a merger.
  */
-function hubEntry(hub, x, y) {
-    let best = { x: hub.x + 0.5, y: hub.y + 0.5 };
-    let bestD = Infinity;
-    for (let dx = 0; dx < HUB_SIZE; dx++) {
-        for (let dy = 0; dy < HUB_SIZE; dy++) {
-            if (dx !== 0 && dx !== HUB_SIZE - 1 && dy !== 0 && dy !== HUB_SIZE - 1) continue;
-            const cx = hub.x + dx + 0.5;
-            const cy = hub.y + dy + 0.5;
-            const d = Math.abs(cx - x) + Math.abs(cy - y);
-            if (d < bestD) {
-                bestD = d;
-                best = { x: cx, y: cy };
-            }
-        }
+function hubApproaches(hub) {
+    const out = [];
+    for (let i = 0; i < HUB_SIZE; i++) {
+        out.push({ x: hub.x + i, y: hub.y - 1 });
+        out.push({ x: hub.x + i, y: hub.y + HUB_SIZE });
+        out.push({ x: hub.x - 1, y: hub.y + i });
+        out.push({ x: hub.x + HUB_SIZE, y: hub.y + i });
     }
-    return best;
+    return out;
+}
+
+/** the border tile an outside approach feeds; its centre is where the belt ends */
+function hubBorderOf(hub, tile) {
+    if (tile.y < hub.y) return { x: tile.x, y: hub.y };
+    if (tile.y >= hub.y + HUB_SIZE) return { x: tile.x, y: hub.y + HUB_SIZE - 1 };
+    if (tile.x < hub.x) return { x: hub.x, y: tile.y };
+    return { x: hub.x + HUB_SIZE - 1, y: tile.y };
 }
 
 function cellKey(x, y) {
@@ -254,7 +393,28 @@ export function createWorld({ hub, patches }) {
     for (let dx = 0; dx < HUB_SIZE; dx++) {
         for (let dy = 0; dy < HUB_SIZE; dy++) occupied.add(cellKey(hub.x + dx, hub.y + dy));
     }
-    return { hub, patches, occupied, deposits, blocks: [] };
+    // machine bodies and their port tiles never carry a belt; kept across
+    // factories so a later route cannot cut through an earlier factory
+    const walls = new Set();
+    for (let dx = 0; dx < HUB_SIZE; dx++) {
+        for (let dy = 0; dy < HUB_SIZE; dy++) walls.add(cellKey(hub.x + dx, hub.y + dy));
+    }
+    return {
+        hub,
+        patches,
+        occupied,
+        deposits,
+        blocks: [],
+        walls,
+        /** tiles a belt must run through to reach a port; never built on */
+        approaches: new Set(),
+        /** tile → "h" | "v" | "turn": the belt already laid there */
+        belts: new Map(),
+        /** tiles where one belt passes under another through a tunnel */
+        tunnelCells: new Set(),
+        /** outside tiles already claimed by a belt feeding the hub */
+        hubApproaches: new Set(),
+    };
 }
 
 /** a processor may only sit on bare ground */
@@ -275,7 +435,18 @@ function placeExtractor(world, predicate, from) {
     for (const { patch, distance } of candidates) {
         for (const cell of patchCellsByCentre(patch)) {
             if (world.occupied.has(cellKey(cell.x, cell.y))) continue;
+            // its ejector tile and the tile behind it must be clear
+            const blocked = [...portCells(BUILDING_INFO.base, cell.x, cell.y), ...portApproachCells(BUILDING_INFO.base, cell.x, cell.y)].some(
+                (c) => world.walls.has(cellKey(c.x, c.y)) || world.belts.has(cellKey(c.x, c.y)) || world.approaches.has(cellKey(c.x, c.y))
+            );
+            if (blocked) continue;
             world.occupied.add(cellKey(cell.x, cell.y));
+            world.walls.add(cellKey(cell.x, cell.y));
+            for (const c of portCells(BUILDING_INFO.base, cell.x, cell.y)) world.walls.add(cellKey(c.x, c.y));
+            for (const c of portApproachCells(BUILDING_INFO.base, cell.x, cell.y)) {
+                world.approaches.add(cellKey(c.x, c.y));
+                world.occupied.add(cellKey(c.x, c.y));
+            }
             return { patch, distance, x: cell.x, y: cell.y };
         }
     }
@@ -302,8 +473,10 @@ function blockCollisions(world, x, y, width, height, limit = Infinity) {
  */
 function allocateBlock(world, width, height) {
     const { hub } = world;
-    const stepX = 6;
-    const stepY = 4;
+    // tile the map with one window per factory plus a four-tile gap, so two
+    // neighbouring factories never share a belt corridor
+    const stepX = width + 4;
+    const stepY = height + 4;
     const reach = 12;
     const candidates = [];
     for (let dx = -reach; dx <= reach; dx++) {
@@ -359,6 +532,32 @@ export function expandPlanTree(flat) {
 }
 
 /**
+ * Machines a flattened plan has to be built from: a miner per base step, one
+ * processor per step, a trash can for every cutter output the plan does not
+ * use, and the whole colour chain of every painter colour port. Same counting
+ * as `buildLayout`'s BOM, so a single-shape recipe and a campaign factory
+ * report the same machine list.
+ *
+ * @param {{steps: Array}} flat a flattened (ideally `expandPlanTree`d) plan
+ * @param {Array} [chains] colour chains of those steps
+ * @returns {Array<{zh: string, n: number}>}
+ */
+export function planBom(flat, chains = colorChains(flat.steps)) {
+    const bom = new Map();
+    const add = (zh, n = 1) => bom.set(zh, (bom.get(zh) || 0) + n);
+    for (const step of flat.steps) {
+        const info = BUILDING_INFO[step.op];
+        if (!info) continue;
+        add(info.zh);
+        if (info.outs.length > 1) add(BUILDING_INFO.trash.zh, info.outs.length - 1);
+    }
+    for (const chain of chains) {
+        for (const op of chain.ops) add(op.kind === "mixer" ? COLOR_OP_LABELS.mixer : COLOR_OP_LABELS.base);
+    }
+    return [...bom.entries()].map(([zh, n]) => ({ zh, n }));
+}
+
+/**
  * @param {object} args
  * @param {object} args.plan   plan AST root
  * @param {Array} args.patches map patches (from map.js)
@@ -366,6 +565,8 @@ export function expandPlanTree(flat) {
  * @param {object} [args.world] shared placement state; omit for a one-off layout
  * @param {string} [args.idPrefix] namespaces step ids when several plans share a world
  * @param {string} [args.tag] the target this layout builds (campaign sheets)
+ * @param {boolean} [args.allowTunnels] may a belt cross another one (tunnel
+ *   unlocked)? Before L6 every crossing is illegal and must be routed around
  */
 export function buildLayout({
     plan,
@@ -376,6 +577,7 @@ export function buildLayout({
     world = null,
     idPrefix = "",
     tag = null,
+    allowTunnels = true,
 }) {
     const shared = world || createWorld({ hub, patches });
     // one output port = one belt, so shared sub-plans get their own copy
@@ -393,8 +595,22 @@ export function buildLayout({
         for (let dx = 0; dx < info.w; dx++) {
             for (let dy = 0; dy < info.h; dy++) if (!processorFree(shared, x + dx, y + dy)) return false;
         }
+        // a port cannot share a tile with another part's body, port or belt,
+        // and the belt beyond it needs a clear tile to run through
+        for (const c of [...portCells(info, x, y), ...portApproachCells(info, x, y)]) {
+            const key = cellKey(c.x, c.y);
+            if (shared.walls.has(key) || shared.belts.has(key) || shared.approaches.has(key)) return false;
+        }
         for (let dx = 0; dx < info.w; dx++) {
-            for (let dy = 0; dy < info.h; dy++) shared.occupied.add(cellKey(x + dx, y + dy));
+            for (let dy = 0; dy < info.h; dy++) {
+                shared.occupied.add(cellKey(x + dx, y + dy));
+                shared.walls.add(cellKey(x + dx, y + dy));
+            }
+        }
+        for (const c of portCells(info, x, y)) shared.walls.add(cellKey(c.x, c.y));
+        for (const c of portApproachCells(info, x, y)) {
+            shared.approaches.add(cellKey(c.x, c.y));
+            shared.occupied.add(cellKey(c.x, c.y));
         }
         return true;
     }
@@ -409,50 +625,34 @@ export function buildLayout({
 
     /** first free spot for `info` around an anchor tile, nearest ring first */
     function placeNear(info, anchor) {
+        // anchors are often a building centre (half tiles); every part must sit
+        // on whole tiles or its ports land between two grid cells
+        const ax = Math.floor(anchor.x);
+        const ay = Math.floor(anchor.y);
         for (let r = 0; r < 48; r++) {
             for (let dy = -r; dy <= r; dy++) {
                 for (let dx = -r; dx <= r; dx++) {
                     if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-                    if (fit(info, anchor.x + dx, anchor.y + dy)) return { x: anchor.x + dx, y: anchor.y + dy };
+                    if (fit(info, ax + dx, ay + dy)) return { x: ax + dx, y: ay + dy };
                 }
             }
         }
         return null;
     }
 
-    /** one belt run between two ports; `extra` says what the link carries */
-    function pushConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, extra = {}) {
-        const outPort = srcInfo.outs[outSlot] || srcInfo.outs[0];
-        const inPort = dstInfo.ins[inSlot];
-        if (!outPort || !inPort) return;
-        const x1 = srcBuilding.x + outPort.x;
-        const y1 = srcBuilding.y + outPort.y;
-        const x2 = dstBuilding.x + inPort.x;
-        const y2 = dstBuilding.y + inPort.y;
-        const len = Math.abs(x2 - x1) + Math.abs(y2 - y1);
-        const beltTiles = Math.max(1, Math.round(len));
-        beltEstimate += beltTiles;
-        connections.push({
-            from: srcBuilding.stepId,
-            to: dstBuilding.stepId,
-            slot: inSlot,
-            fromLabel: srcInfo.zh,
-            toLabel: dstInfo.zh,
-            outSlot,
-            outCount: srcInfo.outs.length,
-            x1,
-            y1,
-            x2,
-            y2,
-            length: len,
-            beltTiles,
-            ...extra,
-        });
+    /**
+     * Links wait for the router: every part is placed first, so the belt a
+     * connection needs can avoid all of them instead of cutting through the
+     * machines that are placed after it.
+     */
+    const queued = [];
+    function queueConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, extra = {}) {
+        queued.push({ srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, extra });
     }
 
     /** colour feeds have no plan step: one chain head feeds one painter port */
     function pushColorConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot) {
-        pushConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, { color: true });
+        queueConnection(srcBuilding, srcInfo, outSlot, dstBuilding, dstInfo, inSlot, { color: true });
     }
 
     /**
@@ -470,63 +670,65 @@ export function buildLayout({
      */
     function buildColorChain(color, anchor) {
         if (!color || color === "u") return null;
-        const parts = COLOR_NEEDS[color];
-        if (!parts) {
-            const found = placeExtractor(shared, (item) => item.kind === "color" && item.color === color, anchor);
-            if (!found) {
-                missing.add(`颜色:${color}`);
-                return { color, ok: false };
+        // the mix tree comes from color.js, so the recipe the CLI prints and
+        // the buildings placed here can never drift apart
+        const built = [];
+        for (const op of colorChain(color)) {
+            if (op.kind === "base") {
+                const found = placeExtractor(shared, (item) => item.kind === "color" && item.color === op.color, anchor);
+                if (!found) {
+                    missing.add(`颜色:${op.color}`);
+                    return { color, ok: false };
+                }
+                const serial = ++colorSerial;
+                const b = {
+                    step: `color:${op.color}:miner#${serial}`,
+                    stepId: `${idPrefix}color:${op.color}:miner#${serial}`,
+                    kind: "base",
+                    zh: "采矿机",
+                    x: found.x,
+                    y: found.y,
+                    w: 1,
+                    h: 1,
+                    patch: found.patch,
+                    distance: found.distance,
+                    color: op.color,
+                };
+                buildings.push(b);
+                sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color: op.color });
+                for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
+                built.push({ color: op.color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 });
+                continue;
             }
-            const serial = ++colorSerial;
-            const b = {
-                step: `color:${color}:miner#${serial}`,
-                stepId: `${idPrefix}color:${color}:miner#${serial}`,
-                kind: "base",
-                zh: "采矿机",
-                x: found.x,
-                y: found.y,
-                w: 1,
-                h: 1,
-                patch: found.patch,
-                distance: found.distance,
-                color,
-            };
-            buildings.push(b);
-            sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color });
-            for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
-            return { color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 };
-        }
-        let acc = buildColorChain(parts[0], anchor);
-        for (let i = 1; i < parts.length; i++) {
-            const rhs = buildColorChain(parts[i], anchor);
-            if (!acc || !rhs || !acc.ok || !rhs.ok) return { color, ok: false };
+            const left = built[op.operands[0]];
+            const right = built[op.operands[1]];
+            if (!left || !right) return { color, ok: false };
             const info = BUILDING_INFO.mixer;
             const pos = placeNear(info, anchor);
             if (!pos) {
-                missing.add(`颜色:${color}`);
+                missing.add(`颜色:${op.color}`);
                 return { color, ok: false };
             }
-            const mixed = mixColor(acc.color, rhs.color);
             const serial = ++colorSerial;
             const b = {
-                step: `color:${mixed}:mixer#${serial}`,
-                stepId: `${idPrefix}color:${mixed}:mixer#${serial}`,
+                step: `color:${op.color}:mixer#${serial}`,
+                stepId: `${idPrefix}color:${op.color}:mixer#${serial}`,
                 kind: "mixer",
                 zh: info.zh,
                 x: pos.x,
                 y: pos.y,
                 w: info.w,
                 h: info.h,
-                detail: `${acc.color}+${rhs.color}`,
-                colors: [acc.color, rhs.color],
+                detail: `${left.color}+${right.color}`,
+                colors: [left.color, right.color],
             };
             buildings.push(b);
             for (const c of portCells(info, pos.x, pos.y)) shared.occupied.add(cellKey(c.x, c.y));
-            pushColorConnection(acc.building, acc.info, acc.outSlot, b, info, 0);
-            pushColorConnection(rhs.building, rhs.info, rhs.outSlot, b, info, 1);
-            acc = { color: mixed, ok: true, building: b, info, outSlot: 0 };
+            pushColorConnection(left.building, left.info, left.outSlot, b, info, 0);
+            pushColorConnection(right.building, right.info, right.outSlot, b, info, 1);
+            built.push({ color: op.color, ok: true, building: b, info, outSlot: 0 });
         }
-        return acc || { color, ok: false };
+        return built.at(-1) || { color, ok: false };
     }
 
     const paintColorsUsed = new Set();
@@ -535,8 +737,28 @@ export function buildLayout({
         else if (step.op === "paint4") for (const c of step.node.colors) if (c && c !== "u") paintColorsUsed.add(c);
     }
 
-    const hasProcessors = flat.steps.some((s) => s.op !== "base");
-    const block = hasProcessors ? allocateBlock(shared, blockWidth, blockHeight) : null;
+    // rows of processors, grouped by depth; the reserved window has to be tall
+    // enough for every row plus the corridor row between them
+    const CORRIDOR = 2;
+    const packWidth = blockWidth - CORRIDOR;
+    const byDepth = new Map();
+    for (const step of flat.steps) {
+        if (step.op === "base") continue;
+        const d = depth.get(step.id) || 0;
+        if (!byDepth.has(d)) byDepth.set(d, []);
+        byDepth.get(d).push(step);
+    }
+    let extraRows = 0;
+    for (const steps of byDepth.values()) {
+        let width = 0;
+        // two tiles between machines: adjacent ports would share one tile
+        for (const step of steps) width += (BUILDING_INFO[step.op]?.w || 1) + 2;
+        extraRows += Math.max(0, Math.ceil(width / packWidth) - 1);
+    }
+    const lastDepth = byDepth.size ? Math.max(...byDepth.keys()) : 0;
+    const neededHeight = Math.max(blockHeight, (lastDepth + extraRows) * 4 + 6);
+    const hasProcessors = byDepth.size > 0;
+    const block = hasProcessors ? allocateBlock(shared, blockWidth, neededHeight) : null;
     const blockX = block ? block.x : hub.x + 8;
     const blockY = block ? block.y : hub.y - 8;
 
@@ -571,23 +793,30 @@ export function buildLayout({
         for (const c of portCells(BUILDING_INFO.base, found.x, found.y)) shared.occupied.add(cellKey(c.x, c.y));
     }
 
-    // 2) pack processors into rows, grouped by depth
-    const byDepth = new Map();
-    for (const step of flat.steps) {
-        if (step.op === "base") continue;
-        const d = depth.get(step.id) || 0;
-        if (!byDepth.has(d)) byDepth.set(d, []);
-        byDepth.get(d).push(step);
-    }
+    // 2) pack processors into rows, grouped by depth. One free row between two
+    // rows and a two-tile column on the right stay empty: they are the cells a
+    // belt can travel through, because every other free cell around a machine
+    // is one of its own ports and must stay reserved for its own link.
+    const reserveCorridor = (cy) => {
+        for (let x = blockX; x < blockX + blockWidth; x++) shared.occupied.add(cellKey(x, cy + 2));
+        for (let x = blockX + packWidth; x < blockX + blockWidth; x++) {
+            for (let y = cy - 1; y <= cy + 2; y++) shared.occupied.add(cellKey(x, y));
+        }
+    };
+    let reservedY = null;
     for (const [d, steps] of [...byDepth.entries()].sort((a, b) => a[0] - b[0])) {
         let cx = blockX;
-        let cy = blockY + d * 3;
+        let cy = blockY + d * 4;
         for (const step of steps) {
             const info = BUILDING_INFO[step.op];
             if (!info) continue;
-            if (cx + info.w > blockX + blockWidth) {
+            if (cx + info.w > blockX + packWidth) {
                 cx = blockX;
-                cy += 3;
+                cy += 4;
+            }
+            if (cy !== reservedY) {
+                reserveCorridor(cy);
+                reservedY = cy;
             }
             let placed = false;
             for (let attempt = 0; attempt < 200 && !placed; attempt++) {
@@ -595,9 +824,13 @@ export function buildLayout({
                     placed = true;
                 } else {
                     cx += info.w + 1;
-                    if (cx + info.w > blockX + blockWidth) {
+                    if (cx + info.w > blockX + packWidth) {
                         cx = blockX;
-                        cy += 3;
+                        cy += 4;
+                        if (cy !== reservedY) {
+                            reserveCorridor(cy);
+                            reservedY = cy;
+                        }
                     }
                 }
             }
@@ -626,7 +859,7 @@ export function buildLayout({
 
     const buildingByStep = new Map(buildings.map((b) => [b.step, b]));
 
-    // 3) connections + belt lengths
+    // 3) queue the shape links; the router lays them after every part is placed
     for (const step of flat.steps) {
         const target = buildingByStep.get(step.id);
         if (!target) continue;
@@ -637,61 +870,25 @@ export function buildLayout({
             if (!src) return;
             const sInfo = BUILDING_INFO[src.kind];
             const outSlot = outputSlot(stepById.get(input.id));
-            const outPort = sInfo.outs[outSlot] || sInfo.outs[0];
-            const inPort = tInfo.ins[i];
-            if (!inPort) return;
-            const x1 = src.x + outPort.x;
-            const y1 = src.y + outPort.y;
-            const x2 = target.x + inPort.x;
-            const y2 = target.y + inPort.y;
-            const len = Math.abs(x2 - x1) + Math.abs(y2 - y1);
-            const beltTiles = Math.max(1, Math.round(len));
-            beltEstimate += beltTiles;
-            connections.push({
-                from: src.stepId,
-                to: target.stepId,
-                slot: i,
-                fromLabel: sInfo.zh,
-                toLabel: tInfo.zh,
-                outSlot,
-                outCount: sInfo.outs.length,
-                x1,
-                y1,
-                x2,
-                y2,
-                length: len,
-                beltTiles,
-            });
+            if (!tInfo.ins[i]) return;
+            queueConnection(src, sInfo, outSlot, target, tInfo, i);
         });
     }
 
-    // 3b) the finished product itself still has to be belted into the hub
+    // 3b) the finished product still has to be belted into the hub
     const rootBuilding = buildingByStep.get(flat.final.id);
     if (rootBuilding) {
         const rInfo = BUILDING_INFO[rootBuilding.kind];
         const outSlot = outputSlot(flat.final);
-        const outPort = rInfo.outs[outSlot] || rInfo.outs[0];
-        const x1 = rootBuilding.x + outPort.x;
-        const y1 = rootBuilding.y + outPort.y;
-        const entry = hubEntry(hub, x1, y1);
-        const len = Math.abs(entry.x - x1) + Math.abs(entry.y - y1);
-        const beltTiles = Math.max(1, Math.round(len));
-        beltEstimate += beltTiles;
-        connections.push({
-            from: rootBuilding.stepId,
-            to: "HUB",
-            toHub: true,
-            slot: null,
-            fromLabel: rInfo.zh,
-            toLabel: "枢纽",
+        queued.push({
+            srcBuilding: rootBuilding,
+            srcInfo: rInfo,
             outSlot,
-            outCount: rInfo.outs.length,
-            x1,
-            y1,
-            x2: entry.x,
-            y2: entry.y,
-            length: len,
-            beltTiles,
+            dstBuilding: null,
+            dstInfo: null,
+            inSlot: null,
+            extra: {},
+            toHub: true,
         });
     }
 
@@ -705,7 +902,7 @@ export function buildLayout({
         colors.forEach((color, i) => {
             if (!color || color === "u") return;
             // one chain per port, grown next to the painter that consumes it
-            const chain = buildColorChain(color, { x: painter.x + info.w / 2, y: painter.y + info.h / 2 });
+            const chain = buildColorChain(color, { x: painter.x + info.w + 3, y: painter.y });
             if (!chain || !chain.ok) {
                 missing.add(`颜色:${color}`);
                 return;
@@ -752,8 +949,95 @@ export function buildLayout({
             const cx = pos.x + 0.5;
             const cy = pos.y + 0.5;
             const inSlot = Math.abs(px - cx) > Math.abs(py - cy) ? (px < cx ? 3 : 1) : py < cy ? 0 : 2;
-            pushConnection(source, info, slot, can, BUILDING_INFO.trash, inSlot, { waste: true });
+            queueConnection(source, info, slot, can, BUILDING_INFO.trash, inSlot, { waste: true });
         }
+    }
+
+    // 5) route every queued link on the tile grid. Every machine body and port
+    // tile of every factory is off-limits (the world keeps them, so a later
+    // factory cannot cut through an earlier one); a belt may only enter/leave
+    // through the two port tiles of its own link, and crossing an existing
+    // belt needs a tunnel.
+    // a route may not cut through another port's approach corridor either
+    const blocked = new Set([...shared.walls, ...shared.approaches]);
+    const allowCross = allowTunnels !== false;
+    const routingGaps = [];
+    const route = (start, goal, join = false, exempt = null) =>
+        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, margin: 20 }) ||
+        routeBelt(shared, blocked, start, goal, { allowCross, goalMayJoin: join, exempt, margin: 60 });
+
+    for (const q of queued) {
+        const outPort = q.srcInfo.outs[q.outSlot] || q.srcInfo.outs[0];
+        const x1 = q.srcBuilding.x + outPort.x;
+        const y1 = q.srcBuilding.y + outPort.y;
+        let goal;
+        let x2;
+        let y2;
+        let mergeInto = false;
+        if (q.toHub) {
+            const approaches = hubApproaches(hub)
+                .map((t) => ({ ...t, d: Math.abs(t.x - x1) + Math.abs(t.y - y1) }))
+                .sort((a, b) => a.d - b.d || a.y - b.y || a.x - b.x);
+            const free = approaches.find((t) => !shared.hubApproaches.has(cellKey(t.x, t.y)));
+            const pick = free || approaches[0];
+            shared.hubApproaches.add(cellKey(pick.x, pick.y));
+            mergeInto = !free;
+            const border = hubBorderOf(hub, pick);
+            x2 = border.x + 0.5;
+            y2 = border.y + 0.5;
+            goal = { x: pick.x, y: pick.y };
+        } else {
+            const inPort = q.dstInfo.ins[q.inSlot];
+            if (!inPort) continue;
+            x2 = q.dstBuilding.x + inPort.x;
+            y2 = q.dstBuilding.y + inPort.y;
+            goal = portCells(q.dstInfo, q.dstBuilding.x, q.dstBuilding.y)[q.inSlot];
+        }
+        const start = portCells(q.srcInfo, q.srcBuilding.x, q.srcBuilding.y)[q.srcInfo.ins.length + q.outSlot];
+        const startApproach = portApproachCells(q.srcInfo, q.srcBuilding.x, q.srcBuilding.y)[q.srcInfo.ins.length + q.outSlot];
+        const goalApproach = q.toHub ? null : portApproachCells(q.dstInfo, q.dstBuilding.x, q.dstBuilding.y)[q.inSlot];
+        const exempt = new Set();
+        for (const cell of [start, goal, startApproach, goalApproach]) if (cell) exempt.add(cellKey(cell.x, cell.y));
+        const path = start && goal ? route(start, goal, mergeInto, exempt) : null;
+        const connection = {
+            from: q.srcBuilding.stepId,
+            to: q.toHub ? "HUB" : q.dstBuilding.stepId,
+            toHub: !!q.toHub,
+            merged: mergeInto,
+            slot: q.toHub ? null : q.inSlot,
+            fromLabel: q.srcInfo.zh,
+            toLabel: q.toHub ? "枢纽" : q.dstInfo.zh,
+            outSlot: q.outSlot,
+            outCount: q.srcInfo.outs.length,
+            x1,
+            y1,
+            x2,
+            y2,
+            length: Math.abs(x2 - x1) + Math.abs(y2 - y1),
+            ...q.extra,
+        };
+        if (!path) {
+            routingGaps.push({
+                from: connection.from,
+                to: connection.to,
+                fromLabel: connection.fromLabel,
+                toLabel: connection.toLabel,
+                start,
+                goal,
+            });
+            connections.push({ ...connection, routed: false, path: null, tunnels: 0, tunnelCells: [], beltTiles: 0 });
+            continue;
+        }
+        const beltTiles = path.cells.length + 2 * path.crossings.length;
+        beltEstimate += beltTiles;
+        connections.push({
+            ...connection,
+            routed: true,
+            path: path.cells,
+            tunnels: path.crossings.length,
+            tunnelCells: path.crossings,
+            beltTiles,
+        });
     }
 
     // 4) colors: which ones are on the map, which need mixing
@@ -785,6 +1069,7 @@ export function buildLayout({
         sources,
         colors,
         missing: [...missing],
+        routingGaps,
         beltEstimate,
         bom: [...bom.entries()].map(([zh, n]) => ({ zh, n })),
         steps: flat.steps,

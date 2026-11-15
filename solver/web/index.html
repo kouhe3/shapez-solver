@@ -86,8 +86,16 @@
         <option value="demo">DEMO 需求表 · 26 种</option>
         <option value="full">正式版需求表 · 34 种</option>
       </select>
+      <select id="all-until" title="只画这一关及之前能建的产线">
+        <option value="">全部关卡</option>
+      </select>
       <button id="all-btn" class="primary">生成全体图纸</button>
     </div>
+    <p class="hint">
+      「全部关卡」= 整条战役的并集；选到第 9 关则只画第 9 关时已解锁的产线：
+      求解器不会再用更晚解锁的机器（四向切割机、堆叠器、四色上色器等），
+      需要更高关卡才建得出的工厂会标明原因而不是硬画出来。
+    </p>
     <div class="field">
       <label class="save-row">读取存档（可选）
         <input id="save-file" type="file" accept=".bin,.json,.txt,application/json"/>

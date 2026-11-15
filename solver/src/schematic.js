@@ -31,8 +31,6 @@ function esc(text) {
 // #797a80 runs (#d2d4d9 ribbons once zoomed in).
 const INK = {
     line: "#64666e",
-    mid: "#91949e",
-    face: "#f8f9ff",
     belt: "#797a80",
 };
 
@@ -55,11 +53,48 @@ const KIND_COLOR = {
     trash: "#ed1d5d",
 };
 
-/** darken a #rrggbb by `k` (0..1) for the block's outline */
-function shade(hex, k) {
-    const n = parseInt(hex.slice(1), 16);
-    const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => Math.round(v * k));
-    return `#${ch.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+/**
+ * The 3×3 sub-tile cut-out the game paints for parts whose map silhouette is
+ * not a plain rectangle (`getSpecialOverlayRenderMatrix` in
+ * `ref/buildings/{miner,rotater,trash}.js`). Row-major, 1 = filled with the
+ * part's silhouette colour; the rest shows the ground through.
+ */
+const OVERLAY = {
+    base: [1, 1, 1, 1, 0, 1, 1, 1, 1], // miner: ring around the drill hole
+    trash: [1, 1, 0, 1, 1, 1, 0, 1, 1], // trash can: U with two open sides
+};
+
+/** the rotater's cut-out depends on its variant, not on its rotation here */
+const ROTATER_OVERLAY = {
+    CW: [0, 1, 1, 1, 1, 0, 0, 1, 1],
+    CCW: [1, 1, 0, 0, 1, 1, 1, 1, 0],
+    180: [1, 1, 0, 1, 1, 1, 0, 1, 1],
+};
+
+/**
+ * The block the game draws for this part in its map view: a flat
+ * silhouette-colour rectangle, cut into the part's own 3×3 shape where it has
+ * one. Nothing is invented here — no pictograms, no outlines, no rounded
+ * corners; the colour and the cut-out are the game's identity for the part.
+ */
+function silhouette(kind, detail, x, y, w, h) {
+    const color = KIND_COLOR[kind] || "#dfe3ea";
+    const matrix = kind === "rotate" ? ROTATER_OVERLAY[detail] || ROTATER_OVERLAY.CW : OVERLAY[kind];
+    if (!matrix) {
+        return `<rect x="${r2(x)}" y="${r2(y)}" width="${r2(w)}" height="${r2(h)}" fill="${color}"/>`;
+    }
+    const cw = w / 3;
+    const ch = h / 3;
+    let out = "";
+    for (let row = 0; row < 3; row++) {
+        for (let col = 0; col < 3; col++) {
+            if (!matrix[col + row * 3]) continue;
+            out += `<rect x="${r2(x + col * cw)}" y="${r2(y + row * ch)}" width="${r2(cw + 0.4)}" height="${r2(
+                ch + 0.4
+            )}" fill="${color}"/>`;
+        }
+    }
+    return out;
 }
 
 /** filled triangle whose tip sits at (cx, cy) and points along `deg` (0 = +x, 90 = +y) */
@@ -74,165 +109,24 @@ function arrowHead(cx, cy, len, deg, fill = INK.line) {
     return `<path d="M ${r2(cx)} ${r2(cy)} L ${r2(bx + hx)} ${r2(by + hy)} L ${r2(bx - hx)} ${r2(by - hy)} Z" fill="${fill}"/>`;
 }
 
-/** paint droplet */
-function droplet(cx, cy, d, fill) {
-    return `<path d="M ${r2(cx)} ${r2(cy - d * 0.58)} C ${r2(cx + d * 0.52)} ${r2(cy - d * 0.02)} ${r2(
-        cx + d * 0.42
-    )} ${r2(cy + d * 0.42)} ${r2(cx)} ${r2(cy + d * 0.42)} C ${r2(cx - d * 0.42)} ${r2(cy + d * 0.42)} ${r2(
-        cx - d * 0.52
-    )} ${r2(cy - d * 0.02)} ${r2(cx)} ${r2(cy - d * 0.58)} Z" fill="${fill}"/>`;
-}
-
-/**
- * The machine icon the game itself draws on the building, centred on (x, y)
- * inside a box of `size` px: drill = miner, scissors = cutter, four blades =
- * quad cutter, circular arrow = rotator, plates + arrow = stacker, roller +
- * droplet = painter, two merged circles = mixer.
- *
- * Text labels stay in the legend: a name label is larger than the tile itself
- * at these tile sizes, while the game's pictograms still read.
- */
-function machineGlyph(kind, x, y, size, colors) {
-    const s = size;
-    const ink = INK.line;
-    const sw = Math.max(0.9, s * 0.09);
-    const stroke = (d) =>
-        `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>`;
-
-    if (kind === "base") {
-        // miner: the round drill with a cross that the game puts on the tile
-        return (
-            `<circle cx="${r2(x)}" cy="${r2(y)}" r="${r2(s * 0.38)}" fill="${INK.face}" stroke="${ink}" stroke-width="${sw}"/>` +
-            stroke(
-                `M ${r2(x - s * 0.38)} ${r2(y)} L ${r2(x + s * 0.38)} ${r2(y)} M ${r2(x)} ${r2(y - s * 0.38)} L ${r2(
-                    x
-                )} ${r2(y + s * 0.38)}`
-            )
-        );
-    }
-    if (kind === "cutHalf") {
-        // cutter: the game's scissors
-        return (
-            stroke(
-                `M ${r2(x - s * 0.26)} ${r2(y + s * 0.34)} L ${r2(x + s * 0.17)} ${r2(y - s * 0.36)} M ${r2(
-                    x + s * 0.26
-                )} ${r2(y + s * 0.34)} L ${r2(x - s * 0.17)} ${r2(y - s * 0.36)}`
-            ) +
-            `<circle cx="${r2(x)}" cy="${r2(y + s * 0.02)}" r="${r2(Math.max(0.7, s * 0.06))}" fill="${ink}"/>` +
-            `<circle cx="${r2(x - s * 0.28)}" cy="${r2(y + s * 0.36)}" r="${r2(s * 0.12)}" fill="${INK.face}" stroke="${ink}" stroke-width="${sw}"/>` +
-            `<circle cx="${r2(x + s * 0.28)}" cy="${r2(y + s * 0.36)}" r="${r2(s * 0.12)}" fill="${INK.face}" stroke="${ink}" stroke-width="${sw}"/>`
-        );
-    }
-    if (kind === "cutQuad") {
-        // quad cutter: four blades leaving a centre hub, as the game draws it
-        let arms = "";
-        for (const deg of [45, 135, 225, 315]) {
-            const a = (deg * Math.PI) / 180;
-            const cos = Math.cos(a);
-            const sin = Math.sin(a);
-            arms += stroke(
-                `M ${r2(x + cos * s * 0.13)} ${r2(y + sin * s * 0.13)} L ${r2(x + cos * s * 0.4)} ${r2(
-                    y + sin * s * 0.4
-                )}`
-            );
-            arms += arrowHead(x + cos * s * 0.48, y + sin * s * 0.48, s * 0.2, deg);
+/** SVG path through the routed cells, with collinear runs collapsed */
+function polylinePath(pts, x1, y1, x2, y2) {
+    const all = [[x1, y1], ...pts, [x2, y2]];
+    const kept = [all[0]];
+    for (let i = 1; i < all.length; i++) {
+        const b = all[i];
+        const a = kept[kept.length - 1];
+        if (a[0] === b[0] && a[1] === b[1]) continue;
+        if (kept.length >= 2) {
+            const p = kept[kept.length - 2];
+            if ((p[0] === a[0] && a[0] === b[0]) || (p[1] === a[1] && a[1] === b[1])) {
+                kept[kept.length - 1] = b;
+                continue;
+            }
         }
-        return (
-            `<circle cx="${r2(x)}" cy="${r2(y)}" r="${r2(s * 0.12)}" fill="${INK.face}" stroke="${ink}" stroke-width="${sw}"/>` +
-            arms
-        );
+        kept.push(b);
     }
-    if (kind === "rotate") {
-        // rotator: the game's circular arrow
-        const r = s * 0.33;
-        const a0 = -Math.PI * 0.72;
-        const a1 = Math.PI * 0.62;
-        const pts = [];
-        for (let i = 0; i <= 12; i++) {
-            const a = a0 + ((a1 - a0) * i) / 12;
-            pts.push(`${r2(x + Math.cos(a) * r)} ${r2(y + Math.sin(a) * r)}`);
-        }
-        const tipX = x + Math.cos(a1) * r;
-        const tipY = y + Math.sin(a1) * r;
-        return (
-            `<path d="M ${pts.join(" L ")}" fill="none" stroke="${ink}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>` +
-            arrowHead(tipX + Math.cos(a1) * s * 0.04, tipY + Math.sin(a1) * s * 0.04, s * 0.26, (a1 * 180) / Math.PI + 90)
-        );
-    }
-    if (kind === "stack") {
-        // stacker: three plates lifting, with the game's lift arrow
-        const pw = s * 0.6;
-        const ph = Math.max(1.2, s * 0.15);
-        let plates = "";
-        for (let i = 0; i < 3; i++) {
-            plates += `<rect x="${r2(x - s * 0.42 - pw / 2 + s * 0.02)}" y="${r2(
-                y + (i - 1) * (ph + s * 0.09) - ph / 2
-            )}" width="${r2(pw)}" height="${r2(ph)}" rx="${r2(ph * 0.45)}" fill="${i === 1 ? ink : INK.mid}"/>`;
-        }
-        const ax = x + s * 0.32;
-        return (
-            plates +
-            stroke(`M ${r2(ax)} ${r2(y + s * 0.34)} L ${r2(ax)} ${r2(y - s * 0.24)}`) +
-            arrowHead(ax, y - s * 0.34, s * 0.22, -90)
-        );
-    }
-    if (kind === "paint") {
-        // painter: the game's loaded paint roller, plus the colour it applies
-        const color = (colors && colors.find((c) => c)) || "w";
-        const hex = COLOR_HEX[color] || "#d8dce6";
-        const rw = s * 0.46;
-        const rh = Math.max(1.6, s * 0.2);
-        const rx = x - s * 0.34;
-        const ry = y - s * 0.36;
-        return (
-            `<rect x="${r2(rx)}" y="${r2(ry)}" width="${r2(rw)}" height="${r2(rh)}" rx="${r2(rh * 0.45)}" fill="${hex}" stroke="${ink}" stroke-width="${Math.max(0.7, sw * 0.7)}"/>` +
-            stroke(`M ${r2(rx + rw)} ${r2(ry + rh / 2)} L ${r2(x + s * 0.3)} ${r2(ry + rh / 2)} L ${r2(x + s * 0.3)} ${r2(y + s * 0.06)}`) +
-            droplet(x - s * 0.06, y + s * 0.3, s * 0.42, hex)
-        );
-    }
-    if (kind === "mixer") {
-        // mixer: two colours merging, as in the game
-        return (
-            `<circle cx="${r2(x - s * 0.19)}" cy="${r2(y + s * 0.18)}" r="${r2(s * 0.21)}" fill="${INK.mid}" fill-opacity="0.5" stroke="${ink}" stroke-width="${sw}"/>` +
-            `<circle cx="${r2(x + s * 0.19)}" cy="${r2(y + s * 0.18)}" r="${r2(s * 0.21)}" fill="${INK.mid}" fill-opacity="0.5" stroke="${ink}" stroke-width="${sw}"/>` +
-            stroke(`M ${r2(x)} ${r2(y - s * 0.02)} L ${r2(x)} ${r2(y - s * 0.24)}`) +
-            arrowHead(x, y - s * 0.36, s * 0.22, -90)
-        );
-    }
-    if (kind === "trash") {
-        // trash can: the game's lid + tapered bin
-        const w = s * 0.3;
-        return (
-            `<rect x="${r2(x - w * 1.15)}" y="${r2(y - s * 0.34)}" width="${r2(w * 2.3)}" height="${r2(
-                Math.max(1.4, s * 0.12)
-            )}" rx="${r2(s * 0.04)}" fill="${ink}"/>` +
-            `<path d="M ${r2(x - w * 0.85)} ${r2(y - s * 0.18)} L ${r2(x + w * 0.85)} ${r2(y - s * 0.18)} L ${r2(
-                x + w * 0.55
-            )} ${r2(y + s * 0.34)} L ${r2(x - w * 0.55)} ${r2(y + s * 0.34)} Z" fill="${INK.face}" stroke="${ink}" stroke-width="${sw}" stroke-linejoin="round"/>` +
-            stroke(
-                `M ${r2(x - w * 0.26)} ${r2(y - s * 0.1)} L ${r2(x - w * 0.18)} ${r2(y + s * 0.24)} M ${r2(
-                    x + w * 0.26
-                )} ${r2(y - s * 0.1)} L ${r2(x + w * 0.18)} ${r2(y + s * 0.24)}`
-            )
-        );
-    }
-    // paint4: the roller plus one droplet per rail, dotted ring for an empty rail
-    const slots = colors && colors.length ? colors : [null, null, null, null];
-    const step = Math.min(s * 0.4, (s * 1.1) / Math.max(1, slots.length - 1 || 1));
-    const drops = [];
-    slots.forEach((color, i) => {
-        const cx = x + (i - (slots.length - 1) / 2) * step;
-        drops.push(
-            color
-                ? droplet(cx, y + s * 0.16, s * 0.5, COLOR_HEX[color] || "#d8dce6")
-                : `<circle cx="${r2(cx)}" cy="${r2(y + s * 0.16)}" r="${r2(s * 0.1)}" fill="none" stroke="${ink}" stroke-width="${sw * 0.7}" stroke-dasharray="${r2(s * 0.09)} ${r2(s * 0.07)}"/>`
-        );
-    });
-    return (
-        `<rect x="${r2(x - s * 0.26)}" y="${r2(y - s * 0.4)}" width="${r2(s * 0.52)}" height="${r2(
-            Math.max(1.4, s * 0.16)
-        )}" rx="${r2(Math.max(0.7, s * 0.07))}" fill="${INK.mid}"/>` + drops.join("")
-    );
+    return kept.map(([x, y], i) => `${i ? "L" : "M"} ${r2(x)} ${r2(y)}`).join(" ");
 }
 
 export function schematicSVG(layout, patches, opts = {}) {
@@ -362,13 +256,26 @@ export function schematicSVG(layout, patches, opts = {}) {
         }
     }
 
-    // Belts first (under buildings): one solid run per link, in the grey the
-    // game uses for belts on the map. Direction is read off the machine tabs
-    // (socket = in, arrow = out) instead of arrowheads on every run.
+    // Belts first (under buildings): the exact polyline the router laid, in the
+    // grey the game uses for belts on the map. Direction is read off the
+    // machine tabs (socket = in, arrow = out). A link with no legal route is
+    // dashed red instead of pretending a belt could go there.
     out.push(
         `<g fill="none" stroke="${INK.belt}" stroke-width="${r2(Math.max(1.5, t * 0.14))}" stroke-linecap="round" stroke-linejoin="round">`
     );
     for (const c of layout.connections) {
+        if (!c.routed || !c.path) continue;
+        const pts = c.path.map((p) => [px(p.x + 0.5), py(p.y + 0.5)]);
+        out.push(`<path d="${polylinePath(pts, px(c.x1), py(c.y1), px(c.x2), py(c.y2))}"/>`);
+    }
+    out.push(`</g>`);
+    out.push(
+        `<g fill="none" stroke="#d4544f" stroke-width="${r2(Math.max(1.5, t * 0.14))}" stroke-dasharray="${r2(
+            Math.max(4, t * 0.4)
+        )} ${r2(Math.max(3, t * 0.3))}" stroke-linecap="round">`
+    );
+    for (const c of layout.connections) {
+        if (c.routed) continue;
         const x1 = px(c.x1);
         const y1 = py(c.y1);
         const x2 = px(c.x2);
@@ -377,6 +284,17 @@ export function schematicSVG(layout, patches, opts = {}) {
         out.push(`<path d="M ${r2(x1)} ${r2(y1)} L ${r2(midX)} ${r2(y1)} L ${r2(midX)} ${r2(y2)} L ${r2(x2)} ${r2(y2)}"/>`);
     }
     out.push(`</g>`);
+    // tunnel crossings: a white notch where one belt passes under another
+    for (const c of layout.connections) {
+        for (const cell of c.tunnelCells || []) {
+            const size = Math.max(3, t * 0.32);
+            out.push(
+                `<rect x="${r2(px(cell.x + 0.5) - size / 2)}" y="${r2(py(cell.y + 0.5) - size / 2)}" width="${r2(
+                    size
+                )}" height="${r2(size)}" rx="1" fill="#f8f9ff" stroke="${INK.belt}" stroke-width="1"/>`
+            );
+        }
+    }
 
     // hub: the game's red 4×4 building with its "中心" badge, above the belts
     {
@@ -397,23 +315,17 @@ export function schematicSVG(layout, patches, opts = {}) {
         );
     }
 
-    // Buildings: the flat colour block the game paints in its map view, with
-    // the machine's own pictogram on top, a socket on every input and an arrow
-    // tab on every output.
+    // Buildings: the exact flat block the game paints in its map view
+    // (silhouette colour + the part's own 3×3 cut-out), plus a socket on every
+    // input and an arrow tab on every output. The ports are the sheet's own
+    // annotation; the body itself is the game's.
     for (const b of layout.buildings) {
         const info = BUILDING_INFO[b.kind] || { w: 1, h: 1, zh: b.kind };
         const bx = px(b.x);
         const by = py(b.y);
         const bw = b.w * t;
         const bh = b.h * t;
-        const color = KIND_COLOR[b.kind] || "#dfe3ea";
-        out.push(
-            `<rect x="${r2(bx)}" y="${r2(by)}" width="${r2(bw)}" height="${r2(bh)}" rx="${r2(
-                t * 0.12
-            )}" fill="${color}" stroke="${shade(color, 0.84)}" stroke-width="${r2(Math.max(1, t * 0.05))}"/>`
-        );
-        const glyph = Math.min(bw, bh) * 0.66;
-        out.push(machineGlyph(b.kind, bx + bw / 2, by + bh / 2, glyph, b.colors));
+        out.push(silhouette(b.kind, b.detail, bx, by, bw, bh));
         // ports: in = socket, out = arrow tab pointing away from the body.
         // The trash can takes items on all four sides, so its markers would
         // just be a ring of dots — the belt lines already show where it feeds.
@@ -454,16 +366,14 @@ export function schematicSVG(layout, patches, opts = {}) {
         layout.buildings.some((b) => b.kind === kind)
     );
     for (const kind of kindsInUse) {
-        const sample = kind === "paint4" ? ["r", "g", "b", "y"] : kind === "paint" ? ["r"] : null;
-        // the same block + pictogram the drawing uses, so the legend is a key
-        const color = KIND_COLOR[kind] || "#dfe3ea";
-        legend.push(
-            `<rect x="${lx + 1}" y="${ly - 12}" width="24" height="14" rx="2" fill="${color}" stroke="${shade(
-                color,
-                0.84
-            )}" stroke-width="1"/>`
-        );
-        legend.push(machineGlyph(kind, lx + 13, ly - 5, 11, sample));
+        // the same map-view block the drawing uses, so the legend is a key
+        if (OVERLAY[kind] || kind === "rotate") {
+            legend.push(silhouette(kind, "CW", lx + 2, ly - 14, 13, 13));
+        } else {
+            legend.push(
+                `<rect x="${lx + 1}" y="${ly - 13}" width="24" height="13" fill="${KIND_COLOR[kind] || "#dfe3ea"}"/>`
+            );
+        }
         legend.push(`<text x="${lx + 30}" y="${ly}">${esc(BUILDING_INFO[kind].zh)}</text>`);
         ly += 18;
     }
@@ -477,7 +387,9 @@ export function schematicSVG(layout, patches, opts = {}) {
     ly += 16;
     legend.push(`${arrowHead(lx + 10, ly - 5, 9, 0)}<text x="${lx + 22}" y="${ly}">输出口</text>`);
     ly += 14;
-    legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">隧道：2 格（交叉处，从别的带下穿过）</text>`);
+    legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">白色小方块：隧道（两条带交叉）</text>`);
+    ly += 12;
+    legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">红色虚线：布线失败（端口被堵住）</text>`);
     ly += 12;
     legend.push(`<text x="${lx}" y="${ly}" font-size="10" fill="#8a93a6">平衡器：2×1（两条带并进一个口）</text>`);
     ly += 12;

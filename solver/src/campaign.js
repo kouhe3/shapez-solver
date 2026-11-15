@@ -8,11 +8,12 @@
  * build that gets torn down again.
  */
 
-import { solve } from "./solver.js";
+import { solve, solve as solveWithAllBuildings, ALL_BUILDINGS } from "./solver.js";
 import { buildLayout, createWorld, sizeColorSupply } from "./layout.js";
 import { chainRate, bottleneck, HUB_SIDES, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
-import { availableLevels, DEMO_LEVELS } from "./levels.js";
+import { availableLevels, buildingsForLevel, FULL_LEVELS } from "./levels.js";
 import { patchMinerCapacity } from "./map.js";
+import { colorChains } from "./color.js";
 
 /** the game building a plan op needs (a miner is always available) */
 const OP_BUILDING = {
@@ -23,11 +24,39 @@ const OP_BUILDING = {
     stack: "stacker",
     paint: "painter",
     paint4: "quadPainter",
-    mixer: "mixer",
 };
 
 /** mixed colours need a mixer chain, base colours only a miner */
 const MIXED_COLORS = new Set(["y", "p", "c", "w"]);
+
+/**
+ * The level a factory can first exist on: the last machine it needs (including
+ * the mixers behind every mixed paint colour) has to be unlocked, and the
+ * shape itself has to be asked for. `Infinity` = a machine this version never
+ * unlocks, so the factory can never be built — the demo ends before the
+ * stacker.
+ */
+function levelOfPlan(flat, sources, chains, unlock) {
+    let at = 1;
+    let never = false;
+    const require = (building) => {
+        const level = unlock.get(building);
+        if (level === undefined) never = true;
+        else if (level > at) at = level;
+    };
+    for (const step of flat.steps) {
+        const building = OP_BUILDING[step.op];
+        if (building) require(building);
+    }
+    // a mixed paint colour is a mixer chain the plan ops never mention
+    for (const chain of chains) {
+        for (const op of chain.ops) if (op.kind === "mixer") require("mixer");
+    }
+    for (const source of sources) {
+        if (source.kind === "level" && source.level > at) at = source.level;
+    }
+    return never ? Infinity : at;
+}
 
 /** bounding box of a factory, one tile of margin so frames do not touch buildings */
 function boundsOf(buildings) {
@@ -51,11 +80,31 @@ function boundsOf(buildings) {
  * @param {{x:number,y:number}} args.hub hub tile origin
  * @param {number} [args.maxAttempts] search budget per shape
  * @param {Set<string>|null} [args.buildings] available buildings; null = all
+ * @param {number|null} [args.untilLevel] only plan factories buildable by this
+ *   level, and never let the search use a machine unlocked after it
+ * @param {Array} [args.levels] level table the unlock levels come from
  * @returns {{ok: boolean, entries: Array, layout: object, totals: object}}
+ *   `ok` = every requested shape was planned, buildable and routed
  */
-export function planCampaign({ shapes, patches, hub, maxAttempts = 30000, buildings = null, levels = DEMO_LEVELS }) {
+export function planCampaign({
+    shapes,
+    patches,
+    hub,
+    maxAttempts = 30000,
+    buildings = null,
+    untilLevel = null,
+    levels = FULL_LEVELS,
+}) {
     const world = createWorld({ hub, patches });
     const unlock = availableLevels(levels);
+    const tunnelAt = unlock.get("tunnel") || null;
+    // before L6 belts cannot cross at all, so routing must go around
+    const allowTunnels = untilLevel == null || (tunnelAt !== null && untilLevel >= tunnelAt);
+    // never plan with a machine this version does not hand out — the demo
+    // simply has no stacker — and cap that at the requested level as well
+    const lastLevel = levels.length ? levels[levels.length - 1].level : 0;
+    const cap = buildingsForLevel(levels, untilLevel ?? lastLevel + 1);
+    const allowed = new Set([...(buildings ?? ALL_BUILDINGS)].filter((building) => cap.has(building)));
     const baseCodes = [...new Set(patches.filter((p) => p.item.kind === "shape").map((p) => p.item.code))];
     const entries = [];
     const plans = [];
@@ -68,18 +117,100 @@ export function planCampaign({ shapes, patches, hub, maxAttempts = 30000, buildi
     let beltEstimate = 0;
     let totalBuildings = 0;
     let failed = 0;
+    let deferred = 0;
+    let impossible = 0;
     let unbuildable = 0;
+    const gapList = [];
 
     shapes.forEach((need, i) => {
         const index = i + 1;
-        const res = solve(need.code, { maxAttempts, baseCodes, ...(buildings ? { buildings } : {}) });
+        const search = { maxAttempts, baseCodes, buildings: allowed };
+        let res = solve(need.code, search);
+        if (!res.ok) {
+            // the cap can make a shape unsolvable because its machine is still
+            // locked; a plan that only uses unlocked machines is legal even if
+            // the narrower search missed it, and an uncapped plan that needs a
+            // machine this version lacks says why
+            const free = solveWithAllBuildings(need.code, { maxAttempts, baseCodes });
+            if (free.ok) {
+                const freeAt = levelOfPlan(free.flat, need.sources, colorChains(free.flat.steps), unlock);
+                if (freeAt === Infinity) {
+                    impossible += 1;
+                    entries.push({
+                        index,
+                        code: need.code,
+                        ok: false,
+                        status: "impossible",
+                        availableAt: null,
+                        reason: "本版本没有它需要的机器（试玩版没有堆叠器）",
+                        sources: need.sources,
+                        buildings: 0,
+                        belts: 0,
+                        bounds: null,
+                    });
+                    return;
+                }
+                if (untilLevel != null && freeAt > untilLevel) {
+                    deferred += 1;
+                    entries.push({
+                        index,
+                        code: need.code,
+                        ok: false,
+                        status: "deferred",
+                        availableAt: freeAt,
+                        reason: `需要 L${freeAt}`,
+                        sources: need.sources,
+                        buildings: 0,
+                        belts: 0,
+                        bounds: null,
+                    });
+                    return;
+                }
+                res = free;
+            }
+        }
         if (!res.ok) {
             failed += 1;
             entries.push({
                 index,
                 code: need.code,
                 ok: false,
+                status: "failed",
                 error: res.error,
+                sources: need.sources,
+                buildings: 0,
+                belts: 0,
+                bounds: null,
+            });
+            return;
+        }
+        const chains = colorChains(res.flat.steps);
+        const availableAt = levelOfPlan(res.flat, need.sources, chains, unlock);
+        if (availableAt === Infinity) {
+            impossible += 1;
+            entries.push({
+                index,
+                code: need.code,
+                ok: false,
+                status: "impossible",
+                availableAt: null,
+                reason: "本版本没有它需要的机器（试玩版没有堆叠器）",
+                sources: need.sources,
+                buildings: 0,
+                belts: 0,
+                bounds: null,
+            });
+            return;
+        }
+        if (untilLevel != null && availableAt > untilLevel) {
+            deferred += 1;
+            entries.push({
+                index,
+                code: need.code,
+                ok: false,
+                status: "deferred",
+                availableAt,
+                reason: `需要 L${availableAt}`,
                 sources: need.sources,
                 buildings: 0,
                 belts: 0,
@@ -94,7 +225,9 @@ export function planCampaign({ shapes, patches, hub, maxAttempts = 30000, buildi
             world,
             idPrefix: `p${index}:`,
             tag: need.code,
+            allowTunnels,
         });
+        for (const gap of layout.routingGaps) gapList.push({ ...gap, plan: index });
         for (const b of layout.buildings) b.plan = index;
         // miners sit far away on their deposit, so a factory frame only makes
         // sense around the processing block
@@ -109,21 +242,11 @@ export function planCampaign({ shapes, patches, hub, maxAttempts = 30000, buildi
             }
         }
         const rate = chainRate(layout.steps);
-        // when the player can actually build this factory: the last building it
-        // needs must be unlocked, and the shape itself must be asked for
-        let availableAt = 1;
-        for (const step of layout.steps) {
-            const building = OP_BUILDING[step.op];
-            const at = building ? unlock.get(building) : null;
-            if (at && at > availableAt) availableAt = at;
-        }
-        for (const s of need.sources) {
-            if (s.kind === "level" && s.level > availableAt) availableAt = s.level;
-        }
         entries.push({
             index,
             code: need.code,
             ok: true,
+            status: "ok",
             cost: res.cost,
             buildings: layout.buildings.length,
             belts: layout.beltEstimate,
@@ -225,17 +348,21 @@ export function planCampaign({ shapes, patches, hub, maxAttempts = 30000, buildi
     const hubInbound = allConnections.filter((c) => c.toHub).length;
     const hubMerges = Math.max(0, hubInbound - HUB_SIDES);
     const balancerAt = unlock.get("balancer") || null;
-    const tunnelAt = unlock.get("tunnel") || null;
 
     return {
-        ok: failed === 0,
+        ok: failed === 0 && deferred === 0 && impossible === 0 && gapList.length === 0,
         entries,
         totals: {
-            shapes: shapes.length,
+            requested: shapes.length,
+            shapes: entries.filter((e) => e.status === "ok").length,
             failed,
+            deferred,
+            impossible,
             unbuildable,
+            routingGaps: gapList.length,
             buildings: totalBuildings,
             belts: beltEstimate,
+            untilLevel,
             throughput: {
                 beltRate: BELT_RATE,
                 minerRate: MINER_RATE,
@@ -267,6 +394,7 @@ export function planCampaign({ shapes, patches, hub, maxAttempts = 30000, buildi
             sources: allSources,
             colors: [...colors.values()],
             missing: [...missing],
+            routingGaps: gapList,
             beltEstimate,
             bom: [...bom.entries()].map(([zh, n]) => ({ zh, n })),
             plans,

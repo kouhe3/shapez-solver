@@ -21,6 +21,8 @@ import { schematicSVG } from "./src/schematic.js";
 import { neededShapes, requiredTypes, describeSource, NEED_SETS } from "./src/needs.js";
 import { planCampaign } from "./src/campaign.js";
 import { formatRate, formatDuration, HUB_SIDES } from "./src/rates.js";
+import { colorChains } from "./src/color.js";
+import { planBom, expandPlanTree } from "./src/layout.js";
 import fs from "node:fs";
 
 const args = process.argv.slice(2);
@@ -58,6 +60,20 @@ function printPlan(res) {
             ).padEnd(24)}  => ${step.outKey}`
         );
     }
+    console.log("");
+    const chains = colorChains(flat.steps);
+    if (chains.length) {
+        console.log("色料链（上色器的每个颜色入口一条，混色器不是 plan 步骤，但必须建）:");
+        for (const chain of chains) {
+            const ops = chain.ops.map((op) =>
+                op.kind === "mixer" ? `混色器 ${op.parts.join("+")}=${op.color}` : `采矿机 ${op.color}`
+            );
+            console.log(`  ${chain.stepId} 颜色口${chain.slot}  ${chain.color}  ← ${ops.join(" → ")}`);
+        }
+        console.log("");
+    }
+    const bom = planBom(expandPlanTree(flat));
+    console.log(`材料: ${bom.map((b) => `${b.zh}×${b.n}`).join("、")}`);
     console.log("");
     console.log(`最终产物: ${flat.final.outKey}`);
     console.log(`与目标一致: ${res.verification.ok ? "✓" : "✗"}`);
@@ -97,6 +113,10 @@ function cmdSolve() {
                     error: res.error,
                     stats: res.stats,
                     ms,
+                    colors: {
+                        chains: colorChains(res.flat ? res.flat.steps : []),
+                        bom: res.flat ? planBom(expandPlanTree(res.flat)) : [],
+                    },
                     steps: res.flat
                         ? res.flat.steps.map((s) => ({
                               id: s.id,
@@ -141,9 +161,9 @@ function cmdRender() {
 }
 
 function cmdLevels() {
-    const list = flags.get("demo") ? DEMO_LEVELS : flags.get("game") ? FULL_LEVELS : [...DEMO_LEVELS];
-    for (const lvl of list) {
-        const buildings = buildingsForLevel(DEMO_LEVELS === list ? DEMO_LEVELS : FULL_LEVELS, lvl.level);
+    const levels = flags.get("game") ? FULL_LEVELS : DEMO_LEVELS;
+    for (const lvl of levels) {
+        const buildings = buildingsForLevel(levels, lvl.level);
         console.log(
             `L${String(lvl.level).padStart(2)}  ${lvl.shape.padEnd(48)} x${String(lvl.required).padEnd(6)}  buildings=${[
                 ...buildings,
@@ -215,6 +235,11 @@ function pad(text, width) {
 
 function cmdAll() {
     const set = String(flags.get("set") ?? "demo");
+    const untilLevel = flags.has("until") ? Number(flags.get("until")) : null;
+    if (untilLevel !== null && (!Number.isInteger(untilLevel) || untilLevel < 1)) {
+        console.error("--until 需要正整数关卡号，例如 --until=9");
+        process.exit(2);
+    }
     // `node cli.js all 47742` — the seed is the whole input of the campaign sheet
     const positionalSeed = positional[0] !== undefined && /^\d+$/.test(positional[0]) ? positional[0] : undefined;
     const custom = flags.get("code") ?? (positionalSeed ? undefined : positional[0]);
@@ -240,6 +265,7 @@ function cmdAll() {
         hub: ctx.hub,
         maxAttempts: Number(flags.get("budget") ?? 30000),
         buildings: flags.get("level") ? resolveBuildings() : null,
+        untilLevel,
         levels: NEED_SETS[set] ? NEED_SETS[set].levels : undefined,
     });
 
@@ -250,6 +276,7 @@ function cmdAll() {
                     set: custom ? "custom" : set,
                     seed: ctx.seed,
                     hub: ctx.hub,
+                    untilLevel,
                     radius: scan.radius,
                     missingTypes: scan.missingTypes,
                     totals: res.totals,
@@ -270,8 +297,9 @@ function cmdAll() {
         );
     } else {
         const label = NEED_SETS[set] ? NEED_SETS[set].label : set;
+        const scope = untilLevel === null ? "" : ` · 只画 L≤${untilLevel} 可建的`;
         console.log(`种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · 中心 (${ctx.hub.x},${ctx.hub.y})`);
-        console.log(`全部需求图形（${label}）: ${shapes.length} 种\n`);
+        console.log(`全部需求图形（${label}${scope}）: ${res.totals.shapes} 种可建 / ${shapes.length} 种需求\n`);
         console.log(
             ` ${pad("#", 4)}${pad("图形", 28)}${pad("建筑", 6)}${pad("传送带", 8)}${pad("产能", 9)}${pad(
                 "交付",
@@ -280,6 +308,16 @@ function cmdAll() {
         );
         for (const e of res.entries) {
             const why = e.sources.map(describeSource).join(" / ");
+            if (e.status === "deferred" || e.status === "impossible") {
+                const at = e.status === "deferred" ? `L${e.availableAt}+` : "不可建";
+                console.log(
+                    ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
+                        "-",
+                        8
+                    )}${pad(at, 6)} ${e.reason}${why ? ` · ${why}` : ""}`
+                );
+                continue;
+            }
             if (!e.ok) {
                 console.log(
                     ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
@@ -298,8 +336,10 @@ function cmdAll() {
             );
         }
         console.log(
-            `\n合计: ${res.totals.shapes} 种 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
+            `\n合计: ${res.totals.shapes} 种可建 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
                 (res.totals.failed ? ` · ${res.totals.failed} 种无法求解` : "") +
+                (res.totals.deferred ? ` · ${res.totals.deferred} 种要更高关卡` : "") +
+                (res.totals.impossible ? ` · ${res.totals.impossible} 种本版本没有对应机器` : "") +
                 (res.totals.unbuildable ? ` · ${res.totals.unbuildable} 种缺矿脉` : "")
         );
         const perf = res.totals.throughput;
@@ -330,6 +370,13 @@ function cmdAll() {
         console.log(
             `运输缺口: 同一出口挂多条带要 ${perf.splitters} 个分流节点（最坏一个口 ${perf.worstFanout} 条）；中心 ${perf.hubInbound} 条带入 ${HUB_SIDES} 个面，要 ${perf.hubMerges} 个并带`
         );
+        if (res.totals.routingGaps) {
+            console.log(
+                `⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住，图纸上用红色虚线标出（${res.layout.routingGaps
+                    .map((g) => `${g.fromLabel}→${g.toLabel}`)
+                    .join("、")}）`
+            );
+        }
         if (perf.balancerAt) {
             console.log(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多进 ${HUB_SIDES} 条带`);
         }
@@ -382,6 +429,7 @@ switch (command) {
 
   node cli.js all 47742                  # → plan-47742.svg（DEMO 需求表 26 种）
   node cli.js all 47742 --set=full       # 完整版需求表 34 种
+  node cli.js all 47742 --until=9        # 只画第 9 关时能建的产线
   node cli.js all --save=../savegame.bin # 用存档里的真实种子和中心
 
 其他命令:
@@ -397,7 +445,8 @@ switch (command) {
   --radius=<n>      扫描的 chunk 半径 (默认自动扩展，直到需要的矿脉出现)
   --seed=<n>        地图种子 (all 也可直接写位置参数)
   --save=<file>     shapez 存档 (.bin, IndexedDB 里的原始内容)，取真实种子/中心
-  --level=demo:6    只使用该关卡时已解锁的建筑
+  --until=<n>       all: 只画第 n 关时已解锁的产线（同时限制可用建筑）
+  --level=demo:6    solve: 只使用该关卡时已解锁的建筑
   --json            输出机器可读的 JSON
   --code=A,B,C      all: 只解指定图形
 `);
