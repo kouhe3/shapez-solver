@@ -4,7 +4,7 @@ import { shapeSVG } from "../src/render.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, REWARD_BUILDINGS } from "../src/levels.js";
 import { scanMap, scanForTypes, itemLabel } from "../src/map.js";
-import { decodeSavegame } from "../src/savegame.js";
+import { decodeSavegame, savegameMapInfo } from "../src/savegame.js";
 import { schematicSVG } from "../src/schematic.js";
 import { neededShapes, requiredTypes, describeSource } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
@@ -328,58 +328,37 @@ onInputChanged();
 
 let gameCtx = null;
 
-async function openDb(name) {
-    return await new Promise((res, rej) => {
-        const r = indexedDB.open(name);
-        r.onsuccess = () => res(r.result);
-        r.onerror = () => rej(r.error || new Error("indexeddb error"));
-    });
-}
-
-function getAll(store, method, arg) {
-    return new Promise((res, rej) => {
-        const r = store[method](arg);
-        r.onsuccess = () => res(r.result);
-        r.onerror = () => rej(r.error);
-    });
-}
-
-async function readGameSave() {
-    let db;
+/**
+ * Decode an uploaded savegame file. Accepts shapez's raw client-storage dump
+ * ("\x01" + LZ-String, i.e. savegame-*.bin), a {"save": "..."} JSON wrapper,
+ * or an already-decoded dump JSON.
+ */
+function decodeSaveText(text) {
+    if (text.trimStart().startsWith("{")) {
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch (e) {
+            throw new Error(`JSON 解析失败：${e.message}`);
+        }
+        if (typeof json.save === "string") return decodeSavegame(json.save).payload;
+        if (json.dump || json.map) return json;
+        throw new Error("JSON 里没有 save（原始存档）或 dump（解码后的存档）");
+    }
     try {
-        db = await openDb("app_storage");
+        return decodeSavegame(text).payload;
     } catch (e) {
-        throw new Error("读不到 app_storage：需要和游戏同源打开本页（http://127.0.0.1:8087/solver/web/）");
+        throw new Error(`不是可识别的 shapez 存档（${e.message}）`);
     }
-    if (!db.objectStoreNames.contains("files")) throw new Error("存档库结构不认识（不是 shapez 的 app_storage）");
-    const store = db.transaction("files", "readonly").objectStore("files");
-    const keys = await getAll(store, "getAllKeys");
-    const key = keys
-        .map(String)
-        .filter((k) => k.startsWith("savegame-"))
-        .sort()
-        .pop();
-    if (!key) throw new Error("没有找到存档（先在游戏里 PLAY 存一个档）");
-    const record = await getAll(store, "get", key);
-    const { payload } = decodeSavegame(record.contents);
-    const dump = payload.dump || payload;
-    const seed = dump.map && dump.map.seed;
-    if (typeof seed !== "number") throw new Error("存档里没有地图种子");
-    let hub = { x: -2, y: -2 };
-    for (const e of dump.entities || []) {
-        const sm = e && e.components && e.components.StaticMapEntity;
-        if (sm && sm.code === 26 && sm.origin) hub = sm.origin;
-    }
+}
+
+async function readSaveFile(file) {
+    const payload = decodeSaveText(await file.text());
+    const info = savegameMapInfo(payload);
     // wide enough that every shape type the campaign needs (windmill/star
     // deposits only exist far out) is on the map
-    const patches = scanMap(seed, { chunkRadius: 8 });
-    return {
-        seed,
-        hub,
-        level: dump.hubGoals && dump.hubGoals.level,
-        patches,
-        key,
-    };
+    const patches = scanMap(info.seed, { chunkRadius: 8 });
+    return { seed: info.seed, hub: info.hub, level: info.level, patches, name: file.name };
 }
 
 function renderMapSummary() {
@@ -389,6 +368,12 @@ function renderMapSummary() {
     if (!gameCtx) {
         el.textContent = "";
         return;
+    }
+    if (gameCtx.name) {
+        const chipFile = document.createElement("span");
+        chipFile.className = "chip";
+        chipFile.textContent = gameCtx.name;
+        meta.appendChild(chipFile);
     }
     const chipSeed = document.createElement("span");
     chipSeed.className = "chip";
@@ -420,17 +405,17 @@ function renderMapSummary() {
 }
 
 async function onLoadSave() {
-    const btn = $("load-save-btn");
-    btn.disabled = true;
+    const input = $("save-file");
+    const file = input.files && input.files[0];
+    if (!file) return;
     try {
-        gameCtx = await readGameSave();
+        gameCtx = await readSaveFile(file);
         $("seed-input").value = String(gameCtx.seed);
         renderMapSummary();
     } catch (e) {
-        $("map-summary").textContent = e.message;
         gameCtx = null;
-    } finally {
-        btn.disabled = false;
+        renderMapSummary();
+        $("map-summary").textContent = `${file.name}：${e.message}`;
     }
 }
 
@@ -536,5 +521,5 @@ async function onAll() {
     }
 }
 
-$("load-save-btn").addEventListener("click", onLoadSave);
+$("save-file").addEventListener("change", onLoadSave);
 $("all-btn").addEventListener("click", onAll);

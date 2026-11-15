@@ -135,6 +135,22 @@ export function compressObject(obj) {
  * convenience accessors
  * ------------------------------------------------------------------ */
 
+/**
+ * Seed, hub origin and level out of a decoded payload (or a bare dump).
+ * @param {object} payload decodeSavegame(...).payload
+ */
+export function savegameMapInfo(payload) {
+    const dump = (payload && payload.dump) || payload;
+    const seed = dump && dump.map && dump.map.seed;
+    if (typeof seed !== "number") throw new Error("savegame has no map seed");
+    let hub = { x: -2, y: -2 };
+    for (const e of (dump && dump.entities) || []) {
+        const sm = e && e.components && e.components.StaticMapEntity;
+        if (sm && sm.code === 26 && sm.origin) hub = sm.origin;
+    }
+    return { seed, hub, level: dump && dump.hubGoals && dump.hubGoals.level, dump };
+}
+
 export function findMapSeed(payload) {
     // game_root serializes `map` with a seed; different versions use different spots
     const candidates = [

@@ -6,6 +6,8 @@
 2. `solver/` —— **ALL SHAPE YOU NEED 求解器**：输入一个地图种子，输出整条战役需要的所有图形的一张图纸（建筑坐标 + 物料流 + 材料表），每台机器的产出都会被复算校验
 
 > 依据是游戏设定：**您生产过的所有图形都会被用于解锁升级**。所以正确打法是一次把整条战役要的 shape 全造出来、不拆旧工厂——求解器就按这个前提排一张图。
+>
+> 两部分互不依赖：`demo/` 是原样镜像，求解器独立运行，存档通过网页上的文件上传读取，不需要和游戏同源。
 
 ## 输入 seed，产出图纸
 
@@ -138,7 +140,7 @@ node server.js --port=8099
 ## 3. 读地图 → 出图纸
 
 ```bash
-# 读存档：从 IndexedDB 里拿到的 savegame-*.bin 原始内容（或直接给种子）
+# 读存档：savegame-*.bin 原始内容（或直接给种子）
 node cli.js map --save=../savegame.bin --radius=2
 node cli.js map --seed=47742 --radius=3
 
@@ -189,7 +191,7 @@ node cli.js all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
 坐标相对建筑左上角，y 向下；多出口建筑的出口编号与游戏 `ItemEjector` 的 slot 下标一致
 （图纸按端口从左到右画，不额外标注编号）。`node test/run-tests.js` 会把这张表逐项和官方源码对齐。
 
-网页版：<http://127.0.0.1:8087/solver/web/>（`bash sync-ui.sh` 把 solver 的 UI 同步到 `demo/solver/`，这样它和游戏同源，能直接读到游戏的 IndexedDB 存档）。填地图种子 → 点「生成全体图纸」；「读取游戏存档」只是可选，用来拿真实的中心位置。
+网页版：<http://127.0.0.1:8099/web/index.html>（`node server.js --port=8099`，和 `demo/` 完全独立）。填地图种子 → 点「生成全体图纸」；「读取存档（可选）」用文件上传拿真实的中心位置：支持 Electron 版的 `savegame-*.bin`，或浏览器 IndexedDB `app_storage/files` 里的原始内容（DevTools → Application → IndexedDB 复制出来存成文件即可）。不传存档就按种子画。
 
 > 说明：原版 1.5.7 **没有**可导入的蓝图字符串（游戏里的蓝图只是内存里的复制/粘贴，不写进存档），所以这里给的是"坐标级放置清单 + 接口精确的连线图 + 传送带格数"，传送带按图上的连线铺即可。
 

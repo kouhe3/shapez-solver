@@ -118,6 +118,13 @@ select {
 }
 #seed-input:focus { border-color: #9cc7b0; box-shadow: 0 0 0 4px rgba(79,157,104,.12); }
 
+.save-row { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+#save-file { font-size: 12.5px; max-width: 100%; }
+#save-file::file-selector-button {
+  font: inherit; padding: 7px 12px; margin-right: 10px; border-radius: 9px;
+  border: 1px solid var(--border); background: #fbfcfe; color: var(--text); cursor: pointer;
+}
+
 details { border-top: 1px dashed var(--border); margin-top: 14px; padding-top: 10px; }
 summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .building-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin: 10px 0 2px; font-size: 13px; }

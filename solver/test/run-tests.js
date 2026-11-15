@@ -10,7 +10,7 @@ import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "../src/levels.js";
 import { generateChunk, scanMap, scanForTypes, availableResources } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
-import { compressObject, decompressObject } from "../src/savegame.js";
+import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import { buildLayout, BUILDING_INFO } from "../src/layout.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
@@ -396,6 +396,28 @@ console.log("== savegame codec (lz + key/value interning) ==");
     check("compressObject roundtrip", back, sample);
     const text = JSON.stringify({ keys: ["a"], values: ["b"], data: { "#": 1 } });
     check("lz roundtrip", decompressX64(compressX64(text)), text);
+}
+
+console.log("== savegame map info ==");
+{
+    const payload = {
+        version: 1010,
+        dump: {
+            map: { seed: 12345 },
+            hubGoals: { level: 7 },
+            entities: [
+                { components: { StaticMapEntity: { code: 1, origin: { x: 9, y: 9 } } } },
+                { components: { StaticMapEntity: { code: 26, origin: { x: -4, y: 6 } } } },
+            ],
+        },
+    };
+    const info = savegameMapInfo(payload);
+    check("seed/hub/level from wrapped payload", { seed: info.seed, hub: info.hub, level: info.level }, {
+        seed: 12345,
+        hub: { x: -4, y: 6 },
+        level: 7,
+    });
+    check("bare dump also accepted", savegameMapInfo(payload.dump).seed, 12345);
 }
 
 const quick = process.argv.includes("--quick");

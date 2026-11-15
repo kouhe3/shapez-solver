@@ -89,12 +89,15 @@
       <button id="all-btn" class="primary">生成全体图纸</button>
     </div>
     <div class="field">
-      <button id="load-save-btn">读取游戏存档（可选）</button>
+      <label class="save-row">读取存档（可选）
+        <input id="save-file" type="file" accept=".bin,.json,.txt,application/json"/>
+      </label>
     </div>
     <p class="hint" id="all-status"></p>
     <p class="hint">
-      存档只在想用真实中心位置时读；需要和游戏同源打开本页
-      （<code>http://127.0.0.1:8087/solver/web/</code>）才能读到游戏的 IndexedDB。
+      不传存档就按上面的种子画；传了就用存档里的真实种子、中心位置和关卡。
+      支持游戏的 <code>savegame-*.bin</code>、<code>{"save":"…"}</code> 包装，
+      或解码后的存档 JSON。
     </p>
     <div id="map-summary" class="hint"></div>
     <div id="schematic" class="schematic"></div>

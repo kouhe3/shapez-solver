@@ -58,7 +58,6 @@ Blueprint path: `solve` → `scanMap` / `nearestPatch` (`map.js`) → `buildLayo
 | `solver/test/` | Custom zero-dep harness (`run-tests.js`) and randomized `fuzz.js`. |
 | `solver/web/` | Browser UI: static ESM importing `../src/*.js` directly. |
 | `demo/` | Prebuilt upstream DEMO mirror (41 files). `demo/v/8a79de52/` holds the bundle, atlas, fonts, audio. |
-| `demo/solver/` | **Generated copy** of `solver/{src,web}`; exists so the UI is same-origin with the game's IndexedDB. |
 | `ref` | Gitignored symlink/junction → `vendor/shapez.io/src/js/game`. Read-only reference for upstream semantics; **never imported at runtime** (tests pass without it). |
 | `vendor/shapez.io/` | Gitignored sparse clone of upstream, pinned to `8a79de52`. |
 | `.agents/` | Vendored agent skills + checklists, pinned by `skills-lock.json`. Not project code. |
@@ -69,8 +68,8 @@ Run from `solver/` unless noted.
 
 ```bash
 # Verification (the gate)
-node test/run-tests.js          # 127 checks, seconds
-node test/run-tests.js --quick  # 92 checks, skips both level loops
+node test/run-tests.js          # 136 checks, seconds
+node test/run-tests.js --quick  # 101 checks, skips both level loops
 node cli.js check               # spawns test/run-tests.js; cwd must be solver/
 node test/fuzz.js --n=40 --seed=1234 --budget=30000
 
@@ -98,8 +97,7 @@ Repo root:
 ```bash
 node setup-ref.mjs    # sparse-clone vendor/shapez.io + recreate ref/ (rerun on every machine)
 bash fetch-demo.sh    # re-download demo/ from shapez.io (network)
-bash sync-ui.sh       # copy solver/{src,web} -> demo/solver (TRACKED; see below)
-cd demo && python -m http.server 8087   # demo at /, solver UI at /solver/web/
+cd demo && python -m http.server 8087   # DEMO only; the solver UI runs on solver/server.js
 ```
 
 There are no npm scripts, no `npm install`, and no lint/format step.
@@ -142,7 +140,6 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 | `solver/test/run-tests.js` | Harness plus **all** expectations as inline literals. |
 | `solver/cli.js`, `solver/server.js` | User-facing surfaces; `--k=v` flags only, parsed after the subcommand, unknown flags ignored. |
 | `solver/src/savegame.js` | `"\x01" + LZ-String-base64("crc32-…" + inline JSON)` decoding. |
-| `demo/solver/**` | Generated mirror — never hand-edit; run `bash sync-ui.sh`. |
 | `README.md` | Canonical reference: shape semantics, port table, algorithm families, known limits. |
 
 ## Runtime/Tooling Preferences
@@ -153,7 +150,7 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 - `git` + network needed for `setup-ref.mjs` (sparse clone) and `fetch-demo.sh`.
 - Windows: `ref` is a directory junction, handled by `setup-ref.mjs`; don't create it by hand.
 - Generated / never committed: `vendor/`, `ref`, `*.log`, `tree.json`, `savegame.raw.json`, `savegame.json`, `preview-cu.svg`, `solver/tmp-sg.mjs`.
-- Generated but **tracked** (regenerate + commit when source changes): `demo/**` including `demo/solver/**`, `plan-all.svg`, `savegame.bin`.
+- Generated but **tracked** (regenerate + commit when source changes): `demo/**`, `plan-all.svg`, `savegame.bin`.
 
 ## Testing & QA
 

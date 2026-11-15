@@ -16,7 +16,7 @@ import { shapeASCII } from "./src/render.js";
 import { solve, ALL_BUILDINGS } from "./src/solver.js";
 import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel } from "./src/levels.js";
 import { scanMap, scanForTypes, itemLabel, availableResources } from "./src/map.js";
-import { decodeSavegame } from "./src/savegame.js";
+import { decodeSavegame, savegameMapInfo } from "./src/savegame.js";
 import { schematicSVG } from "./src/schematic.js";
 import { neededShapes, requiredTypes, describeSource, NEED_SETS } from "./src/needs.js";
 import { planCampaign } from "./src/campaign.js";
@@ -163,15 +163,7 @@ function loadMapContext(seedOverride) {
     if (savePath) {
         const raw = fs.readFileSync(String(savePath), "utf8");
         const { payload } = decodeSavegame(raw);
-        const dump = payload.dump || payload;
-        const seed = (dump.map && dump.map.seed) ?? null;
-        if (seed === null) throw new Error("savegame has no map seed");
-        let hub = { x: -2, y: -2 };
-        for (const e of dump.entities || []) {
-            const sm = e.components && e.components.StaticMapEntity;
-            if (sm && sm.code === 26 && sm.origin) hub = sm.origin;
-        }
-        return { seed, hub, dump, savePath };
+        return { ...savegameMapInfo(payload), savePath };
     }
     const seedFlag = seedOverride ?? flags.get("seed");
     if (seedFlag === undefined) {
