@@ -42,7 +42,7 @@ Blueprint path: `solve` → `scanMap` / `nearestPatch` (`map.ts`) → `buildLayo
 
 ### Plan model and search
 
-- Plan node: `{ op, cost, children }`; `cost` = number of buildings, and `base` (a miner) costs **0**.
+- Plan node: `{ op, cost, children }`; `cost` = number of buildings, and `base` (a miner) costs **0**. This is the search scalar, not the optimal-plan criterion (ADR-0001: delivery-rate × occupied-tile Pareto frontier).
 - Ops: `base`, `rotate`, `cutHalf(side)`, `cutQuad(quad)`, `stack(lower, upper)`, `paint(color)`, `paint4(colors[4])`.
 - `Solver` is a stateful per-call instance: per-hash memo `Map`, `path` `Set` cycle guard, attempt counter.
 - Candidate families, in order (inside `planShape`, `solver.ts:432`): base → atoms → paint / paint4 → rotations → prefix stacks → scaffold + cut → quadrant-window splits → full-combination fallback.
@@ -167,7 +167,7 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 - Custom harness, no framework (`bun test` is not used): `check(label, actual, expected)` (deep equality via `JSON.stringify`, `run-tests.ts:86`) and `checkTrue` (`:98`). Sections print as `== … ==` (`beginSection`); footer is `N checks, M failure(s)[, N skipped]` (`:931`); exit `1` on any failure. `--filter=<regex>` keeps only checks whose section name or label matches (a filter that matches nothing exits `1`; empty/bare `--filter` and bad regex exit `2`); `--timings` prints one `(N checks, M fail, X ms)` line per section.
 - Suite size: 209 checks via `bun run test`, 174 via `bun run test:quick` (both level loops skipped).
 - Covered: shape codec and hashing, rotations, cut/stack, the `BUILDING_INFO` port table against upstream slot indices, connection start slots, map determinism (seed `47742`), savegame round-trip, 9 demo levels, 26 full levels.
-- **Gap to know about:** the level suites assert only `ok` + `verification.ok`, never `cost`. Optimality regressions pass silently — add a cost assertion when you change search order or family priority.
+- **Gap to know about:** the level suites assert only `ok` + `verification.ok`, never `cost`. Optimality regressions pass silently — add a cost assertion when you change search order or family priority. The product criterion is the Pareto frontier (ADR-0001), so `cost` is a proxy.
 - Uncovered by tests: `schematic.ts`, `render.ts`, `server.ts`, `web/app.ts`. Verify those by actually starting `bun run serve` and loading `/web/index.html`.
 - **Tunnel legality gate:** `bun run check:tunnels` (`tools/check-tunnels.ts`) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends. It also floors the routed count (demo 44 / full 390; measured 46 / 396). Slow (~10 s), so it is not part of `verify`; run it after touching `routeBelt`, `World` bookkeeping or `schematic.ts`. The campaign build is dominated by `routeBelt`; `Map`/`Set` lookups on packed-number tile keys are ~16× faster than on `"x|y"` strings (`bun run bench:key`, F19/F20 in `docs/facts.md`), so keep `World` keyed by numbers.
 - **Harness self-check:** `bun run check:filter` (`tools/check-test-filter.ts`) runs one anchored `--filter=^section$` per `beginSection` and asserts the partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. Slow (~40 s), so it is not part of `verify`; run it after touching `run-tests.ts`.
@@ -178,7 +178,8 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 ### Domain constraints — do not "fix" these
 
 - Some targets are **genuinely unsolvable** in-game (e.g. `Cu------:--Cu----:----Cu--`). The stacker needs quadrant overlap to lift a layer; the solver correctly reports `ok: false`.
-- `aborted` means the attempt budget ran out; the plan may be suboptimal. It is not a bug to raise the budget.
+- `aborted` means the attempt budget ran out; the plan may be suboptimal. It is not a bug to raise the budget. It is a budget marker, not an optimality proof; see ADR-0001.
+- **Optimal plan = Pareto frontier** (ADR-0001): delivery rate (items/s into the hub) vs occupied tiles; the ceiling is 16 hub entries × 2/s = 32/s. `cost` (building count) is the search scalar, not the criterion.
 - Belts, orientation, throughput and wire logic are **not modelled**; `beltEstimate` is an estimate.
 - shapez 1.5.7 has no importable blueprint string, so this project emits coordinates + port-accurate connections instead. Don't go looking for an import format.
 

@@ -4,8 +4,10 @@
  * Given ANY target shape code it produces a building plan (extractor / cutter /
  * rotater / stacker / painter) whose final output hashes to the target.
  *
- * The planner is a cost-optimal recursive decomposition over the game's real
- * operations:
+ * The planner is a cost-minimising recursive decomposition over the game's
+ * real operations. `cost` is the search scalar, not the optimal-plan criterion;
+ * the optimal plan is the delivery-rate × occupied-tile Pareto frontier
+ * (`docs/adr/0001-optimal-plan-pareto.md`):
  *
  *  1. base          - an uncolored full shape straight from an extractor
  *  2. atom          - one layer assembled from cut pieces (quarters/halves)
