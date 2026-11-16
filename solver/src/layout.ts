@@ -1686,7 +1686,19 @@ export function buildLayout({
             const right = built[op.operands[1]!];
             if (!left || !right) return { color, ok: false };
             const info = BUILDING_INFO.mixer;
-            const pos = placeNear(info, anchor, 0);
+            // the mixer sits between its two operand miners, not beside the
+            // painter it feeds: anchoring it at the consumer made both operand
+            // belts cross the map (30 of the 67 colour gaps were miner→mixer)
+            // and crowded the factory; the midpoint shortens the tree and the
+            // long final run is a single belt per colour port
+            const pos = placeNear(
+                info,
+                {
+                    x: Math.round((left.building.x + right.building.x) / 2),
+                    y: Math.round((left.building.y + right.building.y) / 2),
+                },
+                0
+            );
             if (!pos) {
                 missing.add(`颜色:${op.color}`);
                 return { color, ok: false };
