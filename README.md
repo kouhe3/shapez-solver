@@ -245,7 +245,12 @@ bun run cli all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
 坐标相对建筑左上角，y 向下；多出口建筑的出口编号与游戏 `ItemEjector` 的 slot 下标一致
 （图纸按端口从左到右画，不额外标注编号）。`bun run test` 会把这张表逐项和官方源码对齐。
 
-网页版：<http://127.0.0.1:8099/>（`bun run serve`，默认 8099，和 `demo/` 完全独立；Bun 服务器把 `/web/app.js` 的请求转译成 `solver/web/app.ts`，所以没有构建步骤）。填地图种子 → 点「生成全体图纸」；「读取存档（可选）」用文件上传拿真实的中心位置：支持 Electron 版的 `savegame-*.bin`，或浏览器 IndexedDB `app_storage/files` 里的原始内容（DevTools → Application → IndexedDB 复制出来存成文件即可）。不传存档就按种子画。
+网页版：<http://127.0.0.1:8099/>（`bun run serve`，默认 8099，和 `demo/` 完全独立；Bun 服务器把 `/web/app.js` 的请求转译成 `solver/web/app.ts`，所以没有构建步骤）。界面分两个视图：
+
+- **SHAPE 配方图**：输入 shape code → 生成工序依赖图，按依赖波次从左到右排成一行（不折行，横向拖动/缩放），箭头指向下游；混色器与色料矿机也画在同一张图里，最终产物高亮。
+- **ALL SHAPE YOU NEED 图纸**：填地图种子 → 点「生成全体图纸」；图纸支持滚轮缩放、拖动平移、双击复位，图例钉在左上角。「读取存档（可选）」用文件上传拿真实的中心位置：支持 Electron 版的 `savegame-*.bin`，或浏览器 IndexedDB `app_storage/files` 里的原始内容（DevTools → Application → IndexedDB 复制出来存成文件即可）。不传存档就按种子画。
+
+两个视图都可滚轮缩放、拖动平移。
 
 > 说明：原版 1.5.7 **没有**可导入的蓝图字符串（游戏里的蓝图只是内存里的复制/粘贴，不写进存档），所以这里给的是"坐标级放置清单 + 接口精确的连线图 + 传送带格数"，传送带按图上的连线铺即可。
 

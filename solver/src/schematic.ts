@@ -26,7 +26,7 @@ export interface SchematicOptions {
     campaign?: boolean;
 }
 
-interface MapTheme {
+export interface MapTheme {
     background: string;
     resources: { shape: string } & Partial<Record<ColorChar, string>>;
 }
@@ -47,7 +47,7 @@ const ALL_KINDS: BuildingKind[] = [
 
 // Values taken from the game itself so the sheet matches what the player sees:
 // themes/light.json for the map layer, MetaHubBuilding for the hub.
-const MAP_THEME: MapTheme = {
+export const MAP_THEME: MapTheme = {
     background: "#eceef2",
     resources: {
         shape: "#e0e2e8",
@@ -56,7 +56,7 @@ const MAP_THEME: MapTheme = {
         b: "#b2e0fa",
     },
 };
-const HUB_COLOR = "#eb5555";
+export const HUB_COLOR = "#eb5555";
 
 const ESCAPES: Record<string, string> = {
     "&": "&amp;",
@@ -74,10 +74,14 @@ function esc(text: string): string {
 // building bodies are #dee1ea plates with #64666e ink; the chunk overview —
 // the game's zoomed-out "thumbnail" view — paints belts in
 // `themes/light.json` → `chunkOverview.beltColor` (#777).
-const INK = {
+export const INK = {
     line: "#64666e",
     belt: "#777",
 };
+
+/** the chunk overview paints the sender as a blue block and the receiver green */
+export const TUNNEL_SENDER = "#6d9dff";
+export const TUNNEL_RECEIVER = "#71ff9c";
 
 const r2 = (v: number): number => Math.round(v * 100) / 100;
 
@@ -86,7 +90,7 @@ const r2 = (v: number): number => Math.round(v * 100) / 100;
  * (MetaBuilding.getSilhouetteColor) — the same blocks the player sees when
  * zoomed out, so a colour is the machine's identity on this sheet too.
  */
-const KIND_COLOR: Record<string, string> = {
+export const KIND_COLOR: Record<string, string> = {
     base: "#b37dcd",
     cutHalf: "#7dcda2",
     cutQuad: "#7dcda2",
@@ -316,8 +320,6 @@ export function schematicSVG(
     // `ref/buildings/underground_belt.js:28-30,68-88`. Which tiles are one
     // underground run is the router's decision (`Connection.tunnelSpans`), not
     // the drawing's: a run may only be straight and span at most 5 tiles.
-    const TUNNEL_SENDER = "#6d9dff";
-    const TUNNEL_RECEIVER = "#71ff9c";
     // the two 3×3 matrices as tile-local (0..1) outlines; the flat bar faces
     // the other half of the tunnel
     const SENDER_BLOCK = "M 0 0 H 1 V 0.3333 H 0.6667 V 1 H 0.3333 V 0.3333 H 0 Z";
