@@ -2306,8 +2306,8 @@ export function buildLayout({
     // into; rip the worst offenders, retry the link, and let the ripped ones
     // try again next round. Deterministic and bounded: fixed visiting order,
     // fixed cap — no randomness, so the sheet stays reproducible.
-    const MAX_ROUNDS = 4;
-    const MAX_RIP = 2;
+    const MAX_ROUNDS = 5;
+    const MAX_RIP = 3;
     const rip = (index: number): void => {
         const entry = laid[index];
         if (!entry) return;
