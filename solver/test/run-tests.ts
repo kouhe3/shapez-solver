@@ -993,6 +993,71 @@ beginSection("schematic (game chunk-overview representation)");
         null
     );
     check("legend no longer lists an output port", cutSvg.includes("输出口"), false);
+
+    // a colour input is shown by the colour it carries; a mixer's two inputs
+    // are both colour, so the dot index has to count colour ports, not `ins`
+    const mixLayout: SchematicLayout = {
+        hub: { x: 0, y: 0 },
+        buildings: [
+            {
+                step: "m1",
+                stepId: "m1",
+                kind: "mixer",
+                zh: "混色器",
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+                rot: 0,
+                colors: ["r", "g"],
+            },
+        ],
+        connections: [],
+        beltEstimate: 0,
+    };
+    const mixSvg = schematicSVG(mixLayout, [], { tile: 30 });
+    // the legend plate draws its own r/g swatches; only the drawing above it counts
+    const mixDots = [
+        ...mixSvg
+            .slice(0, mixSvg.indexOf('fill="#f4f6fb"'))
+            .matchAll(/<circle cx="([\d.-]+)" cy="[\d.-]+" r="[\d.]+" fill="(#[0-9a-f]+)"\/>/g),
+    ];
+    check("mixer shows both colour inputs", mixDots.map((m) => m[2]).sort(), ["#78ff66", "#ff666a"]);
+    check(
+        "the two colour dots sit one port apart",
+        mixDots.map((m) => Number(m[1])).sort((a, b) => a - b),
+        [85, 115]
+    );
+
+    const paintLayout: SchematicLayout = {
+        hub: { x: 0, y: 0 },
+        buildings: [
+            {
+                step: "p1",
+                stepId: "p1",
+                kind: "paint",
+                zh: "上色器",
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+                rot: 0,
+                colors: ["b"],
+            },
+        ],
+        connections: [],
+        beltEstimate: 0,
+    };
+    const paintSvg = schematicSVG(paintLayout, [], { tile: 30 });
+    check(
+        "painter keeps its single colour dot",
+        [
+            ...paintSvg
+                .slice(0, paintSvg.indexOf('fill="#f4f6fb"'))
+                .matchAll(/<circle cx="[\d.-]+" cy="[\d.-]+" r="[\d.]+" fill="(#[0-9a-f]+)"\/>/g),
+        ].map((m) => m[1]),
+        ["#66a7ff"]
+    );
 }
 
 if (!quick) {

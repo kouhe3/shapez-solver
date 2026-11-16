@@ -439,15 +439,22 @@ export function schematicSVG(
         const deg = b.rot * 90;
         if (deg) out.push(`<g transform="rotate(${deg} ${r2(cx)} ${r2(cy)})">`);
         out.push(silhouette(b.kind, b.detail, ux, uy, info.w * t, info.h * t));
-        // inputs: one socket per port. Outputs are left unmarked — the belt
-        // band already leaves from the port, and a marker there reads as a
-        // direction arrow lying on the belt. The trash can takes items on all
-        // four sides, so its sockets would just be a ring of dots.
+        // inputs: one socket per port; a colour input shows its colour as a dot,
+        // since the fluid it carries has no shape to draw. Outputs are left
+        // unmarked — the belt band already leaves from the port, and a marker
+        // there reads as a direction arrow lying on the belt. The trash can
+        // takes items on all four sides, so its sockets would be a ring of dots.
         const showPorts = b.kind !== "trash";
-        (showPorts ? info.ins || [] : []).forEach((port, i) => {
+        let colorSlot = 0;
+        for (const port of showPorts ? info.ins || [] : []) {
             const x = ux + port.x * t;
             const y = uy + port.y * t;
-            const color = port.kind === "color" && b.colors ? b.colors[i - 1] : null;
+            // the k-th colour port takes b.colors[k]. `i - 1` assumed a shape
+            // socket first, which holds only for painters: a mixer's inputs are
+            // both colour, so every dot slid one port right and the first input
+            // fell back to a plain socket.
+            const color = port.kind === "color" ? (b.colors ? b.colors[colorSlot] ?? null : null) : null;
+            if (port.kind === "color") colorSlot++;
             const ps = Math.max(2.2, t * 0.22);
             if (color) {
                 out.push(`<circle cx="${r2(x)}" cy="${r2(y)}" r="${r2(ps * 0.6)}" fill="${COLOR_HEX[color] || INK.line}"/>`);
@@ -458,7 +465,7 @@ export function schematicSVG(
                     )}" rx="${r2(ps * 0.22)}" fill="${INK.line}"/>`
                 );
             }
-        });
+        }
         if (deg) out.push(`</g>`);
     }
 
@@ -487,6 +494,10 @@ export function schematicSVG(
     ly += 18;
     legend.push(
         `<rect x="${lx + 1}" y="${ly - 9}" width="7" height="7" rx="1.5" fill="${INK.line}"/><text x="${lx + 22}" y="${ly}">输入口</text>`
+    );
+    ly += 18;
+    legend.push(
+        `<circle cx="${lx + 5}" cy="${ly - 4}" r="3.6" fill="${COLOR_HEX.r}"/><circle cx="${lx + 13}" cy="${ly - 4}" r="3.6" fill="${COLOR_HEX.g}"/><text x="${lx + 22}" y="${ly}">颜色入口（点的颜色 = 色料）</text>`
     );
     ly += 18;
     legend.push(
