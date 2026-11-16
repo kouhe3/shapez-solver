@@ -812,6 +812,48 @@ beginSection("campaign: only the lines buildable by L9");
     );
 }
 
+beginSection("hub: a leg with every entry boxed in merges into a delivery belt");
+{
+    const hub = { x: 40, y: 40 };
+    const patches: Patch[] = [{ x: 10, y: 41, size: 2, item: { kind: "shape", code: "CuCuCuCu" } }];
+    const world = createWorld({ hub, patches });
+    // a delivery leg already runs along the west face and ends on its entry tile
+    const entry = { x: hub.x - 1, y: hub.y + 1 };
+    for (let x = 28; x <= entry.x; x++) {
+        const key = cellKey(x, entry.y);
+        world.belts.set(key, "h");
+        world.occupied.add(key);
+        world.hubBound.set(key, cellKey(entry.x, entry.y));
+    }
+    world.hubApproaches.add(cellKey(entry.x, entry.y));
+    world.hubEntryLoad.set(cellKey(entry.x, entry.y), 1);
+    // every other entry tile is claimed too, so no free face is left
+    for (let i = 0; i < 4; i++) {
+        for (const t of [
+            { x: hub.x + i, y: hub.y - 1 },
+            { x: hub.x + i, y: hub.y + 4 },
+            { x: hub.x - 1, y: hub.y + i },
+            { x: hub.x + 4, y: hub.y + i },
+        ]) {
+            if (t.x === entry.x && t.y === entry.y) continue;
+            world.hubApproaches.add(cellKey(t.x, t.y));
+        }
+    }
+
+    const laid = buildLayout({ plan: P.baseNode("C"), patches, hub, world });
+    const leg = laid.connections.find((c) => c.toHub);
+    check("hub merge: the boxed-in leg still routes", leg?.routed, true);
+    check("hub merge: it joins a belt that is on its way to the hub", leg?.merged, true);
+    check("hub merge: it claims no entry tile of its own", world.hubApproaches.size, 16);
+    const tail = leg?.path?.at(-1);
+    check(
+        "hub merge: the joined belt remembers the entry it feeds",
+        tail ? world.hubBound.get(cellKey(tail.x, tail.y)) : -1,
+        cellKey(entry.x, entry.y)
+    );
+    check("hub merge: two legs now share one entry belt", world.hubEntryLoad.get(cellKey(entry.x, entry.y)), 2);
+}
+
 beginSection("throughput: the game's own rates");
 {
     check("rate: a bare miner makes 0.4/s", chainRate([{ op: "base" }]), 0.4);

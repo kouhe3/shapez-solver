@@ -503,7 +503,10 @@ export function planCampaign({
         worstFanout = Math.max(worstFanout, n);
     }
     const hubInbound = allConnections.filter((c) => c.toHub).length;
-    const hubMerges = Math.max(0, hubInbound - HUB_ENTRIES);
+    // a leg that could not reach an entry merged into a belt already bound for
+    // one; counting the legs that had to be true is honest even when the sheet
+    // needs fewer than `HUB_ENTRIES` entries
+    const hubMerges = allConnections.filter((c) => c.toHub && c.merged).length;
     const balancerAt = unlock.get("balancer") || null;
 
     return {

@@ -128,6 +128,15 @@ export interface World {
     tunnelUnder: Map<number, number>;
     /** outside tiles already claimed by a belt feeding the hub */
     hubApproaches: Set<number>;
+    /**
+     * tile key → the hub entry tile this belt feeds. Every belt of a delivery
+     * leg is tagged (and so is one that merges into such a leg), which is what
+     * lets a later factory find a way into the hub instead of hunting for a
+     * free entry tile.
+     */
+    hubBound: Map<number, number>;
+    /** hub entry tile key → how many delivery legs share that entry belt */
+    hubEntryLoad: Map<number, number>;
 }
 
 /** what `createWorld` needs to know about a map */
@@ -375,6 +384,11 @@ export interface RouteResult {
     headings: number[];
     /** the last tile is a belt this run joins; claiming must leave it alone */
     joinsGoal: boolean;
+    /**
+     * the hub entry this run feeds, tagged by the caller before claiming; every
+     * belt of the run then points to that entry (`World.hubBound`)
+     */
+    entryKey: number | null;
 }
 
 /** items/s each colour has to produce, and how many sources that takes */
@@ -941,7 +955,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         }
         i = end;
     }
-    const run: RouteResult = { cells, crossings, spans, phases, headings, joinsGoal: opts.goalMayJoin === true };
+    const run: RouteResult = { cells, crossings, spans, phases, headings, joinsGoal: opts.goalMayJoin === true, entryKey: null };
     if (!opts.dryRun) claimRoute(world, run);
     return run;
 }
@@ -990,7 +1004,10 @@ export function claimRoute(world: World, run: RouteResult): void {
         if (run.joinsGoal && i === cells.length - 1) continue;
         world.belts.set(key, beltHeadingOf(cells, i));
         world.occupied.add(key);
+        // the whole run leads to the hub: tag it so later factories can merge in
+        if (run.entryKey !== null) world.hubBound.set(key, run.entryKey);
     }
+    if (run.entryKey !== null) world.hubEntryLoad.set(run.entryKey, (world.hubEntryLoad.get(run.entryKey) ?? 0) + 1);
 }
 
 /**
@@ -999,6 +1016,38 @@ export function claimRoute(world: World, run: RouteResult): void {
  * be laid again. `occupied` is a union of machines, corridors and belts, so it
  * is left alone — a ripped cell simply stays reserved for buildings.
  */
+/** is every tile of this run still free? a restore may not overwrite a belt */
+function runFits(world: World, run: RouteResult): boolean {
+    const ends = new Set<number>();
+    for (const span of run.spans) {
+        for (const end of [span.sender, span.receiver]) ends.add(cellKey(end.x, end.y));
+    }
+    for (let i = 0; i < run.cells.length; i++) {
+        if (run.phases[i] !== 0) continue;
+        const cell = run.cells[i]!;
+        const key = cellKey(cell.x, cell.y);
+        if (ends.has(key)) continue;
+        if (run.joinsGoal && i === run.cells.length - 1) {
+            // the belt this run merged into has to be there still
+            if (!world.belts.has(key)) return false;
+            continue;
+        }
+        if (world.belts.has(key) || world.tunnelEnds.has(key)) return false;
+    }
+    for (const span of run.spans) {
+        const d = ROUTE_DIRS.findIndex((dir) => dir[0] === span.dx && dir[1] === span.dy);
+        for (const cell of span.cells) {
+            const key = cellKey(cell.x, cell.y);
+            if (((world.tunnelUnder.get(key) || 0) >>> d) & 1) return false;
+        }
+        for (const end of [span.sender, span.receiver]) {
+            const key = cellKey(end.x, end.y);
+            if (world.tunnelEnds.has(key) || world.belts.has(key)) return false;
+        }
+    }
+    return true;
+}
+
 export function releaseRoute(world: World, run: RouteResult): void {
     const ends = new Set<number>();
     for (const span of run.spans) {
@@ -1030,6 +1079,12 @@ export function releaseRoute(world: World, run: RouteResult): void {
         if (run.joinsGoal && i === cells.length - 1) continue;
         if (world.belts.get(key) !== beltHeadingOf(cells, i)) continue;
         world.belts.delete(key);
+        if (run.entryKey !== null) world.hubBound.delete(key);
+    }
+    if (run.entryKey !== null) {
+        const left = (world.hubEntryLoad.get(run.entryKey) ?? 1) - 1;
+        if (left > 0) world.hubEntryLoad.set(run.entryKey, left);
+        else world.hubEntryLoad.delete(run.entryKey);
     }
 }
 
@@ -1076,6 +1131,16 @@ export function sizeColorSupply(demand: ReadonlyMap<ColorChar, number>): ColorSu
 const HUB_SIZE = 4;
 
 /**
+ * How many factory roots one hub entry belt may carry. The belt moves 2
+ * items/s and the fattest root produces 0.4, so five legs still fit; a sixth
+ * would make the sheet promise a rate the entry cannot deliver.
+ */
+const HUB_ENTRY_LEGS = 5;
+
+/** spots a mixer tries before it settles for the nearest spot that only fits */
+const MIXER_TRIES = 8;
+
+/**
  * The entry tiles a belt can stand on to feed the hub: four per side, 16
  * total. A corner hub tile has one on each of its two outward sides. Two
  * belts cannot share one entry tile, so a campaign with more inbound belts
@@ -1111,6 +1176,11 @@ function hubBorderOf(hub: Tile, tile: Tile): Tile {
  */
 export function cellKey(x: number, y: number): number {
     return (x + 4096) * 8192 + (y + 4096);
+}
+
+/** the tile a packed key stands for: the inverse of `cellKey` */
+function tileOfKey(key: number): Tile {
+    return { x: Math.floor(key / 8192) - 4096, y: (key % 8192) - 4096 };
 }
 
 /** tiles covered by a deposit, ordered from its centre outwards */
@@ -1158,6 +1228,8 @@ export function createWorld({ hub, patches }: WorldInit): World {
         tunnelUnder: new Map<number, number>(),
         /** outside tiles already claimed by a belt feeding the hub */
         hubApproaches: new Set<number>(),
+        hubBound: new Map<number, number>(),
+        hubEntryLoad: new Map<number, number>(),
     };
 }
 
@@ -1473,6 +1545,19 @@ export function buildLayout({
      * `rot` defaults to the part as the game defines it.
      */
     function placeNear(info: BuildingInfo, anchor: Tile, rot: Rot = 0): Tile | null {
+        for (const spot of nearFits(info, anchor, rot)) {
+            reserve(info, spot.x, spot.y, rot);
+            return spot;
+        }
+        return null;
+    }
+
+    /**
+     * Every tile around `anchor` the part fits on, nearest ring first, without
+     * reserving any of them. A caller that has to try several spots reserves one
+     * at a time so `fits` still sees the ones it rejected as free.
+     */
+    function* nearFits(info: BuildingInfo, anchor: Tile, rot: Rot): Generator<Tile> {
         // anchors are often a building centre (half tiles); every part must sit
         // on whole tiles or its ports land between two grid cells
         const ax = Math.floor(anchor.x);
@@ -1482,12 +1567,10 @@ export function buildLayout({
                 for (let dx = -r; dx <= r; dx++) {
                     if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
                     if (!fits(info, ax + dx, ay + dy, rot)) continue;
-                    reserve(info, ax + dx, ay + dy, rot);
-                    return { x: ax + dx, y: ay + dy };
+                    yield { x: ax + dx, y: ay + dy };
                 }
             }
         }
-        return null;
     }
 
     /** one link resolved against the map, before anything is claimed */
@@ -1596,7 +1679,7 @@ export function buildLayout({
                 start,
                 goal: start,
                 hubTile: null,
-                path: { cells: [], crossings: [], spans: [], phases: [], headings: [], joinsGoal: false },
+                path: { cells: [], crossings: [], spans: [], phases: [], headings: [], joinsGoal: false, entryKey: null },
             };
         }
 
@@ -1610,7 +1693,9 @@ export function buildLayout({
             slot: number | null,
             mergeInto: boolean,
             hubTile: Tile | null,
-            goalApproach: Tile | null
+            goalApproach: Tile | null,
+            /** the hub side an entry tile feeds: a run may tunnel up onto it */
+            goalDirOverride: readonly [number, number] | null = null
         ): LinkPlan => {
             const exempt = new Set<number>();
             for (const cell of [start, goal, startApproach, goalApproach, hubTile]) {
@@ -1621,7 +1706,9 @@ export function buildLayout({
             const startDir = startApproach
                 ? ([Math.sign(startApproach.x - start.x), Math.sign(startApproach.y - start.y)] as const)
                 : null;
-            const goalDir = goalApproach ? ([Math.sign(goal.x - goalApproach.x), Math.sign(goal.y - goalApproach.y)] as const) : null;
+            const goalDir =
+                goalDirOverride ??
+                (goalApproach ? ([Math.sign(goal.x - goalApproach.x), Math.sign(goal.y - goalApproach.y)] as const) : null);
             const path = searchRoute(
                 start,
                 goal,
@@ -1659,34 +1746,46 @@ export function buildLayout({
             // over can no longer end a run; merging may join a belt instead.
             // Only the nearest few faces are worth a search each: on a crowded
             // hub every extra face costs a full Dijkstra and rarely helps.
-            const candidates: { tile: Tile; join: boolean }[] = [];
+            const candidates: { tile: Tile; join: boolean; entry: boolean }[] = [];
             for (const t of faces) {
                 const key = cellKey(t.x, t.y);
                 if (!shared.hubApproaches.has(key) && !shared.belts.has(key) && candidates.length < 6) {
-                    candidates.push({ tile: t, join: false });
+                    candidates.push({ tile: t, join: false, entry: true });
                 }
             }
             let merges = 0;
             for (const t of faces) {
                 const key = cellKey(t.x, t.y);
                 if (shared.hubApproaches.has(key) && shared.belts.has(key) && merges++ < 3) {
-                    candidates.push({ tile: t, join: true });
+                    candidates.push({ tile: t, join: true, entry: true });
                 }
             }
-            if (!candidates.length) for (const t of faces) candidates.push({ tile: t, join: false });
+            // every entry can be boxed in by the belts of factories laid before
+            // this one. Two belts may point into one tile, so the leg can still
+            // merge into a belt that already runs to the hub; one entry belt
+            // carries 2 items/s, which bounds how many legs it may feed.
+            for (const tile of hubTrunkCells(x1, y1, 6)) candidates.push({ tile, join: true, entry: false });
+
+            if (!candidates.length) for (const t of faces) candidates.push({ tile: t, join: false, entry: true });
             let first: LinkPlan | null = null;
-            for (const { tile, join } of candidates) {
+            for (const { tile, join, entry } of candidates) {
                 const border = hubBorderOf(hub, tile);
+                // an entry tile is a hub claim; a trunk merge ends on a belt that
+                // already runs into the hub and claims nothing
                 const plan = finish(
                     { x: tile.x, y: tile.y },
-                    border.x + 0.5,
-                    border.y + 0.5,
+                    entry ? border.x + 0.5 : tile.x + 0.5,
+                    entry ? border.y + 0.5 : tile.y + 0.5,
                     "HUB",
                     "中心",
                     null,
                     join,
-                    { x: tile.x, y: tile.y },
-                    null
+                    entry ? { x: tile.x, y: tile.y } : null,
+                    null,
+                    // the entry belt has to point into the hub, so a run may
+                    // surface onto the entry tile from a tunnel underneath the
+                    // belts that box the hub in
+                    entry ? [Math.sign(border.x - tile.x), Math.sign(border.y - tile.y)] : null
                 );
                 if (plan.path) return plan;
                 if (!first) first = plan;
@@ -1710,18 +1809,52 @@ export function buildLayout({
      * machine that feeds it.
      */
     /** the run behind every connection index, for rip-up */
-    const laid: ({ q: QueuedLink; run: RouteResult } | undefined)[] = [];
+    const laid: ({ q: QueuedLink; run: RouteResult; hubTile: Tile | null } | undefined)[] = [];
     /** belt tile key → connection index */
     const beltOwner = new Map<number, number>();
     /** links whose search failed: the rip-up pass retries them */
     const failed: { q: QueuedLink; index: number }[] = [];
     /** the gap behind each connection index; a successful retry clears it */
     const gapOf: (RoutingGap | undefined)[] = [];
+    /** the link behind each connection index, so a leftover can be retried */
+    const queuedOf = new Map<number, QueuedLink>();
+    /** the last run laid for each connection index, so a failed rip can be undone */
+    const lastPlan = new Map<number, LinkPlan>();
+    /** hub entry tile key → the connection that claimed it */
+    const hubClaimOwner = new Map<number, number>();
+
+    /**
+     * Belts that already carry items into the hub, nearest to `(x, y)` first.
+     *
+     * Two belts may point into one tile, so a leg that finds every entry boxed
+     * in by the belts of earlier factories can still merge into one that is on
+     * its way there. An entry belt carries 2 items/s and the fattest factory
+     * root pulls 0.4, so a trunk stops taking legs once its entry reached
+     * `HUB_ENTRY_LEGS` — without that cap every factory could chain onto the
+     * first belt and the sheet would claim a rate the game cannot carry.
+     */
+    function hubTrunkCells(x: number, y: number, limit: number): Tile[] {
+        const out: { tile: Tile; d: number }[] = [];
+        for (const [key, entry] of shared.hubBound) {
+            if ((shared.hubEntryLoad.get(entry) ?? 0) >= HUB_ENTRY_LEGS) continue;
+            // an entry tile is offered by the face loop together with its claim
+            if (shared.hubApproaches.has(key)) continue;
+            const tile = tileOfKey(key);
+            out.push({ tile, d: Math.abs(tile.x - x) + Math.abs(tile.y - y) });
+        }
+        out.sort((a, b) => a.d - b.d || a.tile.y - b.tile.y || a.tile.x - b.tile.x);
+        return out.slice(0, limit).map((e) => e.tile);
+    }
 
     function commitLink(plan: LinkPlan, q: QueuedLink, replace = -1): boolean {
-        if (plan.hubTile) shared.hubApproaches.add(cellKey(plan.hubTile.x, plan.hubTile.y));
+        if (plan.hubTile) {
+            const key = cellKey(plan.hubTile.x, plan.hubTile.y);
+            shared.hubApproaches.add(key);
+            if (!hubClaimOwner.has(key)) hubClaimOwner.set(key, replace >= 0 ? replace : connections.length);
+        }
         const path = plan.path;
         const index = replace >= 0 ? replace : connections.length;
+        queuedOf.set(index, q);
         if (!path) {
             gapOf[index] = {
                 from: plan.draft.from,
@@ -1737,6 +1870,12 @@ export function buildLayout({
             return false;
         }
         gapOf[index] = undefined;
+        // a delivery leg feeds the entry it claimed, or — merged into a trunk —
+        // the entry that trunk already belongs to; the tag has to be on the run
+        // before it is claimed
+        const tail = path.cells[path.cells.length - 1];
+        const joined = path.joinsGoal && tail ? shared.hubBound.get(cellKey(tail.x, tail.y)) : undefined;
+        path.entryKey = plan.hubTile ? cellKey(plan.hubTile.x, plan.hubTile.y) : joined ?? null;
         // the run was searched on this very world a moment ago: write it as tested
         claimRoute(shared, path);
         // every path tile is a belt or a tunnel end; the underground tiles are
@@ -1753,7 +1892,8 @@ export function buildLayout({
             tunnelSpans: path.spans,
             beltTiles,
         };
-        laid[index] = { q, run: path };
+        laid[index] = { q, run: path, hubTile: plan.hubTile };
+        lastPlan.set(index, plan);
         for (const c of path.cells) beltOwner.set(cellKey(c.x, c.y), index);
         for (const span of path.spans) {
             beltOwner.set(cellKey(span.sender.x, span.sender.y), index);
@@ -1853,14 +1993,52 @@ export function buildLayout({
             // belts cross the map (30 of the 67 colour gaps were miner→mixer)
             // and crowded the factory; the midpoint shortens the tree and the
             // long final run is a single belt per colour port
-            const pos = placeNear(
-                info,
-                {
-                    x: Math.round((left.building.x + right.building.x) / 2),
-                    y: Math.round((left.building.y + right.building.y) / 2),
-                },
-                0
-            );
+            const midpoint = {
+                x: Math.round((left.building.x + right.building.x) / 2),
+                y: Math.round((left.building.y + right.building.y) / 2),
+            };
+            // a spot that merely fits can wall both operand belts in — that is
+            // where the last miner→mixer gaps came from — so take the nearest
+            // spot both operands can actually reach, and only fall back to the
+            // plain nearest fit when none of them routes
+            let pos: Tile | null = null;
+            let tried = 0;
+            for (const candidate of nearFits(info, midpoint, 0)) {
+                if (tried++ >= MIXER_TRIES) break;
+                const claim = reserve(info, candidate.x, candidate.y, 0);
+                const probe: Placement = {
+                    step: "",
+                    stepId: "",
+                    kind: "mixer",
+                    zh: info.zh,
+                    x: candidate.x,
+                    y: candidate.y,
+                    w: info.w,
+                    h: info.h,
+                    rot: 0,
+                };
+                const feeds = [
+                    planLink(shapeLink(left.building, left.info, left.outSlot, probe, info, 0, { color: true })),
+                    planLink(shapeLink(right.building, right.info, right.outSlot, probe, info, 1, { color: true })),
+                ];
+                // one tile holds one belt: the two operand runs may not cross
+                const taken = new Set<number>();
+                let clash = false;
+                for (const plan of feeds) {
+                    if (!plan?.path) continue;
+                    for (const cell of plan.path.cells) {
+                        const key = cellKey(cell.x, cell.y);
+                        if (taken.has(key)) clash = true;
+                        taken.add(key);
+                    }
+                }
+                if (!clash && feeds.every((plan) => plan?.path)) {
+                    pos = candidate;
+                    break; // its reservation stays, the mixer goes here
+                }
+                release(claim);
+            }
+            pos ??= placeNear(info, midpoint, 0);
             if (!pos) {
                 missing.add(`颜色:${op.color}`);
                 return { color, ok: false };
@@ -2311,17 +2489,36 @@ export function buildLayout({
     const rip = (index: number): void => {
         const entry = laid[index];
         if (!entry) return;
+        /** every tile this run held, so a merge aimed at one of them can follow */
+        const held = new Set<number>(entry.run.cells.map((c) => cellKey(c.x, c.y)));
         releaseRoute(shared, entry.run);
         for (const c of entry.run.cells) beltOwner.delete(cellKey(c.x, c.y));
         for (const span of entry.run.spans) {
             beltOwner.delete(cellKey(span.sender.x, span.sender.y));
             beltOwner.delete(cellKey(span.receiver.x, span.receiver.y));
         }
+        // a ripped hub leg frees the entry it claimed — otherwise the entry stays
+        // "taken" while nothing feeds it and no later leg may claim it
+        if (entry.hubTile) {
+            const key = cellKey(entry.hubTile.x, entry.hubTile.y);
+            if (hubClaimOwner.get(key) === index) {
+                hubClaimOwner.delete(key);
+                shared.hubApproaches.delete(key);
+            }
+        }
         const underground = entry.run.spans.reduce((n, span) => n + span.cells.length, 0);
         beltEstimate -= entry.run.cells.length - underground;
         laid[index] = undefined;
         connections[index] = { ...connections[index]!, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 };
         failed.push({ q: entry.q, index });
+        // a leg that merged into a belt of this run now points into nothing:
+        // rip it too so the rip-up pass can find it another way in
+        for (let i = 0; i < connections.length; i++) {
+            const merged = connections[i]!;
+            if (i === index || !merged.toHub || !merged.merged || !merged.routed || !merged.path) continue;
+            const tail = merged.path[merged.path.length - 1];
+            if (tail && held.has(cellKey(tail.x, tail.y))) rip(i);
+        }
     };
     let queue = failed.splice(0);
     for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
@@ -2353,6 +2550,40 @@ export function buildLayout({
             else next.push(item);
         }
         queue = [...next, ...failed.splice(0)];
+    }
+    // a rip late in the cascade frees corridors the last retries never saw: try
+    // the leftovers once more against the finished world. This only adds runs,
+    // so it can never turn a laid belt into a gap.
+    for (let sweep = 0; sweep < 4; sweep++) {
+        let fixed = 0;
+        for (let i = 0; i < connections.length; i++) {
+            if (connections[i]!.routed) continue;
+            const q = queuedOf.get(i);
+            if (!q) continue;
+            const plan = planLink(q);
+            if (plan?.path && commitLink(plan, q, i)) fixed += 1;
+        }
+        if (!fixed) break;
+    }
+    // a rip that never found a way back would leave a link silently missing: the
+    // sheet draws a cross for it while the CLI summary counts no gap. Put the
+    // last run back wherever its tiles are still free, and report a gap only
+    // when they are not — a rip may move a belt, never quietly drop one.
+    for (let i = 0; i < connections.length; i++) {
+        if (connections[i]!.routed) continue;
+        const saved = lastPlan.get(i);
+        const q = queuedOf.get(i);
+        if (saved?.path && q && runFits(shared, saved.path) && commitLink(saved, q, i)) continue;
+        if (!gapOf[i] && saved) {
+            gapOf[i] = {
+                from: saved.draft.from,
+                to: saved.draft.to,
+                fromLabel: saved.draft.fromLabel,
+                toLabel: saved.draft.toLabel,
+                start: saved.start,
+                goal: saved.goal,
+            };
+        }
     }
     routingGaps.length = 0;
     for (const gap of gapOf) if (gap) routingGaps.push(gap);
