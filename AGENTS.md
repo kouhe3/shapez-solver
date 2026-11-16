@@ -2,186 +2,225 @@
 
 ## Project Overview
 
-Two artefacts in one repo:
+Two artefacts live in one repo:
 
-1. `demo/` — an offline mirror of the official shapez.io **web DEMO**, build `8a79de52` (`1.5.7`). Prebuilt upstream bundle; not our code.
+1. `demo/` — an offline mirror of the official shapez.io **web DEMO**, build `8a79de52` (`1.5.7`). Prebuilt upstream bundle (28 tracked files, 20 MB); not our code.
 2. `solver/` — the **ALL SHAPE YOU NEED solver**. Input: a map seed (`bun run cli all 47742`). Output: one campaign sheet — tile-accurate building placements, port-to-port material flow and a BOM for every shape the campaign needs, all factories on one shared map delivering into the same hub.
 
-The underlying solver still targets *arbitrary* shapes (single shapes remain available through `bun run cli solve`); the 26 full-game levels and 9 demo levels are only the regression corpus. Everything runs on **Bun ≥ 1.4.4** with **strict TypeScript**, **zero runtime dependencies** and **no build step**: `@types/bun` is the single devDependency, `bun check` is the type gate, and Bun executes the `.ts` sources directly (no bundler, no transpile step on disk).
+The solver still targets *arbitrary* shapes (`bun run cli solve <code>`); the 26 full-game levels and 9 demo levels are only the regression corpus. Everything runs on **Bun ≥ 1.4.4** with **strict TypeScript**, **zero runtime dependencies** and **no build step**: `@types/bun` is the single devDependency, `bun check` is the type gate, and Bun executes the `.ts` sources directly.
 
 ## Architecture & Data Flow
 
-Two loosely coupled halves live under `solver/src/`:
+Two loosely coupled halves under `solver/src/`:
 
 - **Shape algebra + planning (pure, no I/O):** `shape.ts` → `plan.ts` → `solver.ts`.
 - **World/layout (reads savegames, writes SVG):** `savegame.ts`, `lz_factory.js` (vendored JS), `map.ts`, `layout.ts`, `schematic.ts`, `render.ts`.
 
 ### Solve pipeline
 
-```
+```text
 shape code string
-  → P.parseTarget → S.parse              plan.ts:338, shape.ts:150
-  → new Solver({buildings}).planShape    solver.ts:432
-  → plan AST {op, cost, children}        plan.ts:81
-  → P.verifyPlan → flatten → evalNode    plan.ts:322, :227, :137
-  → S.equals / S.computeHash             shape.ts:229, :209
+  → P.parseTarget                   plan.ts:338
+  → S.parse                         shape.ts:150
+  → new Solver(opts)                solver.ts:743
+  → solver.planShape(target)        solver.ts:581
+  → PlanNode DAG
+  → P.verifyPlan (re-simulates)     plan.ts:322 → flatten :227 → evalNode :137
   → { ok, target, plan, flat, cost, verification, stats }
 ```
 
-`verifyPlan` is the oracle: the emitted plan is **re-simulated** through the real stack/cut/paint semantics and compared to the target. Nothing is trusted because the search said so.
+`planShape` is a memoised recursion keyed by the canonical shape hash (`S.hash` = the code string). Candidate families, in code order (`solver.ts:609-725`): base → atoms → whole-shape paint → paint4 → rotations → prefix stacks (`k` layers) → scaffold + `cutHalf` → general splits (`windowSplits`, then `splitCandidates`; gated on `stacker && layers >= 2 && !best`). Every stack candidate is validated with real `S.stack` + `S.equals`; atoms / paint / rotate / scaffold are trusted by construction. Budgets: `maxAttempts = 30000`, `splitCap = 4000` (`solver.ts:199-200`).
 
-Blueprint path: `solve` → `scanMap` / `nearestPatch` (`map.ts`) → `buildLayout` (`layout.ts:571`) → `schematicSVG` (`schematic.ts:132`) → SVG file.
+`verifyPlan` is the oracle: the emitted plan is **re-simulated** through the real stack / cut / paint semantics and hash-compared to the target. Nothing is trusted because the search said so.
+
+### Reuse: absent by design (read this before "optimising" it)
+
+- `solve()` builds a **fresh `Solver` per call** (`solver.ts:743`); `memo` / `path` / `cycleHits` are instance state. `planCampaign` calls `solve()` once per needed shape (`campaign.ts:272-275`): the same intermediate shape is solved and built once per factory (F28).
+- Inside one target the memo returns the **same `PlanNode`** to several parents (the AST is a DAG), and `flatten` preserves that sharing. But `buildLayout` starts with `expandPlanTree(P.flatten(plan))` (`layout.ts:1244`), which **copies every shared sub-plan**: one output slot feeds exactly one belt, splitters unlock only at L4, and parts are free (`layout.ts:1144-1152`). Reuse exists only during the search, never in the layout (F29).
+- Colour production is **one chain per consumer port** (`buildColorChain`, `layout.ts:1647-1655`): two painter ports of the same colour grow two chains. `planCampaign`'s `sizeColorSupply` only sizes demand (`campaign.ts:441`). Factories share the map, the hub, deposits and belt lanes — never machines (F30).
+- Making reuse real means changing all three layers at once: cross-target memo + multi-consumer intermediates, a DAG-aware layout (splitter or shared sub-factory instead of `expandPlanTree`), and inter-factory belts. `docs/plans/routing-gaps.md` is the open plan in this area.
 
 ### Shape representation
 
 - `shape = { layers, __hash? }`; `layer` = 4-element array of `cell | null`; `cell = { t, c }`.
 - Quadrant order **q0=top-right, q1=bottom-right, q2=bottom-left, q3=top-left**; layer 0 is bottom, max 4 layers.
-- Code format: 8 chars per layer, `--` = empty. Types `C R S W`; colors `r g b y p c w u` (`u` = uncolored).
-- Quadrant subsets are 4-bit int masks.
-- Ops are **copy-on-write** and return new shapes, except the memoised `shape.__hash` mutation.
+- Code format: 8 chars per layer, `--` = empty, layers joined by `:`. Types `C R S W`; colours `r g b y p c w u` (`u` = uncolored).
+- `hash()` returns the canonical code and caches it in `__hash`; `equals` compares hashes. Transforms return hash-less shapes; `cloneShape` deliberately drops the cache.
 
 ### Plan model and search
 
-- Plan node: `{ op, cost, children }`; `cost` = number of buildings, and `base` (a miner) costs **0**. This is the search scalar, not the optimal-plan criterion (ADR-0001: delivery-rate × occupied-tile Pareto frontier).
-- Ops: `base`, `rotate`, `cutHalf(side)`, `cutQuad(quad)`, `stack(lower, upper)`, `paint(color)`, `paint4(colors[4])`.
-- `Solver` is a stateful per-call instance: per-hash memo `Map`, `path` `Set` cycle guard, attempt counter.
-- Candidate families, in order (inside `planShape`, `solver.ts:432`): base → atoms → paint / paint4 → rotations → prefix stacks → scaffold + cut → quadrant-window splits → full-combination fallback.
-- **Every** split is validated with real `S.stack` + `S.equals` before recursing — no algebraic shortcuts.
-- Failures are memoised only when no cycle was hit and the run was not aborted. Defaults: `maxAttempts 30000`, `splitCap 4000` (`solver.ts:102-103`).
-- Building availability is gated by a `Set` (`--level=` / `buildings=` / UI checkboxes) via `has` / `hasRotation`.
+- Nodes (`plan.ts:31-88`): variants of `{ op, cost, … }`. Ops: `base rotate cutHalf cutQuad stack paint paint4`.
+- `cost` = number of non-miner buildings (`base` costs 0). It is the search scalar, **not** the optimal-plan criterion (ADR-0001).
+- `Solver` is stateful per call: `memo`, `path` (cycle guard), `cycleHits`, `stats`, `attempts`.
+- Failures are memoised only when no cycle was hit and the run was not aborted (`solver.ts:730-731`).
+- Building availability is gated by a `Set` (`--level=`, `buildings=` / UI checkboxes) via `has` / `hasRotation`.
+- `SolveSuccess.ok` may be `false` (verification failed) while still carrying a plan; `planCampaign` records that as `failed` with `error: undefined`.
+
+### World, layout and campaign
+
+- `BUILDING_INFO` (`layout.ts:413`) is the single source of tile geometry: ports in tile units, y down, multi-output index = `ItemEjector` slot index. Tests align it against upstream.
+- `routeBelt` (`layout.ts:623`) is a Dijkstra over `(tile, phase, heading)`; phases 0 = surface, 1–4 = underground, 5 = surfaced. `MAX_UNDERGROUND = 4` = tiles strictly between ends (the game's 5-tile tier-0 span). `TunnelSpan`s are derived after the search; `claimRoute` commits exactly the tested run.
+- Tile keys are packed numbers `(x+4096)*8192+(y+4096)` (`cellKey`, `layout.ts:984`), ~16× faster than `"x|y"` strings for `World` lookups.
+- The hub is 4×4 with 16 outside entry tiles (`HUB_ENTRIES = 16` in `rates.ts:41`); see *Hub and sustained demand* below.
+- `planCampaign` (`campaign.ts:235`): per need → `solve` → `buildLayout` in its own block (`allocateBlock`, `layout.ts:1113`) → collect placements / connections / colour chains / BOM → throughput and gap accounting. One shared `World` for all factories.
+- `--until=N` is a **snapshot**, not an incremental build plan: factories above the cap are deferred and not laid out, nothing is reserved for them, and block positions come from greedy allocation over the set actually built (F35). Measured on the demo set: cap=1 lays out 2 blocks (coincidentally at their full-sheet positions), cap=5 moves `--CuCu--` from `[-63,-18]` to `[57,0]`.
+- `beltEstimate` counts routed belt cells (tunnel ends count, underground cells do not). Belts, orientation, throughput and wire logic are **not modelled**; the rate numbers are estimates.
+
+### Hub and sustained demand
+
+- The hub's 16 entry slots accept **any** shape (`ItemAcceptor` filter is only `"shape"`), and its processing speed is unbounded (`getProcessorBaseSpeed(hub) = 1e30`). Delivered shapes accumulate forever in `storedShapes`; the current level goal reads `storedShapes[goal]`. Sharing an entry between products is therefore legal — "one product per entry" is a throughput policy, not a game rule (F31).
+- The full game has **992 endgame upgrade tiers per track** (4 tracks; demo: none), each demanding sustained quantities of the preparement / final / rocket shapes (F32). Cumulative endgame demand is ≈ 9.9e9 items per track (Σ 70 000 + 20 000·i), ≈ **4e10 items** over 4 tracks — about 39 years at the 32/s hub ceiling, i.e. endless by design. `needs.ts` includes only the first endgame tier as a needed shape; sustained delivery rate is not modelled.
+- Level 14 (belt reader) is the one `throughputOnly` goal: it checks the **current rate** (8/s), not stored stock, so it is the literal "keep it running" requirement (`ref/modes/levels.js:262-269`; `hub_goals.getCurrentGoalDelivered`).
+- Blueprints (copy-paste) cost **stored** `CbCbCbRb:CwCwCwCw` (`4·n^1.1`, rounded) and the cost is deducted on placement (F33). That shape is also full level 12's goal, so the campaign already builds it.
+- The solver allocates hub faces greedily (up to 6 free faces + 3 join faces per inbound link) and only *counts* `hubMerges`; it builds no merger tree and reserves no entry per product (F34). Measured on the full set: 34 inbound links, 16 unrouted.
 
 ## Key Directories
 
-| Path | Purpose |
-| --- | --- |
-| `solver/src/` | The whole solver core. Pure TypeScript, no I/O, no dependencies. |
-| `solver/test/` | Custom zero-dep harness (`run-tests.ts`) and randomized `fuzz.ts`. |
-| `solver/web/` | Browser UI: `index.html` + `app.ts`, importing `../src/*.ts` directly; `server.ts` serves it transpiled. |
-| `demo/` | Prebuilt upstream DEMO mirror (41 files). `demo/v/8a79de52/` holds the bundle, atlas, fonts, audio. |
-| `ref` | Gitignored symlink/junction → `vendor/shapez.io/src/js/game`. Read-only reference for upstream semantics; **never imported at runtime** (tests pass without it). |
-| `vendor/shapez.io/` | Gitignored sparse clone of upstream, pinned to `8a79de52`. |
-| `.agents/` | Vendored agent skills + checklists, pinned by `skills-lock.json`. Not project code. |
+|Path|Purpose|
+|---|---|
+|`solver/src/`|The whole solver core: shape algebra, planning, layout, map/savegame codecs. Pure TS, no I/O except map/savegame decoding.|
+|`solver/test/`|Custom zero-dep harness (`run-tests.ts`) and randomized `fuzz.ts`.|
+|`solver/web/`|Browser UI: `index.html` + `app.ts`, importing `../src/*.js` directly; `server.ts` serves it transpiled.|
+|`solver/cli.ts`, `solver/server.ts`|User-facing surfaces (`--k=v` flags only, parsed after the subcommand).|
+|`tools/`|Tracked instruments: tunnel legality, harness self-check, tile-key benchmark.|
+|`demo/`|Prebuilt upstream DEMO mirror; must be served from its own docroot (absolute `/v/` URLs).|
+|`docs/`|`facts.md` ledger, `plans/`, `adr/`, `agents/` skill config. Root `README.md` and `GLOSSARY.md` are canonical references.|
+|`ref`|Junction/symlink → `vendor/shapez.io/src/js/game`; read-only upstream reference, never imported at runtime.|
+|`work/`|Gitignored one-off probes, profiles and large SVG artefacts.|
+|`vendor/`|Gitignored sparse clone of upstream, pinned to `8a79de52`.|
 
 ## Development Commands
 
-Run from the repo root; every script below is defined in `package.json`. Inside `solver/`, the bare forms `bun cli.ts …` and `bun test/run-tests.ts …` work as well.
+Run from the repo root; every script below is defined in `package.json`.
 
 ```bash
-# Setup + type gate
-bun install                     # once: the single devDependency (@types/bun)
-bun check                       # Bun's built-in TypeScript checker; no typescript package
-
-# Verification
-bun run test                    # 209 checks, seconds
-bun run test:quick              # 174 checks, skips both level loops
-bun run test --filter=router    # only matching sections/labels; no match exits 1
-bun run verify                  # bun check + the full suite
-bun run check:tunnels           # campaign tunnel legality (demo + full, ~10 s)
-bun run check:filter            # harness self-check: --filter/--timings/section partition (~40 s)
-bun run bench:key               # tile-key microbenchmark: packed numbers vs "x|y" (~3 s)
-bun run fuzz --n=40 --seed=1234 --budget=30000
+# Setup + gates
+bun install                    # once: the single devDependency (@types/bun)
+bun run verify                 # bun check + full suite — primary gate (~2 s)
+bun run test                   # 215 checks, 0 failure, ~1.6 s
+bun run test:quick             # 180 checks, skips both level loops, ~1.2 s
+bun run test --filter=router   # 23 checks, 192 skipped
+bun run check:tunnels          # campaign tunnel legality, ~15-17 s (not in verify)
+bun run check:filter           # harness self-check, ~48 s (not in verify)
+bun run bench:key              # tile-key microbenchmark, ~3 s (ratio ~16-18x)
 
 # Solve / inspect
 bun run cli solve "RuCw--Cw:----Ru--" --json
-bun run cli solve "Cu------" --level=demo:6    # only buildings unlocked by that level
-bun run cli render "RuCw--Cw"                  # canonical code + ASCII layers
+bun run cli solve "Cu------" --level=demo:6
+bun run cli render "RuCw--Cw"
 bun run cli levels --game
-
-# Map / campaign sheet
 bun run cli map --seed=47742 --radius=3
 bun run cli map --save=savegame.bin --radius=2
 
-# Every shape the campaign asks for (levels + upgrade tiers), one shared map/HUB
-# seed is the input; the vein scan widens until every needed shape letter exists
-bun run cli all 47742 --out=plan-all.svg
-bun run cli all 47742 --set=full
+# Campaign sheet: every shape the campaign asks for, one shared map / hub
+bun run cli all 47742 --out=plan-all.svg       # demo set (default)
+bun run cli all 47742 --set=full               # full game set
 
 # UI + API
-bun run serve                # Bun.serve: /web/index.html, GET /api/solve, static under solver/
+bun run serve                  # Bun.serve on 127.0.0.1:8099 (--port to change)
 ```
 
 One-off entry points:
 
 ```bash
-bun setup-ref.ts      # sparse-clone vendor/shapez.io + recreate ref/ (rerun on every machine)
-bash fetch-demo.sh    # re-download demo/ from shapez.io (network)
+bun setup-ref.ts               # sparse-clone vendor/shapez.io at the pinned commit + recreate ref/
+bash fetch-demo.sh             # re-download demo/ from shapez.io (28 files, 20 MB)
 cd demo && python -m http.server 8087   # DEMO only; the solver UI runs on solver/server.ts
 ```
 
-`bun run cli check` is the CLI alias for the harness (it spawns the Bun runtime with `solver/test/run-tests.ts` resolved from `import.meta.dir`, so it works from any cwd); `bun run test` is canonical. There is no lint/format step; `bun check` (script name `typecheck`) is the only static gate.
+Gotchas:
 
-CLI gotcha: `solve` **ignores `--budget`** (`cli.ts:104` passes only `buildings`). Budget is wired in `all` (`--budget`), `fuzz.ts`, and the server's `?budget=` param. To widen the search for a plain solve, call `solve(code, { maxAttempts })` directly.
+- `bun test` does **not** work — the suite is a custom script. Use `bun run test` (or `bun run cli check`).
+- `solve` **ignores `--budget`** (`cli.ts:133` passes only `buildings`). Budget is honoured by `all`, `fuzz.ts` and the server's `?budget=`.
+- `solve --json` prints its payload and exits **0 even when `ok:false`**; parse the JSON, not the exit code.
+- `all` never exits non-zero for failed / impossible / deferred shapes; only a bad `--until` exits 2.
+- `map --json` appends JSON *after* the human text — it is not a pure JSON stream.
 
 ## Code Conventions & Common Patterns
 
-- **Strict TypeScript, executed by Bun.** `tsconfig.json` enables `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `verbatimModuleSyntax`, `module: Preserve`, `moduleResolution: bundler`, `allowImportingTsExtensions` and `noEmit`; `bun check` type-checks `solver/**/*.ts` + `setup-ref.ts` and nothing is emitted. `package.json` sets `"type": "module"` so the sources stay strict ESM.
-- Style: 4 spaces, double quotes, semicolons, K&R braces, trailing commas. This mirrors upstream's Prettier config, but **nothing enforces it** here and lines run longer than upstream's `printWidth`. Exception: `solver/src/lz_factory.js` is extracted third-party LZ-String code (one 4 KB line) — never reformat it.
-- Naming: `camelCase` functions/vars, `PascalCase` classes (`Solver`, `ShapeParseError`), `UPPER_SNAKE` constants and data tables.
+- **Strict TypeScript executed by Bun.** `tsconfig.json` enables `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `verbatimModuleSyntax`, `module: Preserve`, `moduleResolution: bundler`, `allowImportingTsExtensions`, `noEmit`. `bun check` covers `solver/**/*.ts`, `tools/**/*.ts` and `setup-ref.ts`; nothing is emitted.
+- **Style:** 4 spaces, double quotes, semicolons, K&R braces, trailing commas. Nothing enforces it; lines run long. Exception: `solver/src/lz_factory.js` is extracted third-party LZ-String code (one 4 KB line) — never reformat it.
+- **Naming:** `camelCase` functions/vars, `PascalCase` classes (`Solver`, `ShapeParseError`), `UPPER_SNAKE` constants and data tables.
+- **Language split:** code, comments and docstrings are **English**; user-facing CLI/UI strings and labels are **Chinese** (`OP_LABELS`, `zh` fields, glossary vocabulary). `OP_LABELS_EN` holds English op names.
 - **Error contracts (do not unify):**
   - `parse()` throws `ShapeParseError`; `tryParse()` returns `{ ok, error }`.
-  - Invariant violations throw; *search* misses return `null` (a candidate just doesn't apply).
+  - Invariant violations throw; *search* misses return `null`.
   - An unsolvable target is **not** an exception: `solve()` returns `{ ok: false, error, stats }`.
   - CLI prints to stderr and exits `2` on usage errors, `1` on failure.
-- **Deliberate mutation and caching** exists in a few hot spots: `shape.__hash`, WeakMap `evalCache` / `flatten` memo, `decompCache` / `compCache`, and `buildLayout` overwriting its `blockX/blockY` params. Do not "clean these up" without measuring.
-- No `async` inside `solver/src/`. Only `cli.ts cmdCheck` is async (dynamic `import("node:child_process")` + `spawnSync`); `server.ts` serves through `Bun.serve` and transpiles `web/app.ts` per request.
-- Language split: code, comments and docstrings are **English**; user-facing CLI/UI strings and labels are **Chinese** (`OP_LABELS`, `zh` fields). `OP_LABELS_EN` holds the English op names.
+- **Deliberate mutation and caching** (do not "clean these up" without measuring): `shape.__hash`, the `evalNode` WeakMap, `flatten`'s per-call WeakMap, `decompCache` / `compCache`, `Solver.pieceTables`, and `buildLayout`'s `blocked` / `reserve` / `release` bookkeeping.
+- **No `async` inside `solver/src/`.** Only `cli.ts cmdCheck` is async (dynamic import + spawn); `server.ts` serves through `Bun.serve` and transpiles `web/app.ts` per request.
+- **Map RNG order is fidelity-critical** (`map.ts`): reordering RNG calls changes every seed.
 
 ### Adding a machine
 
-Touch all of: a node builder + `evalNode` case + `flatten` case + `OP_LABELS` + `evalKey` in `plan.ts`; `BUILDING_INFO` (and `outputSlot` if multi-output) in `layout.ts`; `ALL_BUILDINGS` / `ROTATION_BUILDING`, a `has()` gate and a candidate family in `solver.ts`. `schematic.ts` needs nothing — it renders from `BUILDING_INFO`.
+Touch all of:
+
+1. `plan.ts`: node interface + union (`31-88`), cost-carrying builder (`102-129`), `evalNode` case (`137-177`), labels (`183-201`), `flatten` detail case (`245-273`), `evalKey` case (`290-308`).
+2. `solver.ts`: `ALL_BUILDINGS` (`30-39`), `ROTATION_BUILDING` if rotater-like (`46-50` / `hasRotation`), the gate checks in `planShape`.
+3. `layout.ts`: `BUILDING_INFO` is an exhaustive `Record<BuildingKind,…>` so TS forces the entry (`413-508`); extend `outputSlot` for multi-output machines (`578-583`).
+4. `rates.ts`: exhaustive `STEP_RATE` (`44-53`) and `KIND_ZH` (`56-65`).
+5. `campaign.ts`: exhaustive `OP_BUILDING` (`27-35`) + `levelOfPlan` (`192-217`); `levels.ts` `REWARD_BUILDINGS` / `availableLevels` for the unlock level.
+6. `schematic.ts`: hand lists `ALL_KINDS` (`34-44`), `KIND_COLOR` (`87-97`, fallback `131`), `OVERLAY` (`105-108`).
 
 ### Adding a decomposition strategy
 
-Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits` / `splitCandidates`), validate with `S.stack` + `S.equals`, then push it into the `families` array at `solver.ts:550` and emit with `P.stackNode`.
+Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), validate every pair with `S.stack` + `S.equals`, wrap with `P.stackNode`, register it in the `families` array (`solver.ts:700-703`; order = priority, first accepted candidate short-circuits). It only runs when `stacker && layers >= 2 && !best`. Respect `stats.aborted`; the memo needs no new key (target hash).
 
 ## Important Files
 
-| File | Why it matters |
-| --- | --- |
-| `solver/src/shape.ts` | The algebra. A change here propagates through solver, plan, layout and every test. |
-| `solver/src/plan.ts` | Plan AST (`:81` `PlanNode`), evaluation, and the verification oracle (`:137` `evalNode`, `:227` `flatten`, `:322` `verifyPlan`). |
-| `solver/src/solver.ts` | Search order and budgets (`:102-103`), `planShape` (`:432`), family list (`:550`). |
-| `solver/src/layout.ts` | `BUILDING_INFO` port table (`:25`) — single source of tile geometry; then packing, BOM, belt routing. `World` containers are keyed by packed-number tiles (`cellKey`, exported for tests and the census). |
-| `solver/src/needs.ts` | Level + upgrade-tier shape requirements, derived from upstream `modes/regular.js`. Feeds `cli.ts all`. |
-| `solver/src/campaign.ts` | Solves every needed shape and packs all factories onto one shared world/hub. |
-| `solver/src/levels.ts` | `DEMO_LEVELS`, `FULL_LEVELS`, `REWARD_BUILDINGS`. The regression corpus; new targets go here and are auto-covered. |
-| `solver/test/run-tests.ts` | Harness plus **all** expectations as inline literals. |
-| `solver/cli.ts`, `solver/server.ts` | User-facing surfaces; `--k=v` flags only, parsed after the subcommand, unknown flags ignored. |
-| `solver/src/savegame.ts` | `"\x01" + LZ-String-base64("crc32-…" + inline JSON)` decoding. |
-| `solver/src/lz_factory.js` + `lz_factory.d.ts` | Vendored upstream LZ-String (one 4 KB line) and its type declaration. Never edited. |
-| `package.json`, `tsconfig.json` | Scripts (`check`/`test`/`verify`/`fuzz`/`cli`/`serve`) and the strict compiler options; `bun.lock` pins `@types/bun`. |
-| `README.md` | Canonical reference: shape semantics, port table, algorithm families, known limits. |
+|File|Why it matters|
+|---|---|
+|`solver/src/shape.ts`|The algebra: parse (`:150`), hash (`:225`), cut (`:291-295`), stack (`:309`), paint (`:374`). A change propagates everywhere.|
+|`solver/src/plan.ts`|Plan AST (`:31-88`), builders (`:102-129`), `evalNode` (`:137`), `flatten` (`:227`), `verifyPlan` (`:322`), `parseTarget` (`:338`), `planToJSON` (`:358`).|
+|`solver/src/solver.ts`|Candidate families and budgets (`:199-200`), `planShape` (`:581`), `solve` (`:740`).|
+|`solver/src/layout.ts`|`BUILDING_INFO` port table (`:413`), `routeBelt` (`:623`), `expandPlanTree` (`:1157`), `buildLayout` (`:1231`), `allocateBlock` (`:1113`), `buildColorChain` (`:1657`).|
+|`solver/src/campaign.ts`|`planCampaign` (`:235`): per-shape solve + layout, throughput, colour gaps, routing gaps.|
+|`solver/src/needs.ts`|Level + upgrade-tier shape requirements (`neededShapes`, `:152`). Feeds `cli all`.|
+|`solver/src/levels.ts`|`DEMO_LEVELS` (`:54`), `FULL_LEVELS` (`:66`), unlock tables. The regression corpus.|
+|`solver/src/map.ts`|Exact port of the game map generator (`scanMap` `:330`, `scanForTypes` `:404`, `nearestPatch` `:434`).|
+|`solver/src/savegame.ts`|Savegame codec (`decodeSavegame` `:76`); writes a literal zero CRC, round-trip is not byte-identical.|
+|`solver/src/schematic.ts`|Campaign SVG (`schematicSVG` `:183`), 3×3 chunk-overview representation.|
+|`solver/test/run-tests.ts`|Harness plus **all** expectations as inline literals.|
+|`tools/check-tunnels.ts`|Independent tunnel-legality census for the campaign (floors: demo ≥44, full ≥390).|
+|`tools/check-test-filter.ts`|Self-check of the harness filter/timings/section partition.|
+|`solver/cli.ts`, `solver/server.ts`|User-facing surfaces and exit codes.|
+|`package.json`, `tsconfig.json`, `bun.lock`|Scripts, strict compiler options, the single pinned devDependency.|
+|`README.md`, `GLOSSARY.md`|Canonical semantics, port table, known limits; glossary vocabulary (中心, 入口格, 可建, 成本, 优解…).|
 
 ## Runtime/Tooling Preferences
 
-- **Bun ≥ 1.4.4.** TypeScript sources run directly: no build step, no bundler, no `typescript` npm package. `bun check` is the type gate.
-- **Zero runtime dependencies is a hard constraint**: only `node:` builtins and relative imports. `@types/bun` (the single devDependency, pinned in `bun.lock`) is types only and adds no runtime code.
-- Python 3 only for `python -m http.server` when serving `demo/`.
-- `git` + network needed for `setup-ref.ts` (sparse clone) and `fetch-demo.sh`.
-- Windows: `ref` is a directory junction, handled by `setup-ref.ts`; don't create it by hand.
-- Generated / never committed: `vendor/`, `ref`, `*.log`, `tree.json`, `savegame.raw.json`, `savegame.json`, `preview-cu.svg`, `solver/tmp-sg.mjs`.
-- Generated but **tracked** (regenerate + commit when source changes): `demo/**`, `plan-all.svg`, `savegame.bin`.
+- **Bun ≥ 1.4.4** (installed 1.4.4+38afee6c8). TypeScript sources run directly: no build step, no bundler, no `typescript` package.
+- **Zero runtime dependencies is a hard constraint**: only `node:` builtins and relative imports. `@types/bun` is types only. `bun.lock` resolves from `registry.npmmirror.com`.
+- `bun check` is Bun's own checker (~50 ms), not tsc. Do not "fix" it by installing `typescript`.
+- Import specifiers: `solver/**` imports `./x.js` (Bun resolves to `.ts`); `tools/**` and `setup-ref.ts` import `.ts` directly. Both styles are intentional.
+- The web UI imports the solver **in the browser** and solves on the main thread (`app.ts:348-351`); it never calls `/api/solve`. The API is a separate headless surface.
+- `solver/server.ts` transpiles `web/app.ts` and every `/src/*.js` request **per request, with no cache**; static root is `solver/`, host hard-wired to `127.0.0.1`, default port 8099 (`--port` is prefix-matched, so `--portx` also "works").
+- `demo/` cannot be served by `bun run serve` (absolute `/v/` URLs), and `fetch-demo.sh` overwrites **tracked** files.
+- `setup-ref.ts` needs `git` + network; a failed pin fetch only warns, so the checkout can silently drift off `8a79de52`.
+- **Generated artifacts:** `demo/**`, `plan-all.svg` and `savegame.bin` are tracked on purpose — regenerate and commit them when their source changes. Everything else under `work/`, `plan-*.svg`, `savegame.json`, `tree.json`, `vendor/`, `ref`, `node_modules/` is ignored.
+- No CI, no coverage tool, no snapshots, no golden-SVG comparison.
 
 ## Testing & QA
 
-- Custom harness, no framework (`bun test` is not used): `check(label, actual, expected)` (deep equality via `JSON.stringify`, `run-tests.ts:86`) and `checkTrue` (`:98`). Sections print as `== … ==` (`beginSection`); footer is `N checks, M failure(s)[, N skipped]` (`:931`); exit `1` on any failure. `--filter=<regex>` keeps only checks whose section name or label matches (a filter that matches nothing exits `1`; empty/bare `--filter` and bad regex exit `2`); `--timings` prints one `(N checks, M fail, X ms)` line per section.
-- Suite size: 209 checks via `bun run test`, 174 via `bun run test:quick` (both level loops skipped).
-- Covered: shape codec and hashing, rotations, cut/stack, the `BUILDING_INFO` port table against upstream slot indices, connection start slots, map determinism (seed `47742`), savegame round-trip, 9 demo levels, 26 full levels.
-- **Gap to know about:** the level suites assert only `ok` + `verification.ok`, never `cost`. Optimality regressions pass silently — add a cost assertion when you change search order or family priority. The product criterion is the Pareto frontier (ADR-0001), so `cost` is a proxy.
-- Uncovered by tests: `schematic.ts`, `render.ts`, `server.ts`, `web/app.ts`. Verify those by actually starting `bun run serve` and loading `/web/index.html`.
-- **Tunnel legality gate:** `bun run check:tunnels` (`tools/check-tunnels.ts`) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends. It also floors the routed count (demo 44 / full 390; measured 46 / 396). Slow (~10 s), so it is not part of `verify`; run it after touching `routeBelt`, `World` bookkeeping or `schematic.ts`. The campaign build is dominated by `routeBelt`; `Map`/`Set` lookups on packed-number tile keys are ~16× faster than on `"x|y"` strings (`bun run bench:key`, F19/F20 in `docs/facts.md`), so keep `World` keyed by numbers.
-- **Harness self-check:** `bun run check:filter` (`tools/check-test-filter.ts`) runs one anchored `--filter=^section$` per `beginSection` and asserts the partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. Slow (~40 s), so it is not part of `verify`; run it after touching `run-tests.ts`.
-- No CI, no coverage tool, no snapshots, no golden SVG comparison. `bun run test` is the entire quality gate; `bun run verify` chains `bun check` in front of it; `bun run check:tunnels` is the campaign-level legality gate.
-- Extend in the obvious place: new algebra case → new `== … ==` block with `check`; new targets → `solver/src/levels.ts`; randomized checking → `fuzz.ts`.
-- CLI exit-code nuance: `solve --json` prints its payload and exits `0` **even when `ok` is false**. Parse the JSON, don't rely on the exit code.
+- **Custom harness, no framework** (`bun test` is not used). `check(label, actual, expected)` is `JSON.stringify` deep-equality — object **key order matters**, `undefined` props vanish. `checkTrue(label, cond, detail)`. Sections print as `== … ==`; the footer is `N checks, M failure(s)[, N skipped]`.
+- **Exit codes:** `0` pass; `1` any failure **or** a filter that matched nothing; `2` for a bare/empty `--filter` or a bad regex (pre-flight).
+- `--filter=<regex>` selects checks whose **section name or label** matches (unanchored, OR). `--timings` prints `(N checks, M fail, X ms)` per section. `--quick` skips both corpus loops (26 sections → 24).
+- **Covered:** shape codec + hashing, rotations, cut/stack, the `BUILDING_INFO` port table vs upstream slots, connection start slots, map determinism (seed 47742), savegame round-trip, tunnel-router legality, needs/unlock logic, campaign placement, throughput rates, level 20, the 9 demo and 26 full levels, and the schematic representation.
+- **Gaps to know:** the level suites assert only `ok` + `verification.ok`, never `cost` — optimality regressions pass silently (the product criterion is the Pareto frontier, ADR-0001, so `cost` is a proxy). `schematic.ts` *is* covered; `web/app.ts`, `server.ts`, `render.ts`, `cli.ts` and `setup-ref.ts` are not. The corpus loops increment failures outside `--filter`, so filtering neither hides nor speeds them up.
+- **`bun run check:tunnels`** (≈15-17 s) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends, bookkeeping. Floors the routed count (demo ≥ 44, full ≥ 390). Measured: demo 48/48 routed, spans 54; full 696/808 routed (112 gaps), spans 1781. Run after touching `routeBelt`, `World` bookkeeping or `schematic.ts`.
+- **`bun run check:filter`** (≈48 s) asserts the harness partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. 26 sections. Run after touching `run-tests.ts`.
+- **`bun run bench:key`** measures string vs packed-number tile keys: ratio ≈ 16-18×. Keep `World` keyed by numbers.
+- **`bun run fuzz --n=40 --seed=1234 --budget=30000`** rebuilds randomly generated producible shapes; the default run is ~25 ms, so raise `--n` / `--budget` before quoting it as evidence.
 
 ### Domain constraints — do not "fix" these
 
-- Some targets are **genuinely unsolvable** in-game (e.g. `Cu------:--Cu----:----Cu--`). The stacker needs quadrant overlap to lift a layer; the solver correctly reports `ok: false`.
-- `aborted` means the attempt budget ran out; the plan may be suboptimal. It is not a bug to raise the budget. It is a budget marker, not an optimality proof; see ADR-0001.
-- **Optimal plan = Pareto frontier** (ADR-0001): delivery rate (items/s into the hub) vs occupied tiles; the ceiling is 16 hub entries × 2/s = 32/s. `cost` (building count) is the search scalar, not the criterion.
-- Belts, orientation, throughput and wire logic are **not modelled**; `beltEstimate` is an estimate.
+- Some targets are **genuinely unsolvable** in-game (e.g. `Cu------:--Cu----:----Cu--`): the stacker needs quadrant overlap to lift a layer. `ok:false` is correct.
+- `aborted` means the attempt budget ran out. It is a budget marker, **not** an optimality proof, and raising the budget is not a bug fix (ADR-0001).
+- **Optimal plan = Pareto frontier** of delivery rate (items/s into the hub) vs occupied tiles; the ceiling is 16 hub entries × 2/s = 32/s. `cost` (building count) is the search scalar, not the criterion. Today no frontier is emitted.
+- Reuse across shapes/factories does not exist and is not an oversight (F28-F30); see the Architecture section before proposing it.
+- Belts, orientation, throughput and wire logic are **not modelled**; `beltEstimate` and the rate figures are estimates.
 - shapez 1.5.7 has no importable blueprint string, so this project emits coordinates + port-accurate connections instead. Don't go looking for an import format.
+- A routing ✕ is recorded honestly and never faked into a route.
 
 ## Agent skills
 
