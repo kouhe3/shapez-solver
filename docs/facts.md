@@ -53,6 +53,8 @@
 
 | F41 | rip-up and reroute 第一版：失败项用 frontier 归因（搜索被哪些格挡住）反查带的主人，拆掉挡路最多的 1–2 条并重布，被拆的下一轮再试；4 轮封顶、固定顺序、无随机。同时修了两个真 bug：① 同格同向隧道被禁止（`tunnelUnder` 的一位只属于一条带，否则回滚会误删他人的位；游戏里同格也只能有一条地下带）；② 重布后按最终世界刷新每条连接的 crossing 列表。完整版 seed 47742：失败 44 → 36（-18%）、带 39291 → 33598（-14.5%）、建筑 796 → 797、耗时 11 → 27 s；demo 仍 48 建筑 0 失败且 `plan-all.svg` 不变；`bun run test` 230 checks 0 failure；`check:tunnels` full 699 routed / 36 gaps / 1358 spans，违规全 0 | L5 | `bun run cli all 47742 --set=full`、`bun run cli all 47742`、`bun run check:tunnels`、`bun run test` | 已证（实测） | 零失败路线的第一步；`releaseRoute` 是后续级联重布的基础 |
 
+| F42 | rip-up 的 blame 补全 + 级联加深：`frontier` 除了记录撞到 `blocked`（机器/引带格），现在也记录「带挡路」的拒绝——下潜方向不合规、隧道位已被占用。中心入口那 14 条失败正是被别的带封住，之前的 rip-up 看不到它们。级联从 4 轮 × 2 条加到 5 轮 × 3 条。完整版 seed 47742：失败 36 → **21**（-42%）、带 33598 → 27799（-17%）、建筑 797 → 798、耗时 27 → 48 s；demo 仍 48 建筑 0 失败且 `plan-all.svg` 不变；`bun run test` 230 checks 0 failure；`check:tunnels` full 696 routed / 21 gaps / 1105 spans，违规全 0 | L5 | `bun run cli all 47742 --set=full`、`bun run check:tunnels`、`bun run test`、`bun work/gap-census.ts` | 已证（实测） | 失败 73 → 21 的累计路线（F36/F39/F40/F41/F42） |
+
 ## 重放
 
 ```bash

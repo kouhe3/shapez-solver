@@ -782,8 +782,14 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                                 continue;
                             }
                             // the tunnel runs under a perpendicular belt, never along one
-                            if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
-                            if (world.tunnelCells.has(nk) || !tunnelFree(nk, d) || !senderOk(d, cell, heading, curKey)) continue;
+                            if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) {
+                                opts.frontier?.add(nk);
+                                continue;
+                            }
+                            if (world.tunnelCells.has(nk) || !tunnelFree(nk, d) || !senderOk(d, cell, heading, curKey)) {
+                                opts.frontier?.add(nk);
+                                continue;
+                            }
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
@@ -794,7 +800,10 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                             if (isGoal) continue;
                             // an existing tunnel end is a building: pass under it only
                             if (!opts.allowCross || endDir === d || !senderOk(d, cell, heading, curKey)) continue;
-                            if (!tunnelFree(nk, d)) continue;
+                            if (!tunnelFree(nk, d)) {
+                                opts.frontier?.add(nk);
+                                continue;
+                            }
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
@@ -835,14 +844,20 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                     if (belt !== undefined) {
                         if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
                         if (world.tunnelCells.has(nk)) continue;
-                        if (!tunnelFree(nk, d)) continue;
+                        if (!tunnelFree(nk, d)) {
+                            opts.frontier?.add(nk);
+                            continue;
+                        }
                         if (nextPhase > MAX_UNDERGROUND) continue;
                         relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
                         continue;
                     }
                     if (endDir !== undefined) {
                         if (!opts.allowCross || endDir === d) continue;
-                        if (!tunnelFree(nk, d)) continue;
+                        if (!tunnelFree(nk, d)) {
+                            opts.frontier?.add(nk);
+                            continue;
+                        }
                         if (nextPhase > MAX_UNDERGROUND) continue;
                         relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
                         continue;
