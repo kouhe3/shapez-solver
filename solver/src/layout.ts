@@ -1100,6 +1100,9 @@ function blockCollisions(world: World, x: number, y: number, width: number, heig
     return hits;
 }
 
+/** empty tiles between two factory windows: the lane a long belt travels in */
+const BLOCK_GAP = 4;
+
 /**
  * Block origin for one factory: the nearest window around the hub that no
  * deposit or existing building sits in, else the emptiest window seen. Windows
@@ -1108,10 +1111,10 @@ function blockCollisions(world: World, x: number, y: number, width: number, heig
  */
 function allocateBlock(world: World, width: number, height: number): BlockRect | null {
     const { hub } = world;
-    // tile the map with one window per factory plus a four-tile gap, so two
-    // neighbouring factories never share a belt corridor
-    const stepX = width + 4;
-    const stepY = height + 4;
+    // tile the map with one window per factory plus a lane between neighbours,
+    // so a long belt can pass between two factories instead of through one
+    const stepX = width + BLOCK_GAP;
+    const stepY = height + BLOCK_GAP;
     const reach = 12;
     const candidates: { dx: number; dy: number; d: number }[] = [];
     for (let dx = -reach; dx <= reach; dx++) {
@@ -1799,8 +1802,12 @@ export function buildLayout({
      */
     const MAX_TRIES = 4;
     let reservedY: number | null = null;
-    /** the root's belt into the hub was planned together with its placement */
-    let rootLaid = false;
+    /**
+     * the root's belt into the hub was already attempted with its placement —
+     * attempted, not necessarily routed: a failed attempt is committed as a
+     * gap, and laying it a second time would report the same gap twice
+     */
+    let rootPlanned = false;
 
     /** every link a step's inputs need, against the placement being tried */
     function inputLinks(step: P.PlanStep, placement: Placement, info: BuildingInfo): QueuedLink[] {
@@ -1896,7 +1903,7 @@ export function buildLayout({
                     chosen = placement;
                     scanning = false;
                     for (const plan of batch) if (plan) commitLink(plan);
-                    if (toHub) rootLaid = true;
+                    if (toHub) rootPlanned = true;
                     break;
                 }
                 if (!scanning) break;
@@ -1910,7 +1917,10 @@ export function buildLayout({
                 placement = fallback;
                 reserve(info, placement.x, placement.y, placement.rot);
                 for (const q of inputLinks(step, placement, info)) layLink(q);
-                if (root) rootLaid = layLink(hubLinkOf(placement));
+                if (root) {
+                    layLink(hubLinkOf(placement));
+                    rootPlanned = true;
+                }
             }
             if (!placement) continue;
             buildings.push(placement);
@@ -1919,9 +1929,9 @@ export function buildLayout({
         }
     }
 
-    // 3b) a bare miner is the whole plan: nothing planned its hub belt next to
-    // a placement, so it is laid here
-    if (!rootLaid) {
+    // 3b) a bare miner is the whole plan: the placement loop never sees the
+    // root step, so its hub belt is laid here
+    if (!rootPlanned) {
         const rootBuilding = buildingByStep.get(flat.final.id);
         if (rootBuilding) layLink(hubLinkOf(rootBuilding));
     }
