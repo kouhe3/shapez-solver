@@ -24,7 +24,7 @@ import { schematicSVG } from "./src/schematic.js";
 import { neededShapes, requiredTypes, describeSource, NEED_SETS } from "./src/needs.js";
 import type { NeedSet, NeedSetName, NeededShape } from "./src/needs.js";
 import { planCampaign } from "./src/campaign.js";
-import { formatRate, formatDuration, HUB_SIDES } from "./src/rates.js";
+import { formatRate, formatDuration, HUB_ENTRIES } from "./src/rates.js";
 import { colorChains } from "./src/color.js";
 import { planBom, expandPlanTree } from "./src/layout.js";
 import fs from "node:fs";
@@ -414,7 +414,7 @@ function cmdAll(): void {
             );
         }
         console.log(
-            `运输缺口: 同一出口挂多条带要 ${perf.splitters} 个分流节点（最坏一个口 ${perf.worstFanout} 条）；中心 ${perf.hubInbound} 条带入 ${HUB_SIDES} 个面，要 ${perf.hubMerges} 个并带`
+            `运输缺口: 同一出口挂多条带要 ${perf.splitters} 个分流节点（最坏一个口 ${perf.worstFanout} 条）；中心 ${perf.hubInbound} 条带入 ${HUB_ENTRIES} 个入口格，要 ${perf.hubMerges} 个并带`
         );
         if (res.totals.routingGaps) {
             console.log(
@@ -424,7 +424,7 @@ function cmdAll(): void {
             );
         }
         if (perf.balancerAt) {
-            console.log(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多进 ${HUB_SIDES} 条带`);
+            console.log(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多进 ${HUB_ENTRIES} 条带`);
         }
         if (perf.tunnelAt) console.log(`隧道 L${perf.tunnelAt} 解锁：在此之前走线不能交叉`);
         for (const t of scan.missingTypes) {

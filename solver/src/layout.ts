@@ -948,9 +948,10 @@ export function sizeColorSupply(demand: ReadonlyMap<ColorChar, number>): ColorSu
 const HUB_SIZE = 4;
 
 /**
- * The tiles a belt can stand on to feed the hub: one per side of every border
- * tile (16 total). Two belts cannot share one — each border tile takes one
- * belt — so a campaign with more factories than that needs a merger.
+ * The entry tiles a belt can stand on to feed the hub: four per side, 16
+ * total. A corner hub tile has one on each of its two outward sides. Two
+ * belts cannot share one entry tile, so a campaign with more inbound belts
+ * than that needs a merger.
  */
 function hubApproaches(hub: Tile): Tile[] {
     const out: Tile[] = [];
@@ -1545,7 +1546,7 @@ export function buildLayout({
                     border.x + 0.5,
                     border.y + 0.5,
                     "HUB",
-                    "枢纽",
+                    "中心",
                     null,
                     join,
                     { x: tile.x, y: tile.y },

@@ -11,7 +11,7 @@
 import { solve, solve as solveWithAllBuildings, ALL_BUILDINGS } from "./solver.js";
 import { buildLayout, createWorld, sizeColorSupply } from "./layout.js";
 import type { BlockRect, Connection, Layout, LayoutColor, LayoutSource, Placement, PlanFrame, RoutingGap, Tile } from "./layout.js";
-import { chainRate, bottleneck, HUB_SIDES, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
+import { chainRate, bottleneck, HUB_ENTRIES, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
 import type { Bottleneck } from "./rates.js";
 import { availableLevels, buildingsForLevel, FULL_LEVELS } from "./levels.js";
 import type { Level } from "./levels.js";
@@ -499,7 +499,7 @@ export function planCampaign({
         worstFanout = Math.max(worstFanout, n);
     }
     const hubInbound = allConnections.filter((c) => c.toHub).length;
-    const hubMerges = Math.max(0, hubInbound - HUB_SIDES);
+    const hubMerges = Math.max(0, hubInbound - HUB_ENTRIES);
     const balancerAt = unlock.get("balancer") || null;
 
     return {

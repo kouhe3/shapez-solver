@@ -34,8 +34,11 @@ export const MINER_RATE: number = 0.4;
 /** items/s a single colour source (miner on a deposit, or one mixer) produces */
 export const SOURCE_RATE: number = 0.4;
 
-/** a 4×4 hub has 12 perimeter tiles, so at most 12 belts can enter it directly */
-export const HUB_SIDES: number = 12;
+/**
+ * a 4×4 hub has 12 perimeter tiles but 16 entry slots: the four corner tiles
+ * each take a belt from both outward sides (`ref/buildings/hub.js:79-82`).
+ */
+export const HUB_ENTRIES: number = 16;
 
 /** items/s each plan op processes; `base` is the miner */
 export const STEP_RATE: Record<PlanOp | "mixer", number> = {

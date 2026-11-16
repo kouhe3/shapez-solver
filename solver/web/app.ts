@@ -601,12 +601,12 @@ function renderCampaign(res: CampaignResult, meta: CampaignMeta): void {
         lines.push(`⚠ 矿脉放不下：${g.color} 需要 ${g.need} 台，图上可达上限 ${g.capacity} 台`);
     }
     lines.push(
-        `运输缺口：分流节点 ${perf.splitters} 个（最坏一个出口 ${perf.worstFanout} 条）、中心并带 ${perf.hubMerges} 个（${perf.hubInbound} 条带进 12 个面）`
+        `运输缺口：分流节点 ${perf.splitters} 个（最坏一个出口 ${perf.worstFanout} 条）、中心并带 ${perf.hubMerges} 个（${perf.hubInbound} 条带进 16 个入口格）`
     );
     if (res.totals.routingGaps) {
         lines.push(`⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住（图纸上用红色 ✕ 标出）`);
     }
-    if (perf.balancerAt) lines.push(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多 12 条带`);
+    if (perf.balancerAt) lines.push(`平衡器 L${perf.balancerAt} 解锁：在此之前不能分叉/汇合，中心最多 16 条带`);
     if (perf.tunnelAt) lines.push(`隧道 L${perf.tunnelAt} 解锁：在此之前走线不能交叉`);
     bomCard.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
 }

@@ -181,3 +181,17 @@ Write a `Solver` method that returns `{ lower, upper }` (pattern: `windowSplits`
 - `aborted` means the attempt budget ran out; the plan may be suboptimal. It is not a bug to raise the budget.
 - Belts, orientation, throughput and wire logic are **not modelled**; `beltEstimate` is an estimate.
 - shapez 1.5.7 has no importable blueprint string, so this project emits coordinates + port-accurate connections instead. Don't go looking for an import format.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown under `.scratch/<feature-slug>/` in this repo. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain.md`.
