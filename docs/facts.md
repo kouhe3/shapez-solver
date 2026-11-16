@@ -51,6 +51,8 @@
 
 | F40 | 厂内机位间距 1 → 2 格（`cx += info.w + 2`）：同一行的两条带要绕到目标机南侧输入，必须穿过机器之间的一列竖向通道；1 格宽时这条通道本身就被两侧端口占满，`四向切割机→堆叠器`（6）、`堆叠器↔堆叠器`（6）大量失败。完整版 seed 47742：失败 58 → 44（-24%）、建筑 787 → 796、带 35422 → 39291（+11%，绕行变长）、耗时 ~10.5 s；demo 仍 48 建筑 0 失败，`plan-all.svg` 已重生成；`bun run test` 224 checks 0 failure；`check:tunnels` demo 48/48、full 741 routed / 44 gaps / 1707 spans | L5 | `bun run cli all 47742 --set=full`、`bun run cli all 47742 --out=plan-all.svg`、`bun run check:tunnels`、`bun work/gap-census.ts` | 已证（实测） | 厂内失败减半；代价是带格 +11% |
 
+| F41 | rip-up and reroute 第一版：失败项用 frontier 归因（搜索被哪些格挡住）反查带的主人，拆掉挡路最多的 1–2 条并重布，被拆的下一轮再试；4 轮封顶、固定顺序、无随机。同时修了两个真 bug：① 同格同向隧道被禁止（`tunnelUnder` 的一位只属于一条带，否则回滚会误删他人的位；游戏里同格也只能有一条地下带）；② 重布后按最终世界刷新每条连接的 crossing 列表。完整版 seed 47742：失败 44 → 36（-18%）、带 39291 → 33598（-14.5%）、建筑 796 → 797、耗时 11 → 27 s；demo 仍 48 建筑 0 失败且 `plan-all.svg` 不变；`bun run test` 230 checks 0 failure；`check:tunnels` full 699 routed / 36 gaps / 1358 spans，违规全 0 | L5 | `bun run cli all 47742 --set=full`、`bun run cli all 47742`、`bun run check:tunnels`、`bun run test` | 已证（实测） | 零失败路线的第一步；`releaseRoute` 是后续级联重布的基础 |
+
 ## 重放
 
 ```bash

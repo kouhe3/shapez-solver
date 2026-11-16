@@ -357,6 +357,8 @@ export interface RouteOptions {
     dryRun?: boolean;
     /** how far outside the two endpoints the router may search */
     margin?: number;
+    /** filled with the blocked tiles that stopped the search (rip-up blame) */
+    frontier?: Set<number> | null;
 }
 
 /** the belt run the router found */
@@ -703,6 +705,13 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
             push(s, 0);
         }
         const stateOf = (cell: number, phase: number, heading: number): number => (cell * PHASES + phase) * 4 + heading;
+        /**
+         * One tile holds one underground belt. Two runs may cross under the
+         * same tile in different directions (`tunnelUnder` is a bitmask), never
+         * along the same one: the game has no second belt there, and rip-up can
+         * only clear the bit it put down.
+         */
+        const tunnelFree = (key: number, d: number): boolean => (((world.tunnelUnder.get(key) || 0) >>> d) & 1) === 0;
         const relax = (next: number, total: number, state: number): void => {
             if (total >= dist[next]!) return;
             dist[next] = total;
@@ -760,7 +769,10 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                         if (indexOf(nx, ny) === prevCell) continue;
                         const isStart = nx === start.x && ny === start.y;
                         const isGoal = nx === goal.x && ny === goal.y;
-                        if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) continue;
+                        if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) {
+                            opts.frontier?.add(nk);
+                            continue;
+                        }
                         const step = 1 + (d === heading ? 0 : 2);
                         const belt = world.belts.get(nk);
                         if (belt !== undefined) {
@@ -771,7 +783,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                             }
                             // the tunnel runs under a perpendicular belt, never along one
                             if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
-                            if (world.tunnelCells.has(nk) || !senderOk(d, cell, heading, curKey)) continue;
+                            if (world.tunnelCells.has(nk) || !tunnelFree(nk, d) || !senderOk(d, cell, heading, curKey)) continue;
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
@@ -782,6 +794,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                             if (isGoal) continue;
                             // an existing tunnel end is a building: pass under it only
                             if (!opts.allowCross || endDir === d || !senderOk(d, cell, heading, curKey)) continue;
+                            if (!tunnelFree(nk, d)) continue;
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
@@ -802,7 +815,10 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                     if (indexOf(nx, ny) === prevCell) continue;
                     const isStart = nx === start.x && ny === start.y;
                     const isGoal = nx === goal.x && ny === goal.y;
-                    if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) continue;
+                    if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) {
+                        opts.frontier?.add(nk);
+                        continue;
+                    }
                     const nextPhase = phase + 1;
                     const belt = world.belts.get(nk);
                     const endDir = world.tunnelEnds.get(nk);
@@ -819,12 +835,14 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                     if (belt !== undefined) {
                         if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
                         if (world.tunnelCells.has(nk)) continue;
+                        if (!tunnelFree(nk, d)) continue;
                         if (nextPhase > MAX_UNDERGROUND) continue;
                         relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
                         continue;
                     }
                     if (endDir !== undefined) {
                         if (!opts.allowCross || endDir === d) continue;
+                        if (!tunnelFree(nk, d)) continue;
                         if (nextPhase > MAX_UNDERGROUND) continue;
                         relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
                         continue;
@@ -834,6 +852,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                         relax(stateOf(indexOf(nx, ny), 5, d), cost + 1, state);
                     }
                     if (nextPhase <= MAX_UNDERGROUND) {
+                        if (!tunnelFree(nk, d)) continue;
                         relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 1, state);
                     }
                     continue;
@@ -850,7 +869,10 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                 if (indexOf(nx, ny) === prevCell) continue;
                 const isStart = nx === start.x && ny === start.y;
                 const isGoal = nx === goal.x && ny === goal.y;
-                if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) continue;
+                if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) {
+                    opts.frontier?.add(nk);
+                    continue;
+                }
                 const belt = world.belts.get(nk);
                 if (belt !== undefined) {
                     if (isGoal && opts.goalMayJoin) relax(stateOf(indexOf(nx, ny), 0, d), cost + 1, state);
@@ -917,6 +939,16 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
  * A plan is committed through here rather than by searching again, so the belt
  * a caller tested against the map is exactly the belt it gets.
  */
+/** the heading a run writes on surface cell `i` */
+function beltHeadingOf(cells: readonly Tile[], i: number): BeltHeading {
+    if (cells.length === 1) return "h";
+    if (i === 0) return cells[1]!.y === cells[0]!.y ? "h" : "v";
+    if (i === cells.length - 1) return cells[i]!.y === cells[i - 1]!.y ? "h" : "v";
+    if (cells[i - 1]!.y === cells[i + 1]!.y) return "h";
+    if (cells[i - 1]!.x === cells[i + 1]!.x) return "v";
+    return "turn";
+}
+
 export function claimRoute(world: World, run: RouteResult): void {
     const ends = new Set<number>();
     for (const span of run.spans) {
@@ -941,15 +973,48 @@ export function claimRoute(world: World, run: RouteResult): void {
         if (ends.has(key)) continue;
         // a merge run joins a belt that already enters the hub; that tile is not ours
         if (run.joinsGoal && i === cells.length - 1) continue;
-        let heading: BeltHeading;
-        if (cells.length === 1) heading = "h";
-        else if (i === 0) heading = cells[1]!.y === cells[0]!.y ? "h" : "v";
-        else if (i === cells.length - 1) heading = cells[i]!.y === cells[i - 1]!.y ? "h" : "v";
-        else if (cells[i - 1]!.y === cells[i + 1]!.y) heading = "h";
-        else if (cells[i - 1]!.x === cells[i + 1]!.x) heading = "v";
-        else heading = "turn";
-        world.belts.set(key, heading);
+        world.belts.set(key, beltHeadingOf(cells, i));
         world.occupied.add(key);
+    }
+}
+
+/**
+ * Undo one `claimRoute`: remove the belt cells, tunnel ends and tunnel-under
+ * directions that run wrote, so the router can find another way and the run can
+ * be laid again. `occupied` is a union of machines, corridors and belts, so it
+ * is left alone — a ripped cell simply stays reserved for buildings.
+ */
+export function releaseRoute(world: World, run: RouteResult): void {
+    const ends = new Set<number>();
+    for (const span of run.spans) {
+        const d = ROUTE_DIRS.findIndex((dir) => dir[0] === span.dx && dir[1] === span.dy);
+        if (d < 0) continue;
+        for (const c of span.cells) {
+            const key = cellKey(c.x, c.y);
+            const mask = (world.tunnelUnder.get(key) || 0) & ~(1 << d);
+            if (mask) {
+                world.tunnelUnder.set(key, mask);
+            } else {
+                world.tunnelUnder.delete(key);
+                // the cell only counts as a crossing while something runs beneath
+                world.tunnelCells.delete(key);
+            }
+        }
+        for (const end of [span.sender, span.receiver]) {
+            const key = cellKey(end.x, end.y);
+            if (world.tunnelEnds.get(key) === d) world.tunnelEnds.delete(key);
+            ends.add(key);
+        }
+    }
+    const { cells, phases } = run;
+    for (let i = 0; i < cells.length; i++) {
+        if (phases[i] !== 0) continue;
+        const key = cellKey(cells[i]!.x, cells[i]!.y);
+        if (ends.has(key)) continue;
+        // a merge run never owned the belt it joined
+        if (run.joinsGoal && i === cells.length - 1) continue;
+        if (world.belts.get(key) !== beltHeadingOf(cells, i)) continue;
+        world.belts.delete(key);
     }
 }
 
@@ -1426,6 +1491,9 @@ export function buildLayout({
      * is only worth its cost for the long hub runs, and two of them per failed
      * candidate is what makes a big campaign crawl.
      */
+    /** when set, every search records the blocked tiles it ran into */
+    let blameFrontier: Set<number> | null = null;
+
     const searchRoute = (
         start: Tile,
         goal: Tile,
@@ -1444,6 +1512,7 @@ export function buildLayout({
             exempt,
             startDir,
             goalDir,
+            frontier: blameFrontier,
             margin: Math.max(8, Math.min(20, span)),
             dryRun: true,
         });
@@ -1454,6 +1523,7 @@ export function buildLayout({
             exempt,
             startDir,
             goalDir,
+            frontier: blameFrontier,
             margin: 60,
             dryRun: true,
         });
@@ -1624,21 +1694,34 @@ export function buildLayout({
      * being drawn as if a belt could carry items there — a stub end blocks the
      * machine that feeds it.
      */
-    function commitLink(plan: LinkPlan): boolean {
+    /** the run behind every connection index, for rip-up */
+    const laid: ({ q: QueuedLink; run: RouteResult } | undefined)[] = [];
+    /** belt tile key → connection index */
+    const beltOwner = new Map<number, number>();
+    /** links whose search failed: the rip-up pass retries them */
+    const failed: { q: QueuedLink; index: number }[] = [];
+    /** the gap behind each connection index; a successful retry clears it */
+    const gapOf: (RoutingGap | undefined)[] = [];
+
+    function commitLink(plan: LinkPlan, q: QueuedLink, replace = -1): boolean {
         if (plan.hubTile) shared.hubApproaches.add(cellKey(plan.hubTile.x, plan.hubTile.y));
         const path = plan.path;
+        const index = replace >= 0 ? replace : connections.length;
         if (!path) {
-            routingGaps.push({
+            gapOf[index] = {
                 from: plan.draft.from,
                 to: plan.draft.to,
                 fromLabel: plan.draft.fromLabel,
                 toLabel: plan.draft.toLabel,
                 start: plan.start,
                 goal: plan.goal,
-            });
-            connections.push({ ...plan.draft, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 });
+            };
+            connections[index] = { ...plan.draft, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 };
+            laid[index] = undefined;
+            failed.push({ q, index });
             return false;
         }
+        gapOf[index] = undefined;
         // the run was searched on this very world a moment ago: write it as tested
         claimRoute(shared, path);
         // every path tile is a belt or a tunnel end; the underground tiles are
@@ -1646,7 +1729,7 @@ export function buildLayout({
         const underground = path.spans.reduce((n, span) => n + span.cells.length, 0);
         const beltTiles = path.cells.length - underground;
         beltEstimate += beltTiles;
-        connections.push({
+        connections[index] = {
             ...plan.draft,
             routed: true,
             path: path.cells,
@@ -1654,7 +1737,13 @@ export function buildLayout({
             tunnelCells: path.crossings,
             tunnelSpans: path.spans,
             beltTiles,
-        });
+        };
+        laid[index] = { q, run: path };
+        for (const c of path.cells) beltOwner.set(cellKey(c.x, c.y), index);
+        for (const span of path.spans) {
+            beltOwner.set(cellKey(span.sender.x, span.sender.y), index);
+            beltOwner.set(cellKey(span.receiver.x, span.receiver.y), index);
+        }
         return true;
     }
 
@@ -1688,7 +1777,7 @@ export function buildLayout({
     /** plan a link and lay it; `false` when no legal run exists */
     function layLink(q: QueuedLink): boolean {
         const plan = planLink(q);
-        return plan ? commitLink(plan) : false;
+        return plan ? commitLink(plan, q) : false;
     }
 
     /**
@@ -2078,7 +2167,11 @@ export function buildLayout({
                     }
                     chosen = placement;
                     scanning = false;
-                    for (const plan of batch) if (plan) commitLink(plan);
+                    for (let k = 0; k < batch.length; k++) {
+                        const plan = batch[k];
+                        if (!plan) continue;
+                        commitLink(plan, k < links.length ? links[k]! : toHub!);
+                    }
                     if (toHub) rootPlanned = true;
                     break;
                 }
@@ -2192,6 +2285,69 @@ export function buildLayout({
             const inSlot = outY === -1 ? 2 : outY === 1 ? 0 : outX === -1 ? 1 : 3;
             layLink(shapeLink(source, info, slot, can, BUILDING_INFO.trash, inSlot, { waste: true, direct: true }));
         }
+    }
+
+    // 3e) rip-up and reroute. A failed link blames the belts its search ran
+    // into; rip the worst offenders, retry the link, and let the ripped ones
+    // try again next round. Deterministic and bounded: fixed visiting order,
+    // fixed cap — no randomness, so the sheet stays reproducible.
+    const MAX_ROUNDS = 4;
+    const MAX_RIP = 2;
+    const rip = (index: number): void => {
+        const entry = laid[index];
+        if (!entry) return;
+        releaseRoute(shared, entry.run);
+        for (const c of entry.run.cells) beltOwner.delete(cellKey(c.x, c.y));
+        for (const span of entry.run.spans) {
+            beltOwner.delete(cellKey(span.sender.x, span.sender.y));
+            beltOwner.delete(cellKey(span.receiver.x, span.receiver.y));
+        }
+        const underground = entry.run.spans.reduce((n, span) => n + span.cells.length, 0);
+        beltEstimate -= entry.run.cells.length - underground;
+        laid[index] = undefined;
+        connections[index] = { ...connections[index]!, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 };
+        failed.push({ q: entry.q, index });
+    };
+    let queue = failed.splice(0);
+    for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
+        const next: { q: QueuedLink; index: number }[] = [];
+        for (const item of queue) {
+            const blame = new Set<number>();
+            // the retry doubles as the blame run: it records what stopped it
+            blameFrontier = blame;
+            const retry = planLink(item.q);
+            blameFrontier = null;
+            if (retry?.path) {
+                commitLink(retry, item.q, item.index);
+                continue;
+            }
+            const counts = new Map<number, number>();
+            for (const key of blame) {
+                const owner = beltOwner.get(key);
+                if (owner === undefined || owner === item.index) continue;
+                counts.set(owner, (counts.get(owner) ?? 0) + 1);
+            }
+            const victims = [...counts.entries()].sort((l, r) => r[1] - l[1] || l[0] - r[0]).slice(0, MAX_RIP);
+            if (!victims.length) {
+                next.push(item);
+                continue;
+            }
+            for (const [index] of victims) rip(index);
+            const after = planLink(item.q);
+            if (after?.path) commitLink(after, item.q, item.index);
+            else next.push(item);
+        }
+        queue = [...next, ...failed.splice(0)];
+    }
+    routingGaps.length = 0;
+    for (const gap of gapOf) if (gap) routingGaps.push(gap);
+    // a ripped belt can take away an over-belt another run was crossing under,
+    // so every recorded crossing is refreshed from the final world
+    for (const conn of connections) {
+        if (!conn.routed || !conn.tunnelSpans || !conn.tunnelSpans.length) continue;
+        conn.tunnelCells = conn.tunnelSpans
+            .flatMap((span) => span.cells)
+            .filter((cell) => shared.belts.has(cellKey(cell.x, cell.y)));
     }
 
     // 4) colors: which ones are on the map, which need mixing

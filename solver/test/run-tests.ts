@@ -22,6 +22,7 @@ import {
     planBom,
     createWorld,
     routeBelt,
+    releaseRoute,
     cellKey,
     portCells,
     portApproachCells,
@@ -494,6 +495,24 @@ beginSection("router: walls, tunnels, dead ends");
         "router: before L6 it goes around",
         !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
     );
+
+    // rip-up needs a reversible claim: lay a run, release it, world unchanged
+    const reusable = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let y = -1; y <= 1; y++) reusable.belts.set(cellKey(0, y), "v");
+    const before = {
+        belts: [...reusable.belts].sort((l, r) => l[0] - r[0]),
+        under: [...reusable.tunnelUnder].sort((l, r) => l[0] - r[0]),
+        ends: [...reusable.tunnelEnds].sort((l, r) => l[0] - r[0]),
+        crossings: [...reusable.tunnelCells].sort((l, r) => l - r),
+    };
+    const laid = routeBelt(reusable, reusable.walls, { x: -3, y: 0 }, { x: 3, y: 0 }, { allowCross: true });
+    checkTrue("rip-up: the run is laid", !!laid);
+    check("rip-up: the run claims belts", reusable.belts.size > before.belts.length, true);
+    if (laid) releaseRoute(reusable, laid);
+    check("rip-up: belts restored", [...reusable.belts].sort((l, r) => l[0] - r[0]), before.belts);
+    check("rip-up: tunnel ends restored", [...reusable.tunnelEnds].sort((l, r) => l[0] - r[0]), before.ends);
+    check("rip-up: tunnel-under bits restored", [...reusable.tunnelUnder].sort((l, r) => l[0] - r[0]), before.under);
+    check("rip-up: crossings restored", [...reusable.tunnelCells].sort((l, r) => l - r), before.crossings);
 }
 
 beginSection("router: tunnel legality (span limit, straight ends, own tile)");
