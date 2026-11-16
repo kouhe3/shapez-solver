@@ -20,6 +20,8 @@ import {
     sizeColorSupply,
     expandPlanTree,
     planBom,
+    fuseCuts,
+    fusedCost,
     createWorld,
     routeBelt,
     releaseRoute,
@@ -782,6 +784,43 @@ beginSection("campaign: one map, one hub, no overlaps");
         fanout.set(key, (fanout.get(key) || 0) + 1);
     }
     check("campaign: no output port feeds two belts", Math.max(0, ...fanout.values()), 1);
+}
+
+beginSection("layout: one cutter serves every output slot at once");
+{
+    // a quad cutter ejects all four quadrants in the same cycle, so two steps
+    // that cut the same shape into different slots are one machine
+    const res = solve("RuCw--Cw:----Ru--", { maxAttempts: 30000, buildings: new Set(ALL_BUILDINGS) });
+    checkTrue("multi-output plan solved", res.ok && res.flat !== undefined);
+    const fused = fuseCuts(res.flat!);
+    check(
+        "sibling quad cuts fuse into one machine",
+        fused.steps.filter((s) => s.fuseInto).map((s) => `${s.id}->${s.fuseInto}`),
+        ["v6->v2", "v11->v5"]
+    );
+    check("a fused cutter counts once", fusedCost(fused, res.cost!), res.cost! - 2);
+    const bom = Object.fromEntries(planBom(expandPlanTree(fused)).map((b) => [b.zh, b.n]));
+    check("two quad cutters, not four", bom["四向切割机"], 2);
+    // q0+q3 on one cutter, q1+q2 on the other: two slots stay unused on each
+    check("only the unused slots get a trash can", bom["垃圾桶"], 6);
+
+    // the plan needs the C and R deposits; the chains need r, g and b
+    const types = requiredTypes([{ code: "RuCw--Cw:----Ru--" }]);
+    for (const color of ["r", "g", "b"]) types.add(color);
+    const scan = scanForTypes(47742, { types, startRadius: 6, maxRadius: 32 });
+    const L = buildLayout({ plan: res.plan!, patches: scan.patches, hub: { x: 0, y: 0 } });
+    const ports = L.connections
+        .flatMap((c) => (c.color && c.to === "v16" && c.slot !== null ? [c.slot] : []))
+        .sort((a, b) => a - b);
+    check("both w ports of the quad painter are fed", ports, [2, 4]);
+    check("one colour chain per port", L.buildings.filter((b) => b.kind === "mixer").length, 4);
+    const fanout = new Map<string, number>();
+    for (const c of L.connections) {
+        const key = `${c.from}|${c.outSlot}`;
+        fanout.set(key, (fanout.get(key) || 0) + 1);
+    }
+    check("a fused cutter still feeds each slot once", Math.max(0, ...fanout.values()), 1);
+    check("the fused layout routes", L.routingGaps.length, 0);
 }
 
 beginSection("campaign: only the lines buildable by L9");

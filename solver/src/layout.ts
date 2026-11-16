@@ -415,6 +415,8 @@ export interface PlanStepLink {
     id: string;
     op: P.PlanOp;
     inputs: readonly { id: string }[];
+    /** this step's product is another output slot of `fuseInto`'s cutter */
+    fuseInto?: string;
 }
 
 /** a flattened plan seen only as ids and inputs: all a tree copy reads */
@@ -1380,32 +1382,100 @@ function allocateBlock(world: World, width: number, height: number): BlockRect |
 }
 
 /**
- * Turn a plan DAG into a tree by copying any sub-plan that feeds more than one
- * consumer.
+ * Fuse cut steps that are different output slots of one machine.
+ *
+ * A quad cutter ejects all four quadrants in the same cycle and a cutter has a
+ * slot per half, so two steps that cut the same shape into different slots are
+ * one machine, not two. The later step is marked `fuseInto` the first: the
+ * layout places one cutter and links each consumer from its own slot.
+ *
+ * A slot with more than one consumer stays split: one output port feeds one
+ * belt, so that product still needs a second copy of the sub-plan.
+ */
+export function fuseCuts(flat: PlanTree): PlanTree {
+    const consumers = new Map<string, number>();
+    for (const step of flat.steps) {
+        for (const input of step.inputs) consumers.set(input.id, (consumers.get(input.id) || 0) + 1);
+    }
+    const groups = new Map<string, P.PlanStep[]>();
+    for (const step of flat.steps) {
+        if (step.op !== "cutQuad" && step.op !== "cutHalf") continue;
+        const input = step.inputs[0];
+        if (!input) continue;
+        const key = `${step.op}|${input.id}`;
+        const list = groups.get(key) || [];
+        list.push(step);
+        groups.set(key, list);
+    }
+    const fuseInto = new Map<string, string>();
+    for (const list of groups.values()) {
+        if (list.length < 2) continue;
+        if (new Set(list.map((step) => outputSlot(step))).size < 2) continue;
+        if (list.some((step) => (consumers.get(step.id) || 0) > 1)) continue;
+        const rep = list[0]!;
+        for (const step of list.slice(1)) fuseInto.set(step.id, rep.id);
+    }
+    if (!fuseInto.size) return flat;
+    return {
+        ...flat,
+        steps: flat.steps.map((step) =>
+            fuseInto.has(step.id) ? { ...step, fuseInto: fuseInto.get(step.id) } : step
+        ),
+    };
+}
+
+/** plan cost once a fused cutter counts as one machine instead of one per slot */
+export function fusedCost(flat: PlanTree, cost: number): number {
+    let aliases = 0;
+    for (const step of flat.steps) if (step.fuseInto) aliases += 1;
+    return cost - aliases;
+}
+
+/**
+ * Turn a plan DAG into a tree by copying any sub-plan whose *output slot*
+ * feeds more than one consumer.
  *
  * The search memoises identical sub-shapes, so the same node can hang under
  * several parents. In the game one output port feeds exactly one belt, so a
- * shared node would need a splitter — and splitters only unlock at L4. Parts are
- * free, so the legal answer is a second copy of that sub-plan.
+ * shared slot would need a splitter — and splitters only unlock at L20. Parts
+ * are free, so the legal answer is a second copy of that sub-plan.
  *
+ * Different slots of one fused cutter are not a second consumer of the shape:
+ * `fuseCuts` marks them, and they share the cutter and its input sub-plan.
  * Inputs come before their parent.
  */
 export function expandPlanTree(flat: PlanTree): PlanTree;
 export function expandPlanTree(flat: PlanTreeLike): PlanTreeLike;
 export function expandPlanTree(flat: PlanTreeLike): PlanTreeLike {
     const byId = new Map<string, PlanStepLink>(flat.steps.map((step): [string, PlanStepLink] => [step.id, step]));
+    const copied = new Map<string, PlanStepLink>();
     const seen = new Map<string, number>();
     const steps: PlanStepLink[] = [];
-    const visit = (id: string): PlanStepLink => {
+    /**
+     * `from` + `port` name the input edge, not the consumer step: a fused
+     * cutter's members are one building with one input, so both edges share
+     * one copy of the source, while a stacker that takes one shape on both
+     * inputs still gets one copy per port.
+     */
+    const visit = (id: string, from: string, port: number): PlanStepLink => {
+        const key = `${id}|${from}|${port}`;
+        const known = copied.get(key);
+        if (known) return known;
         const src = byId.get(id)!;
         const n = (seen.get(id) || 0) + 1;
         seen.set(id, n);
-        const inputs = src.inputs.map((input) => ({ ...input, id: visit(input.id).id }));
-        const copy = { ...src, id: n === 1 ? id : `${id}#${n}`, inputs };
+        const copyId = n === 1 ? id : `${id}#${n}`;
+        const group = src.fuseInto ?? copyId;
+        const copy: PlanStepLink = {
+            ...src,
+            id: copyId,
+            inputs: src.inputs.map((input, i) => ({ ...input, id: visit(input.id, group, i).id })),
+        };
+        copied.set(key, copy);
         steps.push(copy);
         return copy;
     };
-    const final = visit(flat.final.id);
+    const final = visit(flat.final.id, flat.final.id, 0);
     return { steps, final };
 }
 
@@ -1419,11 +1489,27 @@ export function expandPlanTree(flat: PlanTreeLike): PlanTreeLike {
 export function planBom(flat: PlanTree, chains: ColorChain[] = colorChains(flat.steps)): BomEntry[] {
     const bom = new Map<string, number>();
     const add = (zh: string, n = 1): Map<string, number> => bom.set(zh, (bom.get(zh) || 0) + n);
+    const consumers = new Map<string, number>();
+    const aliases = new Map<string, string[]>();
     for (const step of flat.steps) {
+        for (const input of step.inputs) consumers.set(input.id, (consumers.get(input.id) || 0) + 1);
+        if (!step.fuseInto) continue;
+        const list = aliases.get(step.fuseInto) || [];
+        list.push(step.id);
+        aliases.set(step.fuseInto, list);
+    }
+    for (const step of flat.steps) {
+        if (step.fuseInto) continue;
         const info = BUILDING_INFO[step.op];
         if (!info) continue;
         add(info.zh);
-        if (info.outs.length > 1) add(BUILDING_INFO.trash.zh, info.outs.length - 1);
+        if (info.outs.length > 1) {
+            // only the slots somebody belts away are used; a fused cutter can
+            // have two or more of them
+            let used = consumers.get(step.id) ? 1 : 0;
+            for (const alias of aliases.get(step.id) || []) if (consumers.get(alias)) used += 1;
+            add(BUILDING_INFO.trash.zh, info.outs.length - used);
+        }
     }
     for (const chain of chains) {
         for (const op of chain.ops) add(op.kind === "mixer" ? COLOR_OP_LABELS.mixer : COLOR_OP_LABELS.base);
@@ -1482,7 +1568,7 @@ export function buildLayout({
 }: BuildLayoutArgs): Layout {
     const shared = world || createWorld({ hub, patches });
     // one output port = one belt, so shared sub-plans get their own copy
-    const flat = expandPlanTree(P.flatten(plan));
+    const flat = expandPlanTree(fuseCuts(P.flatten(plan)));
     // dependency depth
     const depth = new Map<string, number>();
     const stepById = new Map<string, P.PlanStep>(flat.steps.map((s): [string, P.PlanStep] => [s.id, s]));
@@ -1490,6 +1576,19 @@ export function buildLayout({
         let d = 0;
         for (const input of step.inputs) d = Math.max(d, (depth.get(input.id) || 0) + 1);
         depth.set(step.id, d);
+    }
+    /** fused cutters: alias step id → the rep's id (and back) */
+    const aliasOf = new Map<string, string[]>();
+    for (const step of flat.steps) {
+        if (!step.fuseInto) continue;
+        const list = aliasOf.get(step.fuseInto) || [];
+        list.push(step.id);
+        aliasOf.set(step.fuseInto, list);
+    }
+    /** how many belts a step's product feeds; a fused group's shared input counts once per building */
+    const consumersOf = new Map<string, number>();
+    for (const step of flat.steps) {
+        for (const input of step.inputs) consumersOf.set(input.id, (consumersOf.get(input.id) || 0) + 1);
     }
 
     /** tiles one placement took, so a rejected candidate can be undone */
@@ -2321,6 +2420,9 @@ export function buildLayout({
         let cx = blockX;
         let cy = blockY + d * 4;
         for (const step of steps) {
+            // a fused cut step is another output slot of a cutter placed for
+            // its rep; it gets no building of its own
+            if (step.fuseInto) continue;
             const info = BUILDING_INFO[step.op];
             if (!info) continue;
             const node = step.node;
@@ -2426,6 +2528,7 @@ export function buildLayout({
             if (!placement) continue;
             buildings.push(placement);
             buildingByStep.set(step.id, placement);
+            for (const alias of aliasOf.get(step.id) || []) buildingByStep.set(alias, placement);
             cx = placement.x + placement.w + 1;
         }
     }
@@ -2464,13 +2567,34 @@ export function buildLayout({
             const chunk = ports.slice(start, start + 5);
             const head = chunk[0]!;
             const anchor = { x: head.painter.x + head.info.w + 3, y: head.painter.y };
-            if (chunk.length < 3 || !allowColourNet) {
-                const chain = buildColorChain(color, anchor);
-                if (!chain || !chain.ok) {
-                    missing.add(`颜色:${color}`);
-                    continue;
+            if (chunk.length < 2 || !allowColourNet) {
+                // One chain per port: a chain carries exactly one port's 0.4/s
+                // and one output port takes one belt, so two ports of the same
+                // colour need two chains — building one and linking only the
+                // head would leave the second port with no colour at all.
+                // Before the L20 splitter the merge cannot fan a trunk back
+                // out, so this is also the early-level path for k ≥ 2. Only
+                // the first chain anchors at its port; the next grows at that
+                // chain's production point, so its miners land in the same
+                // deposit cluster instead of crowding the factory block.
+                let production = anchor;
+                for (const port of chunk) {
+                    const chain = buildColorChain(color, production);
+                    if (!chain || !chain.ok) {
+                        missing.add(`颜色:${color}`);
+                        break;
+                    }
+                    if (
+                        !layLink(
+                            shapeLink(chain.building, chain.info, chain.outSlot, port.painter, port.info, port.slot, {
+                                color: true,
+                            })
+                        )
+                    ) {
+                        break;
+                    }
+                    production = chain.anchor ?? production;
                 }
-                layLink(shapeLink(chain.building, chain.info, chain.outSlot, head.painter, head.info, head.slot, { color: true }));
                 continue;
             }
             buildSharedColorNet(color, chunk, anchor);
@@ -2483,15 +2607,23 @@ export function buildLayout({
     // (`systems/item_ejector.js`), so the can goes exactly there: no belt, and no
     // way for the last link of a crowded factory to be left unroutable.
     for (const step of flat.steps) {
+        // a fused sibling has no building of its own: its slot is handled here
+        if (step.fuseInto) continue;
         const info = BUILDING_INFO[step.op];
         if (!info || !info.outs || info.outs.length < 2) continue;
         const source = buildingByStep.get(step.id);
         if (!source) continue;
-        const used = outputSlot(step);
+        // every slot a consumer belts away: the rep's own, plus a fused
+        // sibling's when that sibling's product is used
+        const used = new Set<number>([outputSlot(step)]);
+        for (const alias of aliasOf.get(step.id) || []) {
+            const aliasStep = stepById.get(alias);
+            if (aliasStep && consumersOf.get(alias)) used.add(outputSlot(aliasStep));
+        }
         const cells = portCells(info, source.x, source.y, source.rot);
         const approaches = portApproachCells(info, source.x, source.y, source.rot);
         for (let slot = 0; slot < info.outs.length; slot++) {
-            if (slot === used) continue;
+            if (used.has(slot)) continue;
             const cell = cells[info.ins.length + slot];
             if (!cell) continue;
             const can: Placement = {

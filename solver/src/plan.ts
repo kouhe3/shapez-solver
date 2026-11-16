@@ -209,6 +209,11 @@ export interface PlanStep {
     cost: number;
     out: Shape;
     outKey: string;
+    /**
+     * This product is another output slot of the cutter built for `fuseInto`
+     * (`layout.ts` `fuseCuts`): the two steps are one machine.
+     */
+    fuseInto?: string;
 }
 
 export interface FlatPlan {

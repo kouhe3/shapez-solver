@@ -19,8 +19,8 @@ import {
 import type { NeedSetName } from "../src/needs.js";
 import type { CampaignResult } from "../src/campaign.js";
 import { colorChains } from "../src/color.js";
-import { planBom, expandPlanTree } from "../src/layout.js";
-import type { BuildingKind } from "../src/layout.js";
+import { planBom, expandPlanTree, fuseCuts, fusedCost } from "../src/layout.js";
+import type { BuildingKind, PlanTree } from "../src/layout.js";
 import type { CampaignJob, CampaignReply } from "./worker.js";
 
 const BUILDING_LABELS: Record<string, string> = {
@@ -353,12 +353,17 @@ const COL_GAP = 48;
 const ROW_GAP = 10;
 const PAD = 24;
 const HEAD = 36;
+/** an edge that skips a wave would run under cards, so it dodges below them on its own lane */
+const LANE_STEP = 13;
+const LANE_INSET = 16;
 
 interface RecipeItem {
     id: string;
     kind: "plan" | "color";
     step?: P.PlanStep;
     color?: S.ColorChar;
+    /** colour chains only: the painter port this chain feeds (`v16 端口2`) */
+    owner?: string;
     title: string;
     detail: string;
     inputs: RecipeItem[];
@@ -387,44 +392,57 @@ function sizeOf(item: RecipeItem): { w: number; h: number } {
  * is real buildings (a mixer tree), so it belongs in the same dependency
  * graph; each port owns its own chain, matching what `buildLayout` places.
  */
-function buildRecipeItems(flat: P.FlatPlan): RecipeItem[] {
+function buildRecipeItems(flat: PlanTree): RecipeItem[] {
+    // a quad cutter's quadrants and a cutter's two halves are output slots of
+    // one machine: draw it once and hang every consumer off that card
+    const fused = fuseCuts(flat);
+    const aliases = new Map<string, P.PlanStep[]>();
+    const repOf = new Map<string, string>();
+    for (const step of fused.steps) {
+        if (!step.fuseInto) continue;
+        repOf.set(step.id, step.fuseInto);
+        const list = aliases.get(step.fuseInto) || [];
+        list.push(step);
+        aliases.set(step.fuseInto, list);
+    }
     const items: RecipeItem[] = [];
-    const byStep = new Map<P.PlanStep, RecipeItem>();
-    const stepById = new Map<string, P.PlanStep>();
-    for (const step of flat.steps) stepById.set(step.id, step);
+    const byId = new Map<string, RecipeItem>();
 
-    for (const step of flat.steps) {
+    for (const step of fused.steps) {
+        if (step.fuseInto) continue;
+        const extra = aliases.get(step.id) || [];
         const item: RecipeItem = {
             id: step.id,
             kind: "plan",
             step,
             title: `${step.id} · ${P.OP_LABELS[step.op] ?? step.op}`,
-            detail: step.detail,
+            detail: [step.detail, ...extra.map((s) => s.detail)].filter(Boolean).join(" · "),
             inputs: [],
             wave: 0,
-            isFinal: step === flat.final,
+            isFinal: step === fused.final,
         };
-        byStep.set(step, item);
+        byId.set(step.id, item);
         items.push(item);
     }
-    for (const step of flat.steps) {
-        const item = byStep.get(step);
+    for (const step of fused.steps) {
+        if (step.fuseInto) continue;
+        const item = byId.get(step.id);
         if (!item) continue;
         for (const input of step.inputs) {
-            const from = byStep.get(input);
+            const from = byId.get(input.id) ?? byId.get(repOf.get(input.id) ?? "");
             if (from) item.inputs.push(from);
         }
     }
 
-    for (const chain of colorChains(flat.steps)) {
-        const paintStep = stepById.get(chain.stepId);
-        const paint = paintStep ? byStep.get(paintStep) : undefined;
+    for (const chain of colorChains(fused.steps)) {
+        const paint = byId.get(chain.stepId);
         if (!paint) continue;
         const chainItems: RecipeItem[] = chain.ops.map((op, index) => {
             const item: RecipeItem = {
                 id: `${chain.stepId}:${chain.slot}:${index}`,
                 kind: "color",
                 color: op.color,
+                owner: `${chain.stepId} 端口${chain.slot}`,
                 title: op.kind === "base" ? "采矿机" : "混色器",
                 detail: op.kind === "base" ? `颜色 ${op.color}` : `${op.parts.join(" + ")} → ${op.color}`,
                 inputs: [],
@@ -473,7 +491,7 @@ function buildRecipeItems(flat: P.FlatPlan): RecipeItem[] {
     return items;
 }
 
-function recipeSVG(flat: P.FlatPlan): string {
+function recipeSVG(flat: PlanTree): string {
     const items = buildRecipeItems(flat);
     const order = new Map<RecipeItem, number>(items.map((item, i) => [item, i]));
     const maxWave = Math.max(...items.map((item) => item.wave), 0);
@@ -487,7 +505,7 @@ function recipeSVG(flat: P.FlatPlan): string {
     );
     // one row only: every wave sits to the right of the previous one
     const width = PAD * 2 + layers.length * PLAN_NODE.w + Math.max(0, layers.length - 1) * COL_GAP;
-    const height = PAD + HEAD + Math.max(...colHeights, 0) + PAD;
+    const contentBottom = PAD + HEAD + Math.max(...colHeights, 0);
 
     const boxes = new Map<RecipeItem, ItemBox>();
     layers.forEach((layer, wave) => {
@@ -500,7 +518,11 @@ function recipeSVG(flat: P.FlatPlan): string {
         }
     });
 
-    const edges = renderRecipeEdges(items, boxes);
+    const edges = renderRecipeEdges(items, boxes, contentBottom);
+    const bottom = edges.laneCount
+        ? contentBottom + LANE_INSET + (edges.laneCount - 1) * LANE_STEP + LANE_INSET
+        : contentBottom;
+    const height = bottom + PAD;
 
     const titles: string[] = [];
     const nodes: string[] = [];
@@ -534,7 +556,7 @@ function recipeSVG(flat: P.FlatPlan): string {
         `viewBox="0 0 ${Math.ceil(width)} ${Math.ceil(height)}" font-family="Segoe UI, Microsoft YaHei, sans-serif">` +
         `<defs>${markers}</defs>` +
         `<rect width="100%" height="100%" fill="#fbfcfe"/>` +
-        `<g>${edges}</g>` +
+        `<g>${edges.markup}</g>` +
         `<g>${titles.join("")}</g>` +
         `<g>${nodes.join("")}</g>` +
         `</svg>`
@@ -554,8 +576,16 @@ interface EdgeSpec {
  * Draws every dependency edge. Endpoints on one node side are spread apart —
  * outgoing above incoming — so an outgoing arrow never continues an incoming
  * one (that reads as a double-headed arrow).
+ *
+ * An edge that skips a wave would cross the cards of the column in between,
+ * so it dives below the whole board on its own lane and climbs back up at the
+ * target. One lane per such edge keeps them from drawing over each other.
  */
-function renderRecipeEdges(items: RecipeItem[], boxes: Map<RecipeItem, ItemBox>): string {
+function renderRecipeEdges(
+    items: RecipeItem[],
+    boxes: Map<RecipeItem, ItemBox>,
+    contentBottom: number
+): { markup: string; laneCount: number } {
     const specs: EdgeSpec[] = [];
     for (const item of items) {
         const to = boxes.get(item);
@@ -600,6 +630,21 @@ function renderRecipeEdges(items: RecipeItem[], boxes: Map<RecipeItem, ItemBox>)
         return isOut ? 0.16 + (0.28 * rank) / (count + 1) : 0.56 + (0.28 * rank) / (count + 1);
     };
 
+    const laneOf = new Map<number, number>();
+    specs.forEach((spec, index) => {
+        if (spec.to.item.wave - spec.from.item.wave >= 2) laneOf.set(index, laneOf.size);
+    });
+
+    // lanes that share a gutter would stack their verticals on one pixel
+    // column, so each gets its own stub offset inside that gutter
+    const outStubs = new Map<number, number>();
+    const inStubs = new Map<number, number>();
+    const nextStub = (map: Map<number, number>, wave: number): number => {
+        const n = map.get(wave) ?? 0;
+        map.set(wave, n + 1);
+        return Math.min(n, 7);
+    };
+
     const paths = specs.map((spec, index) => {
         const { from, to, side, down, stroke, marker } = spec;
         if (side === "vertical") {
@@ -625,13 +670,32 @@ function renderRecipeEdges(items: RecipeItem[], boxes: Map<RecipeItem, ItemBox>)
         const y1 = from.y + from.h * fraction(outRank, outList.length, fromInList.length > 0, true);
         const x2 = to.x + (rightward ? 0 : to.w);
         const y2 = to.y + to.h * fraction(inRank, inList.length, toOutList.length > 0, false);
+
+        const lane = laneOf.get(index);
+        if (lane !== undefined) {
+            // the stub sits in the gutters beside the cards, so neither the
+            // dive nor the climb touches a card
+            const colRight = PAD + from.item.wave * (PLAN_NODE.w + COL_GAP) + PLAN_NODE.w;
+            const colLeft = PAD + to.item.wave * (PLAN_NODE.w + COL_GAP);
+            const xs = colRight + 8 + nextStub(outStubs, from.item.wave) * 5;
+            const xt = colLeft - 8 - nextStub(inStubs, to.item.wave) * 5;
+            const laneY = contentBottom + LANE_INSET + lane * LANE_STEP;
+            const r = 4;
+            const d =
+                `M ${x1} ${y1} L ${xs - r} ${y1} Q ${xs} ${y1} ${xs} ${y1 + r} ` +
+                `L ${xs} ${laneY - r} Q ${xs} ${laneY} ${xs + r} ${laneY} ` +
+                `L ${xt - r} ${laneY} Q ${xt} ${laneY} ${xt} ${laneY - r} ` +
+                `L ${xt} ${y2 + r} Q ${xt} ${y2} ${xt + r} ${y2} L ${x2} ${y2}`;
+            return `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>`;
+        }
+
         const bend = Math.max(24, Math.abs(x2 - x1) * 0.5) * (rightward ? 1 : -1);
         return (
             `<path d="M ${x1} ${y1} C ${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2} ${y2}" ` +
             `fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>`
         );
     });
-    return paths.join("");
+    return { markup: paths.join(""), laneCount: laneOf.size };
 }
 
 function planNodeSVG(box: ItemBox): string {
@@ -640,8 +704,11 @@ function planNodeSVG(box: ItemBox): string {
     if (!step) return "";
     const detail =
         step.node.op === "paint4"
-            ? step.node.colors.map((c) => c ?? "-").join(" / ")
-            : step.detail;
+            ? step.node.colors
+                  .map((c, i) => (c && c !== "u" ? `端口${i + 1} ${c}` : ""))
+                  .filter(Boolean)
+                  .join(" · ")
+            : item.detail;
     const code = shortCode(step.outKey, 18);
     const fill = item.isFinal ? "#f2faf5" : "#ffffff";
     const stroke = item.isFinal ? "#4f9d68" : "#dfe3ec";
@@ -668,6 +735,7 @@ function colorNodeSVG(box: ItemBox): string {
         `<rect x="${x + 10}" y="${y + 15}" width="24" height="24" rx="6" fill="${hex}" stroke="#64666e" stroke-width="1"/>` +
         `<text x="${x + 42}" y="${y + 23}" font-size="11.5" font-weight="600" fill="#2b2f3a">${item.title}</text>` +
         `<text x="${x + 42}" y="${y + 39}" font-size="10" fill="#6b7280">${item.detail}</text>` +
+        `<text x="${x + w - 8}" y="${y + 22}" font-size="9" text-anchor="end" fill="#9aa3b5">${item.owner ?? ""}</text>` +
         `</g>`
     );
 }
@@ -694,20 +762,21 @@ function renderPlan(res: SolveResult): void {
         ? `已找到并验证方案（搜索引擎达到预算，可能是次优解；用时 ${res.stats.planShapes} 个状态）`
         : "已生成方案，并通过模拟器验证 ✓";
 
+    const fused = fuseCuts(res.flat);
     const chipCost = document.createElement("span");
     chipCost.className = "chip";
-    chipCost.textContent = `建筑数 ${res.cost}`;
+    chipCost.textContent = `建筑数 ${fusedCost(fused, res.cost)}`;
     const chipSteps = document.createElement("span");
     chipSteps.className = "chip";
-    chipSteps.textContent = `步骤 ${res.flat.steps.length}`;
+    chipSteps.textContent = `步骤 ${fused.steps.filter((step) => !step.fuseInto).length}`;
     const chipOk = document.createElement("span");
     chipOk.className = "chip good";
     chipOk.textContent = res.verification.ok ? "校验通过" : "校验失败";
     resultMeta.append(chipCost, chipSteps, chipOk);
 
     const counts = new Map<P.PlanOp, number>();
-    for (const step of res.flat.steps) {
-        if (step.op === "base") continue;
+    for (const step of fused.steps) {
+        if (step.op === "base" || step.fuseInto) continue;
         counts.set(step.op, (counts.get(step.op) || 0) + 1);
     }
     for (const [op, n] of counts) {
@@ -717,13 +786,13 @@ function renderPlan(res: SolveResult): void {
         resultMeta.appendChild(chip);
     }
 
-    recipeStage.innerHTML = recipeSVG(res.flat);
+    recipeStage.innerHTML = recipeSVG(fused);
     recipeHint.hidden = true;
     recipePz.fit();
 
     const bomChip = document.createElement("span");
     bomChip.className = "chip";
-    bomChip.textContent = `材料 ${planBom(expandPlanTree(res.flat))
+    bomChip.textContent = `材料 ${planBom(expandPlanTree(fused))
         .map((b) => `${b.zh}×${b.n}`)
         .join("、")}`;
     resultMeta.appendChild(bomChip);
