@@ -293,6 +293,8 @@ export interface RoutingGap {
     goal?: Tile;
     /** campaign sheet: which factory the failed link belongs to */
     plan?: number;
+    /** index in `Layout.connections`; the campaign offsets it when it merges */
+    connection?: number;
 }
 
 /** one factory on a campaign sheet */
@@ -354,6 +356,13 @@ export interface BuildLayoutArgs {
 export interface RouteOptions {
     /** a belt may cross a perpendicular belt through a tunnel */
     allowCross?: boolean;
+    /**
+     * Cross a **turn** belt too. A turn has no straight direction, so a tunnel
+     * under it never runs along it: the game accepts it. The greedy build keeps
+     * the conservative rule (it changes the whole plan); the repair pass turns
+     * it on to get a boxed endpoint out of a pocket.
+     */
+    relaxCross?: boolean;
     /** extra tiles this link may enter although `blocked` lists them */
     exempt?: ReadonlySet<number> | null;
     /** the goal tile may already hold a belt: the run merges into it */
@@ -662,13 +671,21 @@ const BUCKET_SLOTS = 7;
  *
  * Every cell has to stay off machines, the hub and other parts' ports. Running
  * into an existing belt or a tunnel end is only legal underground: the tunnel
- * crosses a belt at a right angle, and the game only hands the tunnel out at
- * L6, which the caller passes as `allowCross`. A tunnel may span at most
+ * crosses a belt at a right angle (a turn belt has no direction, so the repair
+ * pass may cross it too — `relaxCross`; the greedy build keeps the stricter
+ * rule), and the game only hands the tunnel out at L6, which the caller passes
+ * as `allowCross`. A tunnel may span at most
  * 5 tiles (tier 0, `undergroundBeltMaxTilesByTier[0]`), its two
  * ends must sit on a straight run, nothing with the same direction may sit
  * between them, and each end occupies its tile (no belt there). When no legal
  * run exists the link is reported as unroutable instead of being drawn as if
  * it worked.
+ *
+ * A run may pass under a machine: only the two ends of a tunnel are buildings,
+ * the tiles between them hold no entity, and `checkCanPlaceEntity` in
+ * `ref/logic.js` only looks at the surface tile. So the surface may dive at
+ * any free tile and stay under for the whole phase budget; it just may not
+ * come back up under a building (a receiver would share that tile).
  *
  * Turns cost 2 so the result reads as a few straight runs instead of a
  * staircase; crossing a belt costs 3 and a completed tunnel end another 2, so
@@ -783,11 +800,17 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                         if (indexOf(nx, ny) === prevCell) continue;
                         const isStart = nx === start.x && ny === start.y;
                         const isGoal = nx === goal.x && ny === goal.y;
+                        const step = 1 + (d === heading ? 0 : 2);
                         if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) {
-                            opts.frontier?.add(nk);
+                            // a machine body carries no surface belt, but the run may
+                            // pass underneath it: only the tunnel ends are buildings
+                            if (!opts.allowCross || !senderOk(d, cell, heading, curKey) || !tunnelFree(nk, d)) {
+                                opts.frontier?.add(nk);
+                            } else {
+                                relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
+                            }
                             continue;
                         }
-                        const step = 1 + (d === heading ? 0 : 2);
                         const belt = world.belts.get(nk);
                         if (belt !== undefined) {
                             if (isGoal) {
@@ -795,8 +818,11 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                                 if (opts.goalMayJoin) relax(stateOf(indexOf(nx, ny), 0, d), cost + step, state);
                                 continue;
                             }
-                            // the tunnel runs under a perpendicular belt, never along one
-                            if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) {
+                            // the tunnel runs under a perpendicular belt, never along
+                            // one; a turn has no direction and counts as crossable
+                            // only for the repair pass (`relaxCross`)
+                            const along = opts.relaxCross ? belt === (d < 2 ? "h" : "v") : belt !== (d < 2 ? "v" : "h");
+                            if (!opts.allowCross || along) {
                                 opts.frontier?.add(nk);
                                 continue;
                             }
@@ -821,6 +847,10 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                             relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
                             continue;
                         }
+                        // free ground: stay on the surface or dive under it
+                        if (opts.allowCross && senderOk(d, cell, heading, curKey) && tunnelFree(nk, d)) {
+                            relax(stateOf(indexOf(nx, ny), 1, d), cost + step + 3, state);
+                        }
                         relax(stateOf(indexOf(nx, ny), 0, d), cost + step, state);
                     }
                     continue;
@@ -838,10 +868,9 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                     if (indexOf(nx, ny) === prevCell) continue;
                     const isStart = nx === start.x && ny === start.y;
                     const isGoal = nx === goal.x && ny === goal.y;
-                    if (!isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk)) {
-                        opts.frontier?.add(nk);
-                        continue;
-                    }
+                    // a building above the run is fine: the tunnel has no entity in
+                    // between; it just may not surface inside one
+                    const isBlocked = !isStart && !isGoal && !(opts.exempt && opts.exempt.has(nk)) && blocked.has(nk);
                     const nextPhase = phase + 1;
                     const belt = world.belts.get(nk);
                     const endDir = world.tunnelEnds.get(nk);
@@ -856,7 +885,7 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                         continue;
                     }
                     if (belt !== undefined) {
-                        if (!opts.allowCross || belt !== (d < 2 ? "v" : "h")) continue;
+                        if (opts.relaxCross ? belt === (d < 2 ? "h" : "v") : belt !== (d < 2 ? "v" : "h")) continue;
                         if (world.tunnelCells.has(nk)) continue;
                         if (!tunnelFree(nk, d)) {
                             opts.frontier?.add(nk);
@@ -874,6 +903,15 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
                         }
                         if (nextPhase > MAX_UNDERGROUND) continue;
                         relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 4, state);
+                        continue;
+                    }
+                    if (isBlocked) {
+                        // under a machine: no receiver can be placed here
+                        if (nextPhase <= MAX_UNDERGROUND && tunnelFree(nk, d)) {
+                            relax(stateOf(indexOf(nx, ny), nextPhase, d), cost + 1, state);
+                        } else {
+                            opts.frontier?.add(nk);
+                        }
                         continue;
                     }
                     // free ground: the run may surface here or stay underground
@@ -1017,7 +1055,7 @@ export function claimRoute(world: World, run: RouteResult): void {
  * is left alone — a ripped cell simply stays reserved for buildings.
  */
 /** is every tile of this run still free? a restore may not overwrite a belt */
-function runFits(world: World, run: RouteResult): boolean {
+export function runFits(world: World, run: RouteResult): boolean {
     const ends = new Set<number>();
     for (const span of run.spans) {
         for (const end of [span.sender, span.receiver]) ends.add(cellKey(end.x, end.y));
@@ -1863,6 +1901,7 @@ export function buildLayout({
                 toLabel: plan.draft.toLabel,
                 start: plan.start,
                 goal: plan.goal,
+                connection: index,
             };
             connections[index] = { ...plan.draft, routed: false, path: null, tunnels: 0, tunnelCells: [], tunnelSpans: [], beltTiles: 0 };
             laid[index] = undefined;
@@ -2582,6 +2621,7 @@ export function buildLayout({
                 toLabel: saved.draft.toLabel,
                 start: saved.start,
                 goal: saved.goal,
+                connection: i,
             };
         }
     }
@@ -2631,4 +2671,515 @@ export function buildLayout({
         steps: flat.steps,
         depth,
     };
+}
+
+/**
+ * Campaign-level rip-up and reroute.
+ *
+ * Each factory is routed greedily while it is built, so a belt laid for an
+ * earlier factory can seal a port that only a later link needs. That deadlock
+ * spans two `buildLayout` calls, and the per-factory pass cannot see it — its
+ * blame only knows the belts of its own factory. This pass runs once on the
+ * finished map, replays the failing links, rips the belts that block their
+ * endpoints (the nearest few from `routeBelt`'s frontier), reroutes those belts'
+ * owners and repeats until it stops making progress. Visiting order, victim
+ * order and every cap are fixed, so the result is reproducible.
+ *
+ * A miner is the one endpoint the pass may still turn or move: it is 1×1, it
+ * carries a single link, and the game lets it face any side. A processor carries
+ * several links and is never touched here.
+ */
+export interface RepairRoutingArgs {
+    world: World;
+    connections: Connection[];
+    buildings: readonly Placement[];
+    sources?: readonly LayoutSource[];
+    allowTunnels?: boolean;
+    /** whole-map rip-up passes before giving up */
+    rounds?: number;
+    /** rip-up rounds inside one failing link */
+    cascades?: number;
+    /** belts ripped per round, and how far from an endpoint they must be */
+    maxRip?: number;
+    near?: number;
+}
+
+export interface RepairRoutingReport {
+    /** connections that were gaps when the pass started and are routed now */
+    fixed: number;
+    /** connections still unrouted after the pass */
+    remaining: number;
+}
+
+/** the whole belt layer plus the connection table, for a round that regresses */
+interface RepairSnapshot {
+    belts: Map<number, BeltHeading>;
+    tunnelCells: Set<number>;
+    tunnelEnds: Map<number, number>;
+    tunnelUnder: Map<number, number>;
+    hubBound: Map<number, number>;
+    hubEntryLoad: Map<number, number>;
+    hubApproaches: Set<number>;
+    walls: Set<number>;
+    approaches: Set<number>;
+    blocked: Set<number>;
+    connections: {
+        routed: boolean;
+        path: Tile[] | null;
+        tunnels: number;
+        tunnelCells: Tile[];
+        tunnelSpans: TunnelSpan[];
+        beltTiles: number;
+    }[];
+    /** a turned/moved miner lives on the placement itself, not in the world */
+    placements: { x: number; y: number; rot: Rot; patch?: Patch; distance?: number }[];
+    sources: { x?: number; y?: number; patch: Patch | null; distance?: number }[];
+}
+
+/** endpoints of one connection, rebuilt from the placements */
+interface RepairEnds {
+    start: Tile;
+    startApproach: Tile;
+    goal: Tile;
+    goalApproach: Tile;
+    startDir: readonly [number, number] | null;
+    goalDir: readonly [number, number] | null;
+}
+
+function connectionEnds(conn: Connection, byStep: ReadonlyMap<string, Placement>): RepairEnds | null {
+    if (conn.toHub || conn.direct) return null;
+    const src = byStep.get(conn.from);
+    const dst = byStep.get(conn.to);
+    if (!src || !dst) return null;
+    const sInfo = BUILDING_INFO[src.kind];
+    const dInfo = BUILDING_INFO[dst.kind];
+    if (!sInfo || !dInfo) return null;
+    const sCells = portCells(sInfo, src.x, src.y, src.rot);
+    const sApps = portApproachCells(sInfo, src.x, src.y, src.rot);
+    const dCells = portCells(dInfo, dst.x, dst.y, dst.rot);
+    const dApps = portApproachCells(dInfo, dst.x, dst.y, dst.rot);
+    const out = (sInfo.ins || []).length + conn.outSlot;
+    const start = sCells[out];
+    const startApproach = sApps[out];
+    const slot = conn.slot ?? 0;
+    const goal = dCells[slot];
+    const goalApproach = dApps[slot];
+    if (!start || !startApproach || !goal || !goalApproach) return null;
+    return {
+        start,
+        startApproach,
+        goal,
+        goalApproach,
+        startDir: [Math.sign(startApproach.x - start.x), Math.sign(startApproach.y - start.y)],
+        goalDir: [Math.sign(goal.x - goalApproach.x), Math.sign(goal.y - goalApproach.y)],
+    };
+}
+
+/** the run behind a connection, rebuilt well enough for `releaseRoute` */
+function connectionRun(conn: Connection): RouteResult | null {
+    if (!conn.path || conn.path.length === 0) return null;
+    const under = new Set<number>();
+    for (const span of conn.tunnelSpans) for (const c of span.cells) under.add(cellKey(c.x, c.y));
+    return {
+        cells: conn.path,
+        crossings: conn.tunnelCells,
+        spans: conn.tunnelSpans,
+        phases: conn.path.map((c) => (under.has(cellKey(c.x, c.y)) ? 1 : 0)),
+        headings: conn.path.map(() => 0),
+        joinsGoal: false,
+        entryKey: null,
+    };
+}
+
+function applyRun(conn: Connection, run: RouteResult): void {
+    const underground = run.spans.reduce((n, span) => n + span.cells.length, 0);
+    conn.routed = true;
+    conn.path = run.cells;
+    conn.tunnels = run.spans.length;
+    conn.tunnelCells = run.crossings;
+    conn.tunnelSpans = run.spans;
+    conn.beltTiles = run.cells.length - underground;
+}
+
+export function repairRoutingGaps({
+    world,
+    connections,
+    buildings,
+    sources = [],
+    allowTunnels = true,
+    rounds = 6,
+    cascades = 6,
+    maxRip = 3,
+    near = 6,
+}: RepairRoutingArgs): RepairRoutingReport {
+    const byStep = new Map(buildings.map((b): [string, Placement] => [b.stepId, b]));
+    const blocked = new Set<number>([...world.walls, ...world.approaches]);
+    const allowCross = allowTunnels !== false;
+    /** the repair's second phase may cross a turn belt; the build never does */
+    let relaxCross = false;
+    const tileOf = (key: number): Tile => ({ x: Math.floor(key / 8192) - 4096, y: (key % 8192) - 4096 });
+    const unrouted = (): number[] => {
+        const out: number[] = [];
+        for (let i = 0; i < connections.length; i++) if (!connections[i]!.routed) out.push(i);
+        return out;
+    };
+
+    function search(start: Tile, goal: Tile, exempt: ReadonlySet<number>, startDir: RepairEnds["startDir"], goalDir: RepairEnds["goalDir"], frontier?: Set<number>): RouteResult | null {
+        for (const margin of [60, 240]) {
+            const run = routeBelt(world, blocked, start, goal, {
+                allowCross,
+                relaxCross,
+                dryRun: true,
+                exempt,
+                startDir,
+                goalDir,
+                frontier,
+                margin,
+            });
+            if (run) return run;
+        }
+        return null;
+    }
+
+    function endsSearch(ends: RepairEnds, frontier?: Set<number>): RouteResult | null {
+        const exempt = new Set<number>([
+            cellKey(ends.start.x, ends.start.y),
+            cellKey(ends.goal.x, ends.goal.y),
+            cellKey(ends.startApproach.x, ends.startApproach.y),
+            cellKey(ends.goalApproach.x, ends.goalApproach.y),
+        ]);
+        return search(ends.start, ends.goal, exempt, ends.startDir, ends.goalDir, frontier);
+    }
+
+    function find(index: number, frontier?: Set<number>): RouteResult | null {
+        const conn = connections[index]!;
+        if (conn.routed) return null;
+        const ends = connectionEnds(conn, byStep);
+        if (!ends) return null;
+        return endsSearch(ends, frontier);
+    }
+
+    function commit(index: number, run: RouteResult): void {
+        const conn = connections[index]!;
+        const old = connectionRun(conn);
+        if (old) releaseRoute(world, old);
+        claimRoute(world, run);
+        applyRun(conn, run);
+    }
+
+    /** the run each ripped connection had, so a free old path can come back */
+    const rippedRuns = new Map<number, RouteResult>();
+
+    function rip(index: number): void {
+        const conn = connections[index]!;
+        const old = connectionRun(conn);
+        if (!old) return;
+        rippedRuns.set(index, old);
+        releaseRoute(world, old);
+        conn.routed = false;
+        conn.path = null;
+    }
+
+    function owners(): Map<number, number> {
+        const out = new Map<number, number>();
+        for (let i = 0; i < connections.length; i++) {
+            const conn = connections[i]!;
+            if (!conn.routed || !conn.path || conn.toHub) continue;
+            for (const c of conn.path) out.set(cellKey(c.x, c.y), i);
+        }
+        return out;
+    }
+
+    /**
+     * Turn the miner feeding `index` to another side (or move it to another tile
+     * of its deposit) and try the link from there. Only the old port / approach
+     * reservations are released; the body stays put unless the turn fails.
+     */
+    function retryMiner(index: number): boolean {
+        const conn = connections[index]!;
+        const ends = connectionEnds(conn, byStep);
+        const src = byStep.get(conn.from);
+        if (!ends || !src || src.kind !== "base") return false;
+        const info = BUILDING_INFO.base;
+        const oldRot = src.rot;
+        const oldX = src.x;
+        const oldY = src.y;
+        const oldBody = cellKey(oldX, oldY);
+        const release = (cells: readonly Tile[], approach: boolean): void => {
+            for (const c of cells) {
+                const key = cellKey(c.x, c.y);
+                world.walls.delete(key);
+                if (approach) world.approaches.delete(key);
+                world.occupied.delete(key);
+                blocked.delete(key);
+            }
+        };
+        const claim = (cells: readonly Tile[], approach: boolean): void => {
+            for (const c of cells) {
+                const key = cellKey(c.x, c.y);
+                if (approach) world.approaches.add(key);
+                else world.walls.add(key);
+                world.occupied.add(key);
+                blocked.add(key);
+            }
+        };
+        const oldPorts = portCells(info, oldX, oldY, oldRot);
+        const oldApps = portApproachCells(info, oldX, oldY, oldRot);
+        /** stand the miner at (x, y) turned `rot` and try its link from there */
+        const tryAt = (x: number, y: number, rot: Rot): boolean => {
+            const ports = portCells(info, x, y, rot);
+            const apps = portApproachCells(info, x, y, rot);
+            const start = ports[0];
+            const approach = apps[0];
+            if (!start || !approach) return false;
+            const free = [start, approach].every((c) => {
+                const key = cellKey(c.x, c.y);
+                return !world.walls.has(key) && !world.belts.has(key) && !world.tunnelEnds.has(key) && !world.approaches.has(key);
+            });
+            if (!free) return false;
+            claim(ports, false);
+            claim(apps, true);
+            const prev = { x: src.x, y: src.y, rot: src.rot };
+            src.x = x;
+            src.y = y;
+            src.rot = rot;
+            const dir: readonly [number, number] = [Math.sign(approach.x - start.x), Math.sign(approach.y - start.y)];
+            const exempt = new Set<number>([cellKey(start.x, start.y), cellKey(ends.goal.x, ends.goal.y), cellKey(approach.x, approach.y), cellKey(ends.goalApproach.x, ends.goalApproach.y)]);
+            const run = search(start, ends.goal, exempt, dir, ends.goalDir);
+            if (!run) {
+                src.x = prev.x;
+                src.y = prev.y;
+                src.rot = prev.rot;
+                release(ports, false);
+                release(apps, true);
+                return false;
+            }
+            commit(index, run);
+            // the drawing starts the belt at the port centre
+            const [ox, oy] = portCentre(info, info.outs![0]!, rot);
+            conn.x1 = x + ox;
+            conn.y1 = y + oy;
+            for (const source of sources) {
+                if (source.step?.id === src.step && source.x === oldX && source.y === oldY) {
+                    source.x = x;
+                    source.y = y;
+                }
+            }
+            return true;
+        };
+        release(oldPorts, false);
+        release(oldApps, true);
+        for (let rot = 0; rot < 4; rot++) if (tryAt(oldX, oldY, rot as Rot)) return true;
+        // every side is boxed in: move the body to another tile of the deposit.
+        // A miner is 1×1 and only its own link leaves it, so nothing else breaks.
+        const tryMove = (cell: Tile): boolean => {
+            const nextBody = cellKey(cell.x, cell.y);
+            if (world.occupied.has(nextBody)) return false;
+            world.occupied.delete(oldBody);
+            world.walls.delete(oldBody);
+            world.occupied.add(nextBody);
+            world.walls.add(nextBody);
+            for (let rot = 0; rot < 4; rot++) if (tryAt(cell.x, cell.y, rot as Rot)) return true;
+            world.occupied.delete(nextBody);
+            world.walls.delete(nextBody);
+            world.occupied.add(oldBody);
+            world.walls.add(oldBody);
+            return false;
+        };
+        const patch = src.patch;
+        if (patch) {
+            for (const cell of patchCellsByCentre(patch)) {
+                if (cell.x === oldX && cell.y === oldY) continue;
+                if (tryMove(cell)) return true;
+            }
+            // that vein may be too crowded: any patch of the same item is valid
+            const item = patch.item;
+            for (const other of world.patches) {
+                if (other === patch) continue;
+                const same =
+                    item.kind === "shape"
+                        ? other.item.kind === "shape" && other.item.code === item.code
+                        : other.item.kind === "color" && other.item.color === item.color;
+                if (!same) continue;
+                for (const cell of patchCellsByCentre(other)) {
+                    if (!tryMove(cell)) continue;
+                    src.patch = other;
+                    src.distance = Math.hypot(other.x - (world.hub.x + 2), other.y - (world.hub.y + 2));
+                    for (const source of sources) {
+                        if (source.step?.id !== src.step || source.x !== cell.x || source.y !== cell.y) continue;
+                        source.patch = other;
+                        source.distance = src.distance;
+                    }
+                    return true;
+                }
+            }
+        }
+        src.x = oldX;
+        src.y = oldY;
+        src.rot = oldRot;
+        claim(oldPorts, false);
+        claim(oldApps, true);
+        return false;
+    }
+
+    const initial = unrouted();
+    if (initial.length === 0) return { fixed: 0, remaining: 0 };
+    const before = initial.length;
+    const snapshot = (): RepairSnapshot => ({
+        belts: new Map(world.belts),
+        tunnelCells: new Set(world.tunnelCells),
+        tunnelEnds: new Map(world.tunnelEnds),
+        tunnelUnder: new Map(world.tunnelUnder),
+        hubBound: new Map(world.hubBound),
+        hubEntryLoad: new Map(world.hubEntryLoad),
+        hubApproaches: new Set(world.hubApproaches),
+        walls: new Set(world.walls),
+        approaches: new Set(world.approaches),
+        blocked: new Set(blocked),
+        connections: connections.map((c) => ({
+            routed: c.routed,
+            path: c.path,
+            tunnels: c.tunnels,
+            tunnelCells: c.tunnelCells,
+            tunnelSpans: c.tunnelSpans,
+            beltTiles: c.beltTiles,
+        })),
+        placements: buildings.map((b) => ({ x: b.x, y: b.y, rot: b.rot, patch: b.patch, distance: b.distance })),
+        sources: sources.map((s) => ({ x: s.x, y: s.y, patch: s.patch, distance: s.distance })),
+    });
+    const restore = (saved: RepairSnapshot): void => {
+        const refill = <K, V>(target: Map<K, V>, source: Map<K, V>): void => {
+            target.clear();
+            for (const [key, value] of source) target.set(key, value);
+        };
+        const reset = <V>(target: Set<V>, source: Set<V>): void => {
+            target.clear();
+            for (const value of source) target.add(value);
+        };
+        refill(world.belts, saved.belts);
+        reset(world.tunnelCells, saved.tunnelCells);
+        refill(world.tunnelEnds, saved.tunnelEnds);
+        refill(world.tunnelUnder, saved.tunnelUnder);
+        refill(world.hubBound, saved.hubBound);
+        refill(world.hubEntryLoad, saved.hubEntryLoad);
+        reset(world.hubApproaches, saved.hubApproaches);
+        reset(world.walls, saved.walls);
+        reset(world.approaches, saved.approaches);
+        reset(blocked, saved.blocked);
+        connections.forEach((conn, i) => {
+            const save = saved.connections[i]!;
+            conn.routed = save.routed;
+            conn.path = save.path;
+            conn.tunnels = save.tunnels;
+            conn.tunnelCells = save.tunnelCells;
+            conn.tunnelSpans = save.tunnelSpans;
+            conn.beltTiles = save.beltTiles;
+        });
+        buildings.forEach((b, i) => {
+            const save = saved.placements[i]!;
+            b.x = save.x;
+            b.y = save.y;
+            b.rot = save.rot;
+            b.patch = save.patch;
+            b.distance = save.distance;
+        });
+        sources.forEach((s, i) => {
+            const save = saved.sources[i]!;
+            s.x = save.x;
+            s.y = save.y;
+            s.patch = save.patch;
+            s.distance = save.distance;
+        });
+    };
+    let best = snapshot();
+    let bestCount = initial.length;
+    // strict first: it stays with how the build lays belts. The relaxed turn
+    // crossing only runs for whatever the strict pass could not reach.
+    for (const relaxed of [false, true]) {
+        relaxCross = relaxed;
+        for (let round = 0; round < rounds; round++) {
+            const todo = unrouted();
+            let touched = 0;
+            const ripped = new Set<number>();
+            for (const index of todo) {
+                const direct = find(index);
+                if (direct) {
+                    commit(index, direct);
+                    touched += 1;
+                    continue;
+                }
+                const ends = connectionEnds(connections[index]!, byStep);
+                if (!ends) {
+                    if (retryMiner(index)) touched += 1;
+                    continue;
+                }
+                let done = false;
+                for (let cascade = 0; cascade < cascades && !done; cascade++) {
+                    const frontier = new Set<number>();
+                    const run = find(index, frontier);
+                    if (run) {
+                        commit(index, run);
+                        touched += 1;
+                        done = true;
+                        break;
+                    }
+                    const own = owners();
+                    const scores = new Map<number, { hits: number; d: number }>();
+                    for (const key of frontier) {
+                        const owner = own.get(key);
+                        if (owner === undefined || owner === index) continue;
+                        const tile = tileOf(key);
+                        const d = Math.min(
+                            Math.abs(tile.x - ends.start.x) + Math.abs(tile.y - ends.start.y),
+                            Math.abs(tile.x - ends.goal.x) + Math.abs(tile.y - ends.goal.y)
+                        );
+                        const cur = scores.get(owner);
+                        if (!cur) scores.set(owner, { hits: 1, d });
+                        else {
+                            cur.hits += 1;
+                            cur.d = Math.min(cur.d, d);
+                        }
+                    }
+                    const victims = [...scores.entries()]
+                        .filter(([, v]) => v.d <= near)
+                        .sort((a, b) => a[1].d - b[1].d || b[1].hits - a[1].hits || a[0] - b[0])
+                        .slice(0, maxRip);
+                    if (!victims.length) break;
+                    for (const [victim] of victims) {
+                        rip(victim);
+                        ripped.add(victim);
+                        touched += 1;
+                    }
+                }
+                if (!done && retryMiner(index)) touched += 1;
+            }
+            // every ripped belt has to come back: search first, then its old path
+            for (const victim of ripped) {
+                const conn = connections[victim]!;
+                if (conn.routed) continue;
+                const back = find(victim);
+                if (back) {
+                    commit(victim, back);
+                    continue;
+                }
+                const old = rippedRuns.get(victim);
+                if (old && runFits(world, old)) {
+                    claimRoute(world, old);
+                    applyRun(conn, old);
+                }
+            }
+        const remaining = unrouted().length;
+        if (remaining < bestCount) {
+            best = snapshot();
+            bestCount = remaining;
+        }
+            if (remaining === 0 || touched === 0) break;
+        }
+        if (bestCount === 0) break;
+        if (unrouted().length > bestCount) restore(best);
+    }
+    // land on the best state: a later round may have traded links for the same
+    // count, and the caller's gap list / belt counts must match the drawn belts
+    restore(best);
+    return { fixed: before - bestCount, remaining: bestCount };
 }

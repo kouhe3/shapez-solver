@@ -9,7 +9,7 @@
  */
 
 import { solve, solve as solveWithAllBuildings, ALL_BUILDINGS } from "./solver.js";
-import { buildLayout, createWorld, sizeColorSupply } from "./layout.js";
+import { buildLayout, cellKey, createWorld, repairRoutingGaps, sizeColorSupply } from "./layout.js";
 import type { BlockRect, Connection, Layout, LayoutColor, LayoutSource, Placement, PlanFrame, RoutingGap, Tile } from "./layout.js";
 import { chainRate, bottleneck, HUB_ENTRIES, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
 import type { Bottleneck } from "./rates.js";
@@ -378,7 +378,9 @@ export function planCampaign({
             allowTunnels,
             allowColourNet,
         });
-        for (const gap of layout.routingGaps) gapList.push({ ...gap, plan: index });
+        for (const gap of layout.routingGaps) {
+            gapList.push({ ...gap, plan: index, connection: allConnections.length + (gap.connection ?? -1) });
+        }
         for (const b of layout.buildings) b.plan = index;
         // miners sit far away on their deposit, so a factory frame only makes
         // sense around the processing block
@@ -433,6 +435,47 @@ export function planCampaign({
         beltEstimate += layout.beltEstimate;
         totalBuildings += layout.buildings.length;
     });
+
+    // ---- campaign-level repair: gaps the per-factory pass could not see -----
+    //
+    // A belt laid for one factory can seal a port another factory still needs;
+    // the per-factory rip-up only blames its own belts, so those cross-factory
+    // deadlocks survive. The repair pass replays the failing links on the
+    // finished map, rips the belts blocking their endpoints, reroutes those
+    // belts' owners and repeats. It is a no-op when every link routed.
+    const repair = repairRoutingGaps({
+        world,
+        connections: allConnections,
+        buildings: allBuildings,
+        sources: allSources,
+        allowTunnels,
+    });
+    if (repair.fixed > 0) {
+        // belts moved: the gap list, the crossing lists and every belt count
+        // have to follow the final world
+        for (let i = gapList.length - 1; i >= 0; i--) {
+            const conn = gapList[i]!.connection;
+            if (conn !== undefined && conn >= 0 && allConnections[conn]!.routed) gapList.splice(i, 1);
+        }
+        for (const conn of allConnections) {
+            if (!conn.routed || !conn.tunnelSpans.length) continue;
+            conn.tunnelCells = conn.tunnelSpans.flatMap((span) => span.cells).filter((cell) => world.belts.has(cellKey(cell.x, cell.y)));
+        }
+        beltEstimate = 0;
+        for (const conn of allConnections) {
+            if (!conn.routed || !conn.path) continue;
+            beltEstimate += conn.path.length - conn.tunnelSpans.reduce((n, span) => n + span.cells.length, 0);
+        }
+        const planOfStep = new Map(allBuildings.map((b): [string, number | undefined] => [b.stepId, b.plan]));
+        const beltsByPlan = new Map<number, number>();
+        for (const conn of allConnections) {
+            if (!conn.routed || !conn.path) continue;
+            const plan = planOfStep.get(conn.from);
+            if (plan === undefined) continue;
+            beltsByPlan.set(plan, (beltsByPlan.get(plan) ?? 0) + conn.path.length - conn.tunnelSpans.reduce((n, span) => n + span.cells.length, 0));
+        }
+        for (const e of entries) e.belts = beltsByPlan.get(e.index) ?? 0;
+    }
 
     // ---- throughput: what each factory can deliver, and what is missing -----
 

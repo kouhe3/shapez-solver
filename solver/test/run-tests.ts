@@ -479,10 +479,23 @@ beginSection("router: walls, tunnels, dead ends");
     checkTrue("router: uses the gap in a wall", !!through && through.cells.some((c) => c.x === 0 && c.y === 0));
     check("router: gap route is the straight run", through && through.cells.length, 5);
 
+    // a one-tile wall is exactly what a tunnel is for: only the ends of a run
+    // are buildings, so it passes underneath the body
+    const thin = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    for (let y = -30; y <= 30; y++) thin.walls.add(cellKey(0, y));
+    const under = routeBelt(thin, thin.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
+    checkTrue(
+        "router: tunnels under a one-tile wall",
+        !!under && under.spans.length === 1 && under.spans[0]!.cells.some((c) => c.x === 0 && c.y === 2)
+    );
+    const beforeTunnel = routeBelt(thin, thin.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: false, margin: 10, dryRun: true });
+    check("router: before L6 a one-tile wall seals", beforeTunnel, null);
+
+    // deeper than one tier-0 tunnel: five tiles of wall cannot be crossed
     const sealed = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
-    for (let y = -30; y <= 30; y++) sealed.walls.add(cellKey(0, y));
-    const dead = routeBelt(sealed, sealed.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
-    check("router: a sealed wall has no route", dead, null);
+    for (let x = 0; x < 5; x++) for (let y = -30; y <= 30; y++) sealed.walls.add(cellKey(x, y));
+    const dead = routeBelt(sealed, sealed.walls, { x: -2, y: 2 }, { x: 7, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
+    check("router: a wall deeper than a tunnel has no route", dead, null);
 
     // a belt across the only straight run: crossing needs a tunnel, and the
     // tunnel only goes under a perpendicular belt
@@ -495,6 +508,16 @@ beginSection("router: walls, tunnels, dead ends");
         "router: before L6 it goes around",
         !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
     );
+    // a turn belt has no straight direction, so `relaxCross` (the repair pass)
+    // may cross under it
+    const turning = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
+    turning.belts.set(cellKey(0, 0), "turn");
+    const relaxed = routeBelt(turning, turning.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, {
+        allowCross: true,
+        relaxCross: true,
+        dryRun: true,
+    });
+    check("router: relaxed crossing takes a turn belt", relaxed && relaxed.crossings, [{ x: 0, y: 0 }]);
 
     // rip-up needs a reversible claim: lay a run, release it, world unchanged
     const reusable = createWorld({ hub: { x: 20, y: 20 }, patches: [] });

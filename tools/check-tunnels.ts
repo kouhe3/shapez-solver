@@ -14,7 +14,10 @@
  * `bun run cli all 47742` 的默认一致；tier-0 隧道（两端间距 ≤ 5 格，
  * `undergroundBeltMaxTilesByTier[0]`）；sender / receiver 前后同向；隧道口
  * 占格、不压在地表带上；跨度内不得有同向隧道口（劫持/截断）；端口方向。
- * 不覆盖：tier-2 隧道、带速/拥堵、从建筑物下方穿过（routeBelt 不做）。
+ * 从建筑物下方穿过的 run 是合法的（只有两端是建筑，中间格没有实体，
+ * `ref/logic.js` 的 `checkCanPlaceEntity` 只看地表格），所以跨度内的机器格
+ * 不算违规；隧道口仍然不得落在机器格上（它们必须是地表可放置格）。
+ * 不覆盖：tier-2 隧道、带速/拥堵。
  *
  * 失效条件：游戏版本或 `undergroundBeltMaxTilesByTier` 变化、需求集变化、
  * 隧道画法/簿记字段改名 → 重跑并更新 F16 的基线；本工具的数字是快照。
