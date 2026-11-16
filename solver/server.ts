@@ -108,6 +108,7 @@ async function handle(req: Request): Promise<Response> {
         return new Response(null, { status: 302, headers: { location: "/web/index.html" } });
     }
     if (url.pathname === "/web/app.js") return serveModule(path.join(ROOT, "web", "app.ts"));
+    if (url.pathname === "/web/worker.js") return serveModule(path.join(ROOT, "web", "worker.ts"));
     const moduleName = MODULE_PATH.exec(url.pathname)?.[1];
     if (moduleName !== undefined) {
         const sourcePath = path.join(ROOT, "src", `${moduleName}.ts`);

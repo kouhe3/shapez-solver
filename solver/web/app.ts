@@ -4,17 +4,17 @@ import { shapeSVG } from "../src/render.js";
 import { solve, ALL_BUILDINGS } from "../src/solver.js";
 import type { SolveResult } from "../src/solver.js";
 import { levelsForVersion, buildingsForLevel } from "../src/levels.js";
-import { scanMap, scanForTypes, itemLabel } from "../src/map.js";
+import { scanMap, itemLabel } from "../src/map.js";
 import type { Patch } from "../src/map.js";
 import { decodeSavegame, savegameMapInfo } from "../src/savegame.js";
 import { schematicSVG } from "../src/schematic.js";
-import { neededShapes, requiredTypes, describeSource } from "../src/needs.js";
+import { describeSource } from "../src/needs.js";
 import type { NeedSetName } from "../src/needs.js";
-import { planCampaign } from "../src/campaign.js";
 import type { CampaignResult } from "../src/campaign.js";
 import { formatRate, formatDuration } from "../src/rates.js";
 import { colorChains } from "../src/color.js";
 import { planBom, expandPlanTree } from "../src/layout.js";
+import type { CampaignJob, CampaignReply } from "./worker.js";
 
 const BUILDING_LABELS: Record<string, string> = {
     cutter: "切割机",
@@ -611,6 +611,27 @@ function renderCampaign(res: CampaignResult, meta: CampaignMeta): void {
     bomCard.innerHTML += `<div style="line-height:1.9;font-size:12.5px">${lines.join("<br/>")}</div>`;
 }
 
+let campaignWorker: Worker | null = null;
+let campaignJobId = 0;
+
+/** one campaign per worker; the page thread never blocks on a solve */
+function solveCampaignInWorker(job: CampaignJob): Promise<CampaignReply> {
+    campaignWorker ??= new Worker("./worker.js", { type: "module" });
+    const worker = campaignWorker;
+    const id = ++campaignJobId;
+    const { promise, resolve, reject } = Promise.withResolvers<CampaignReply>();
+    const onMessage = (event: MessageEvent): void => {
+        const data = event.data as { id: number; ok: boolean; value?: CampaignReply; error?: string };
+        if (data.id !== id) return;
+        worker.removeEventListener("message", onMessage);
+        if (data.ok && data.value) resolve(data.value);
+        else reject(new Error(data.error || "求解失败"));
+    };
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({ id, job });
+    return promise;
+}
+
 async function onAll(): Promise<void> {
     const btn = mustGet<HTMLButtonElement>("all-btn");
     btn.disabled = true;
@@ -624,32 +645,26 @@ async function onAll(): Promise<void> {
         const set = mustGet<HTMLSelectElement>("all-set").value as NeedSetName;
         const untilPick = mustGet<HTMLSelectElement>("all-until");
         const untilLevel = untilPick.value ? Number(untilPick.value) : null;
-        const shapes = neededShapes({ set });
-        const scan = scanForTypes(ctx.seed, {
-            types: requiredTypes(shapes),
-            startRadius: set === "full" ? 10 : 8,
-            maxRadius: 32,
-        });
-        const res = planCampaign({
-            shapes,
-            patches: scan.patches,
+        // the solve runs in a worker: a cold full sheet takes tens of seconds
+        // and would freeze the page thread
+        const { result: res, radius, missingTypes } = await solveCampaignInWorker({
+            seed: ctx.seed,
             hub: ctx.hub,
-            buildings: new Set(ALL_BUILDINGS),
+            set,
             untilLevel,
-            levels: levelsForVersion(set),
         });
         const usedPatches: Patch[] = [];
         for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
         for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
         box.innerHTML = schematicSVG(res.layout, usedPatches, { campaign: true });
-        renderCampaign(res, { set, seed: ctx.seed, radius: scan.radius });
+        renderCampaign(res, { set, seed: ctx.seed, radius });
         status.textContent =
-            `种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · ` +
+            `种子 ${ctx.seed} · 扫描半径 ${radius} chunk · ` +
             (res.totals.failed ? `${res.totals.failed} 种无法求解 · ` : "") +
             (res.totals.deferred ? `${res.totals.deferred} 种要更高关卡 · ` : "") +
             (res.totals.impossible ? `${res.totals.impossible} 种本版本没有对应机器 · ` : "") +
             `${res.totals.shapes} 种可建 · ${res.totals.buildings} 个建筑 · 传送带约 ${res.totals.belts} 格` +
-            (scan.missingTypes.length ? ` · ⚠ 缺 ${scan.missingTypes.join("/")} 矿脉` : "");
+            (missingTypes.length ? ` · ⚠ 缺 ${missingTypes.join("/")} 矿脉` : "");
     } catch (e) {
         box.innerHTML = `<div style="padding:16px;color:#a5342f">${e instanceof Error ? e.message : String(e)}</div>`;
         mustGet<HTMLElement>("placement").innerHTML = "";
