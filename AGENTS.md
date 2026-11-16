@@ -196,3 +196,7 @@ The five canonical triage roles use their default label strings (`needs-triage`,
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain.md`.
+
+### Face Spaghetti
+
+台账 / 探测目录 / 仪器 / 门禁落点见 `docs/agents/face-spaghetti.md`；开工前先读它。
