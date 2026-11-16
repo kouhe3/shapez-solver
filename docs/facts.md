@@ -49,6 +49,8 @@
 
 | F39 | 共享色料网落地（方案 1 第一版）：同厂同色的色口按 ≤5 口一组（trunk 受 2/s 限制），每口仍一条链（0.4/s），链锚在组内第一台的基底矿机（生产端），在矿脉侧用合流器并成一条 trunk，进块后用分流器按端口朝向逐个分流；k≤2 的组仍每口一链（并带省下的带子抵不过零件与短带）。完整版 seed 47742：布线失败 73 → 58（-20.5%）、带 37358 → 35422（-5.2%）、建筑 806 → 787、色料机 265 → 225、合流器 17 台、分流器 4 台；demo 输出与 `plan-all.svg` 字节不变（试玩版无分流器 → 自动退回每口一链）；`bun run test` 224 checks 0 failure；`check:tunnels` demo 48/48、full 713 routed / 58 gaps / 1447 spans | L5 | `bun run cli all 47742 --set=full`、`bun run cli all 47742`（demo）、`bun run check:tunnels`、`bun run test`、`bun work/gap-census.ts` | 已证（实测） | routing-gaps 方案 1 第一版；剩余失败以中心 16 条、厂内 12 条为主 |
 
+| F40 | 厂内机位间距 1 → 2 格（`cx += info.w + 2`）：同一行的两条带要绕到目标机南侧输入，必须穿过机器之间的一列竖向通道；1 格宽时这条通道本身就被两侧端口占满，`四向切割机→堆叠器`（6）、`堆叠器↔堆叠器`（6）大量失败。完整版 seed 47742：失败 58 → 44（-24%）、建筑 787 → 796、带 35422 → 39291（+11%，绕行变长）、耗时 ~10.5 s；demo 仍 48 建筑 0 失败，`plan-all.svg` 已重生成；`bun run test` 224 checks 0 failure；`check:tunnels` demo 48/48、full 741 routed / 44 gaps / 1707 spans | L5 | `bun run cli all 47742 --set=full`、`bun run cli all 47742 --out=plan-all.svg`、`bun run check:tunnels`、`bun work/gap-census.ts` | 已证（实测） | 厂内失败减半；代价是带格 +11% |
+
 ## 重放
 
 ```bash
