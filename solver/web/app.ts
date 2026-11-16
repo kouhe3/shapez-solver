@@ -366,9 +366,17 @@ interface RecipeItem {
     owner?: string;
     title: string;
     detail: string;
-    inputs: RecipeItem[];
+    inputs: RecipeEdge[];
     wave: number;
     isFinal: boolean;
+    /** fused cutter siblings: both cards name the machine they share (`v11 <-> v5`) */
+    sameAs: string[];
+}
+
+/** one input edge: which card feeds this step, and which input port it enters */
+interface RecipeEdge {
+    item: RecipeItem;
+    slot: number;
 }
 
 interface ItemBox {
@@ -393,45 +401,43 @@ function sizeOf(item: RecipeItem): { w: number; h: number } {
  * graph; each port owns its own chain, matching what `buildLayout` places.
  */
 function buildRecipeItems(flat: PlanTree): RecipeItem[] {
-    // a quad cutter's quadrants and a cutter's two halves are output slots of
-    // one machine: draw it once and hang every consumer off that card
+    // a fused cutter keeps one card per step: a card's preview is that step's
+    // own output, so every edge carries exactly the shape drawn upstream. The
+    // shared machine is a badge on both cards (`同机 v11`) instead.
     const fused = fuseCuts(flat);
-    const aliases = new Map<string, P.PlanStep[]>();
-    const repOf = new Map<string, string>();
+    const aliases = new Map<string, string[]>();
     for (const step of fused.steps) {
         if (!step.fuseInto) continue;
-        repOf.set(step.id, step.fuseInto);
         const list = aliases.get(step.fuseInto) || [];
-        list.push(step);
+        list.push(step.id);
         aliases.set(step.fuseInto, list);
     }
     const items: RecipeItem[] = [];
     const byId = new Map<string, RecipeItem>();
 
     for (const step of fused.steps) {
-        if (step.fuseInto) continue;
-        const extra = aliases.get(step.id) || [];
+        const sameAs = step.fuseInto ? [step.fuseInto] : aliases.get(step.id) || [];
         const item: RecipeItem = {
             id: step.id,
             kind: "plan",
             step,
             title: `${step.id} · ${P.OP_LABELS[step.op] ?? step.op}`,
-            detail: [step.detail, ...extra.map((s) => s.detail)].filter(Boolean).join(" · "),
+            detail: step.detail,
             inputs: [],
             wave: 0,
             isFinal: step === fused.final,
+            sameAs,
         };
         byId.set(step.id, item);
         items.push(item);
     }
     for (const step of fused.steps) {
-        if (step.fuseInto) continue;
         const item = byId.get(step.id);
         if (!item) continue;
-        for (const input of step.inputs) {
-            const from = byId.get(input.id) ?? byId.get(repOf.get(input.id) ?? "");
-            if (from) item.inputs.push(from);
-        }
+        step.inputs.forEach((input, slot) => {
+            const from = byId.get(input.id);
+            if (from) item.inputs.push({ item: from, slot });
+        });
     }
 
     for (const chain of colorChains(fused.steps)) {
@@ -448,6 +454,7 @@ function buildRecipeItems(flat: PlanTree): RecipeItem[] {
                 inputs: [],
                 wave: 0,
                 isFinal: false,
+                sameAs: [],
             };
             items.push(item);
             return item;
@@ -458,19 +465,22 @@ function buildRecipeItems(flat: PlanTree): RecipeItem[] {
             if (!to) return;
             for (const operand of op.operands) {
                 const from = chainItems[operand];
-                if (from) to.inputs.push(from);
+                if (from) to.inputs.push({ item: from, slot: operand });
             }
         });
         const last = chainItems[chainItems.length - 1];
-        if (last) paint.inputs.push(last);
+        if (last) paint.inputs.push({ item: last, slot: chain.slot });
     }
 
-    // lazy waves: every op sits as late as possible, just left of its first
+    // lazy waves: every card sits as late as possible, just left of its first
     // consumer, and the final product is the rightmost column. One rule for
-    // shape ops and colour chains alike.
+    // shape ops and colour chains alike. A fused machine is one card group:
+    // its slots leave together, so the whole group waits for the *earliest*
+    // consumer — the latest column that still keeps every edge pointing right.
     const consumers = new Map<RecipeItem, RecipeItem[]>();
     for (const item of items) {
-        for (const input of item.inputs) {
+        for (const edge of item.inputs) {
+            const input = edge.item;
             const list = consumers.get(input);
             if (list) list.push(item);
             else consumers.set(input, [item]);
@@ -488,17 +498,39 @@ function buildRecipeItems(flat: PlanTree): RecipeItem[] {
     for (const item of items) depthOf(item);
     const maxDepth = Math.max(...items.map((item) => distance.get(item) ?? 0), 0);
     for (const item of items) item.wave = maxDepth - (distance.get(item) ?? 0);
+    const slots = new Map<string, RecipeItem[]>();
+    for (const item of items) {
+        if (item.kind !== "plan" || !item.step) continue;
+        const key = item.step.fuseInto ?? item.id;
+        const list = slots.get(key) || [];
+        list.push(item);
+        slots.set(key, list);
+    }
+    for (const group of slots.values()) {
+        if (group.length < 2) continue;
+        const wave = Math.min(...group.map((card) => card.wave));
+        for (const card of group) card.wave = wave;
+    }
     return items;
 }
 
 function recipeSVG(flat: PlanTree): string {
     const items = buildRecipeItems(flat);
-    const order = new Map<RecipeItem, number>(items.map((item, i) => [item, i]));
+    // a fused machine's cards stay next to each other inside their column
+    const groupRank = new Map<string, number>();
+    const sortKey = new Map<RecipeItem, number>();
+    items.forEach((item, index) => {
+        const key = item.step?.fuseInto ?? item.id;
+        if (!groupRank.has(key)) groupRank.set(key, groupRank.size);
+        sortKey.set(item, (groupRank.get(key) ?? 0) * items.length + index);
+    });
     const maxWave = Math.max(...items.map((item) => item.wave), 0);
     const layers: RecipeItem[][] = [];
     for (let wave = 0; wave <= maxWave; wave++) layers.push([]);
     for (const item of items) layers[item.wave]?.push(item);
-    for (const layer of layers) layer.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+    for (const layer of layers) {
+        layer.sort((a, b) => (sortKey.get(a) ?? 0) - (sortKey.get(b) ?? 0));
+    }
 
     const colHeights = layers.map(
         (layer) => layer.reduce((sum, item) => sum + sizeOf(item).h, 0) + Math.max(0, layer.length - 1) * ROW_GAP
@@ -570,6 +602,14 @@ interface EdgeSpec {
     down: boolean;
     stroke: string;
     marker: string;
+    /** which input port of the target this edge enters (`下层` / `上层`) */
+    label: string;
+}
+
+/** the input port an edge enters, when the machine names its ports */
+function inputLabel(item: RecipeItem, slot: number): string {
+    if (item.kind !== "plan" || item.step?.node.op !== "stack") return "";
+    return slot === 0 ? "下层" : "上层";
 }
 
 /**
@@ -590,7 +630,8 @@ function renderRecipeEdges(
     for (const item of items) {
         const to = boxes.get(item);
         if (!to) continue;
-        for (const input of item.inputs) {
+        for (const edge of item.inputs) {
+            const input = edge.item;
             const from = boxes.get(input);
             if (!from) continue;
             const dx = to.x - from.x;
@@ -603,6 +644,7 @@ function renderRecipeEdges(
                 down: to.y > from.y,
                 stroke: color ? (S.COLOR_HEX[color] ?? "#b6c0d4") : "#b6c0d4",
                 marker: color ? `recipe-arrow-${color}` : "recipe-arrow",
+                label: inputLabel(item, edge.slot),
             });
         }
     }
@@ -646,7 +688,7 @@ function renderRecipeEdges(
     };
 
     const paths = specs.map((spec, index) => {
-        const { from, to, side, down, stroke, marker } = spec;
+        const { from, to, side, down, stroke, marker, label } = spec;
         if (side === "vertical") {
             const x = from.x + from.w / 2;
             const y1 = down ? from.y + from.h : from.y;
@@ -670,6 +712,12 @@ function renderRecipeEdges(
         const y1 = from.y + from.h * fraction(outRank, outList.length, fromInList.length > 0, true);
         const x2 = to.x + (rightward ? 0 : to.w);
         const y2 = to.y + to.h * fraction(inRank, inList.length, toOutList.length > 0, false);
+        // the label sits just outside the target card, haloed so it stays
+        // readable where another edge's stub runs underneath it
+        const tag = label
+            ? `<text x="${x2 - 7}" y="${y2 - 4}" font-size="9" text-anchor="end" fill="#7c869c" ` +
+              `stroke="#fbfcfe" stroke-width="3" paint-order="stroke">${label}</text>`
+            : "";
 
         const lane = laneOf.get(index);
         if (lane !== undefined) {
@@ -686,13 +734,13 @@ function renderRecipeEdges(
                 `L ${xs} ${laneY - r} Q ${xs} ${laneY} ${xs + r} ${laneY} ` +
                 `L ${xt - r} ${laneY} Q ${xt} ${laneY} ${xt} ${laneY - r} ` +
                 `L ${xt} ${y2 + r} Q ${xt} ${y2} ${xt + r} ${y2} L ${x2} ${y2}`;
-            return `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>`;
+            return `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>${tag}`;
         }
 
         const bend = Math.max(24, Math.abs(x2 - x1) * 0.5) * (rightward ? 1 : -1);
         return (
             `<path d="M ${x1} ${y1} C ${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2} ${y2}" ` +
-            `fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>`
+            `fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>${tag}`
         );
     });
     return { markup: paths.join(""), laneCount: laneOf.size };
@@ -712,15 +760,22 @@ function planNodeSVG(box: ItemBox): string {
     const code = shortCode(step.outKey, 18);
     const fill = item.isFinal ? "#f2faf5" : "#ffffff";
     const stroke = item.isFinal ? "#4f9d68" : "#dfe3ec";
+    // a fused cutter owns one building: the sibling slot's card names the
+    // machine it shares instead of billing a second one
+    const shared = item.sameAs.length ? `同机 ${item.sameAs.join("/")}` : "";
+    const cost = step.fuseInto ? shared : `cost ${step.cost}`;
+    const caption = step.fuseInto ? detail : [detail, shared].filter(Boolean).join(" · ");
+    const dash = step.fuseInto ? ` stroke-dasharray="4 3"` : "";
     return (
-        `<g><title>${step.outKey}\n${item.title}</title>` +
+        `<g><title>${step.outKey}\n${item.title}\n${caption}</title>` +
         `<rect x="${x}" y="${y}" width="${w}" height="${PLAN_NODE.h}" rx="10" fill="${fill}" stroke="${stroke}" ` +
-        `stroke-width="${item.isFinal ? 2 : 1}"/>` +
+        `stroke-width="${item.isFinal ? 2 : 1}"${dash}/>` +
         `<text x="${x + 12}" y="${y + 20}" font-size="12" font-weight="600" fill="#2b2f3a">${item.title}</text>` +
         `<g transform="translate(${x + 12} ${y + 28})">${shapeSVG(step.out, 42, { background: false })}</g>` +
         `<text x="${x + 62}" y="${y + 46}" font-size="10" fill="#6b7280" font-family="ui-monospace, Consolas, monospace">${code}</text>` +
-        `<text x="${x + 62}" y="${y + 62}" font-size="9.5" fill="#9aa3b5">cost ${step.cost}</text>` +
-        `<text x="${x + w - 10}" y="${y + PLAN_NODE.h - 9}" font-size="9.5" text-anchor="end" fill="#9aa3b5">${detail}</text>` +
+        `<text x="${x + 62}" y="${y + 62}" font-size="9.5" fill="${step.fuseInto ? "#6f7fa8" : "#9aa3b5"}">${cost}</text>` +
+        `<text x="${x + w - 10}" y="${y + PLAN_NODE.h - 9}" font-size="9.5" text-anchor="end" ` +
+        `fill="${shared ? "#6f7fa8" : "#9aa3b5"}">${caption}</text>` +
         `</g>`
     );
 }
@@ -768,7 +823,7 @@ function renderPlan(res: SolveResult): void {
     chipCost.textContent = `建筑数 ${fusedCost(fused, res.cost)}`;
     const chipSteps = document.createElement("span");
     chipSteps.className = "chip";
-    chipSteps.textContent = `步骤 ${fused.steps.filter((step) => !step.fuseInto).length}`;
+    chipSteps.textContent = `步骤 ${fused.steps.length}`;
     const chipOk = document.createElement("span");
     chipOk.className = "chip good";
     chipOk.textContent = res.verification.ok ? "校验通过" : "校验失败";
