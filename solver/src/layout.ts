@@ -2083,7 +2083,7 @@ export function buildLayout({
                     break;
                 }
                 if (!scanning) break;
-                cx += info.w + 1;
+                cx += info.w + 2;
             }
 
             let placement = chosen;
