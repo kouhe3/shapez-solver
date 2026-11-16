@@ -140,6 +140,7 @@ Gotchas:
 
 - **Strict TypeScript executed by Bun.** `tsconfig.json` enables `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `verbatimModuleSyntax`, `module: Preserve`, `moduleResolution: bundler`, `allowImportingTsExtensions`, `noEmit`. `bun check` covers `solver/**/*.ts`, `tools/**/*.ts` and `setup-ref.ts`; nothing is emitted.
 - **Style:** 4 spaces, double quotes, semicolons, K&R braces, trailing commas. Nothing enforces it; lines run long. Exception: `solver/src/lz_factory.js` is extracted third-party LZ-String code (one 4 KB line) — never reformat it.
+- **Line endings:** LF everywhere. `.gitattributes` sets `* text=auto eol=lf` (binaries pinned), so `git add` normalizes CRLF on commit and checkout writes LF; never hand-convert line endings.
 - **Naming:** `camelCase` functions/vars, `PascalCase` classes (`Solver`, `ShapeParseError`), `UPPER_SNAKE` constants and data tables.
 - **Language split:** code, comments and docstrings are **English**; user-facing CLI/UI strings and labels are **Chinese** (`OP_LABELS`, `zh` fields, glossary vocabulary). `OP_LABELS_EN` holds English op names.
 - **Error contracts (do not unify):**
