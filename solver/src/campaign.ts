@@ -246,6 +246,9 @@ export function planCampaign({
     const tunnelAt = unlock.get("tunnel") || null;
     // before L6 belts cannot cross at all, so routing must go around
     const allowTunnels = untilLevel == null || (tunnelAt !== null && untilLevel >= tunnelAt);
+    // a shared colour net needs the splitter, which the game hands out at L20
+    const splitterAt = unlock.get("splitter") || null;
+    const allowColourNet = splitterAt !== null && (untilLevel == null || untilLevel >= splitterAt);
     // never plan with a machine this version does not hand out — the demo
     // simply has no stacker — and cap that at the requested level as well
     const last = levels[levels.length - 1];
@@ -373,6 +376,7 @@ export function planCampaign({
             idPrefix: `p${index}:`,
             tag: need.code,
             allowTunnels,
+            allowColourNet,
         });
         for (const gap of layout.routingGaps) gapList.push({ ...gap, plan: index });
         for (const b of layout.buildings) b.plan = index;

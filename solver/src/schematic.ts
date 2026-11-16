@@ -40,6 +40,8 @@ const ALL_KINDS: BuildingKind[] = [
     "paint",
     "paint4",
     "mixer",
+    "splitter",
+    "merger",
     "trash",
 ];
 
@@ -93,6 +95,9 @@ const KIND_COLOR: Record<string, string> = {
     paint: "#cd9b7d",
     paint4: "#cd9b7d",
     mixer: "#cdbb7d",
+    // both balancer variants share the game's balancer silhouette colour
+    splitter: "#555759",
+    merger: "#555759",
     trash: "#ed1d5d",
 };
 

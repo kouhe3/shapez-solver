@@ -223,6 +223,32 @@ beginSection("blueprint ports (official ItemEjector/ItemAcceptor slots)");
         { x: 2.5, y: 1, kind: "color" },
         { x: 3.5, y: 1, kind: "color" },
     ]);
+    // `ref/buildings/balancer.js` 1×1 variants: splitter = one south input,
+    // north + east outputs; merger = south + east inputs, one north output.
+    check("splitter in/out", [BUILDING_INFO.splitter.ins, BUILDING_INFO.splitter.outs], [
+        [{ x: 0.5, y: 1 }],
+        [
+            { x: 0.5, y: 0 },
+            { x: 1, y: 0.5 },
+        ],
+    ]);
+    check("merger in/out", [BUILDING_INFO.merger.ins, BUILDING_INFO.merger.outs], [
+        [
+            { x: 0.5, y: 1 },
+            { x: 1, y: 0.5 },
+        ],
+        [{ x: 0.5, y: 0 }],
+    ]);
+    check("splitter port tiles", portCells(BUILDING_INFO.splitter, 10, 10, 0), [
+        { x: 10, y: 11 },
+        { x: 10, y: 9 },
+        { x: 11, y: 10 },
+    ]);
+    check("merger port tiles", portCells(BUILDING_INFO.merger, 10, 10, 0), [
+        { x: 10, y: 11 },
+        { x: 11, y: 10 },
+        { x: 10, y: 9 },
+    ]);
 }
 
 beginSection("blueprint: connections use the right output slot");

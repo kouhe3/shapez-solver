@@ -79,7 +79,7 @@ export interface BuildingInfo {
 }
 
 /** every part this solver places: a plan op, a mixer, or a trash can */
-export type BuildingKind = P.PlanOp | "mixer" | "trash";
+export type BuildingKind = P.PlanOp | "mixer" | "trash" | "splitter" | "merger";
 
 /* ------------------------------------------------------------------ *
  * the map: deposits and the shared placement state
@@ -337,6 +337,8 @@ export interface BuildLayoutArgs {
     tag?: string | null;
     /** may a belt cross another one (tunnel unlocked)? Before L6 every crossing is illegal */
     allowTunnels?: boolean;
+    /** may colour ports of one factory share a net (splitter unlocked, L20)? */
+    allowColourNet?: boolean;
 }
 
 /** how the router may lay one run */
@@ -490,6 +492,30 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
         ],
         outs: [{ x: 0.5, y: 0 }],
     },
+    // 1×1 balancer variants (`ref/buildings/balancer.js`): the splitter takes
+    // one belt in on the south edge and hands it to the north and east edges in
+    // turn; the merger folds the south and east edges into one north output.
+    // Both are one tile, so a chain of them packs into a corridor.
+    splitter: {
+        w: 1,
+        h: 1,
+        zh: "分流器",
+        ins: [{ x: 0.5, y: 1 }],
+        outs: [
+            { x: 0.5, y: 0 },
+            { x: 1, y: 0.5 },
+        ],
+    },
+    merger: {
+        w: 1,
+        h: 1,
+        zh: "合流器",
+        ins: [
+            { x: 0.5, y: 1 },
+            { x: 1, y: 0.5 },
+        ],
+        outs: [{ x: 0.5, y: 0 }],
+    },
     // Not part of a plan: an unconnected output port backs up and stalls the
     // machine, so every unused cutter slot has to be vented. The game's trash
     // can (1×1, unlocked with the cutter at L1) accepts on all four sides.
@@ -604,6 +630,18 @@ const PHASES = MAX_UNDERGROUND + 2;
 const ROUTE_INF = 0x7fffffff;
 
 /**
+ * Search scratch, grown monotonically and reused across calls. A full campaign
+ * runs ~1.6k searches of up to 300k states; allocating and zeroing fresh
+ * Int32Arrays for every one throws away gigabytes. Each attempt rewrites the
+ * range it uses, so stale entries above it are never read.
+ */
+let SEARCH_DIST = new Int32Array(1 << 16);
+let SEARCH_FROM = new Int32Array(1 << 16);
+
+/** ring slots for the bucket queue: one search edge costs at most 6 */
+const BUCKET_SLOTS = 7;
+
+/**
  * Shortest legal belt run between two port tiles, as the game would lay it.
  *
  * Every cell has to stay off machines, the hub and other parts' ports. Running
@@ -642,11 +680,22 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         // 1..4 = under the ground with that many tiles already underground, 5 =
         // just surfaced at the receiver; the receiver has to go straight once.
         const totalStates = size * PHASES * 4;
-        const dist = new Int32Array(totalStates).fill(ROUTE_INF);
-        const from = new Int32Array(totalStates).fill(-1);
-        const buckets: number[][] = [];
+        if (SEARCH_DIST.length < totalStates) {
+            SEARCH_DIST = new Int32Array(totalStates);
+            SEARCH_FROM = new Int32Array(totalStates);
+        }
+        const dist = SEARCH_DIST;
+        const from = SEARCH_FROM;
+        dist.fill(ROUTE_INF, 0, totalStates);
+        from.fill(-1, 0, totalStates);
+        // Dial's bucket queue as a ring: costs only ever rise and one edge
+        // costs at most 6 (a turn plus a tunnel dive), so 7 buckets cover the
+        // whole frontier and nothing has to be allocated per cost level.
+        const ring: number[][] = Array.from({ length: BUCKET_SLOTS }, () => []);
+        let maxCost = 0;
         const push = (state: number, cost: number): void => {
-            (buckets[cost] || (buckets[cost] = [])).push(state);
+            ring[cost % BUCKET_SLOTS]!.push(state);
+            if (cost > maxCost) maxCost = cost;
         };
         for (let d = 0; d < 4; d++) {
             const s = startIndex * PHASES * 4 + d;
@@ -679,9 +728,8 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         };
 
         let best = -1;
-        search: for (let cost = 0; cost < buckets.length; cost++) {
-            const bucket = buckets[cost];
-            if (!bucket) continue;
+        search: for (let cost = 0; cost <= maxCost; cost++) {
+            const bucket = ring[cost % BUCKET_SLOTS]!;
             while (bucket.length) {
                 const state = bucket.pop();
                 if (state === undefined) continue;
@@ -1200,6 +1248,8 @@ interface BuiltColorChain {
     building: Placement;
     info: BuildingInfo;
     outSlot: number;
+    /** first base miner of the chain: where the next chain of the group grows */
+    anchor?: Tile;
 }
 
 /** a colour chain that could not be built: the map lacks a deposit */
@@ -1238,6 +1288,7 @@ export function buildLayout({
     idPrefix = "",
     tag = null,
     allowTunnels = true,
+    allowColourNet = false,
 }: BuildLayoutArgs): Layout {
     const shared = world || createWorld({ hub, patches });
     // one output port = one belt, so shared sub-plans get their own copy
@@ -1679,7 +1730,14 @@ export function buildLayout({
                 buildings.push(b);
                 sources.push({ step: null, patch: found.patch, distance: found.distance, x: found.x, y: found.y, color: op.color });
                 for (const key of found.cells) blocked.add(key);
-                built.push({ color: op.color, ok: true, building: b, info: BUILDING_INFO.base, outSlot: 0 });
+                built.push({
+                    color: op.color,
+                    ok: true,
+                    building: b,
+                    info: BUILDING_INFO.base,
+                    outSlot: 0,
+                    anchor: { x: found.x, y: found.y },
+                });
                 continue;
             }
             const left = built[op.operands[0]!];
@@ -1720,9 +1778,114 @@ export function buildLayout({
             buildings.push(b);
             layLink(shapeLink(left.building, left.info, left.outSlot, b, info, 0, { color: true }));
             layLink(shapeLink(right.building, right.info, right.outSlot, b, info, 1, { color: true }));
-            built.push({ color: op.color, ok: true, building: b, info, outSlot: 0 });
+            built.push({ color: op.color, ok: true, building: b, info, outSlot: 0, anchor: left.anchor });
         }
         return built.at(-1) || { color, ok: false };
+    }
+
+    /**
+     * One colour net for several ports of the same factory.
+     *
+     * A chain delivers 0.4 items/s, exactly one port's demand, so the group
+     * still grows one chain per port. The chains are grown at the *same*
+     * production point (the first one's output), merged pairwise into one
+     * trunk, and split back into one belt per port inside the block. That is
+     * where the belts are saved: k long runs become one long trunk plus short
+     * merge/split links.
+     */
+    function buildSharedColorNet(
+        color: ColorChar,
+        ports: { painter: Placement; info: BuildingInfo; slot: number }[],
+        anchor: Tile
+    ): void {
+        const first = buildColorChain(color, anchor);
+        if (!first || !first.ok) {
+            missing.add(`颜色:${color}`);
+            return;
+        }
+        const chains: BuiltColorChain[] = [first];
+        const production = first.anchor ?? { x: first.building.x, y: first.building.y };
+        for (let i = 1; i < ports.length; i++) {
+            const chain = buildColorChain(color, production);
+            if (!chain || !chain.ok) {
+                missing.add(`颜色:${color}`);
+                return;
+            }
+            chains.push(chain);
+        }
+
+        // pairwise merge, nearest the production cluster
+        let level: BuiltColorChain[] = chains;
+        while (level.length > 1) {
+            const next: BuiltColorChain[] = [];
+            for (let i = 0; i < level.length; i += 2) {
+                const a = level[i]!;
+                const b = level[i + 1];
+                if (!b) {
+                    next.push(a);
+                    continue;
+                }
+                const info = BUILDING_INFO.merger;
+                const spot = placeNear(
+                    info,
+                    { x: Math.round((a.building.x + b.building.x) / 2), y: Math.round((a.building.y + b.building.y) / 2) },
+                    0
+                );
+                if (!spot) return;
+                const merger: Placement = {
+                    step: `merger:${color}#${++colorSerial}`,
+                    stepId: `${idPrefix}merger:${color}#${colorSerial}`,
+                    kind: "merger",
+                    zh: info.zh,
+                    x: spot.x,
+                    y: spot.y,
+                    w: 1,
+                    h: 1,
+                    rot: 0,
+                };
+                buildings.push(merger);
+                if (!layLink(shapeLink(a.building, a.info, a.outSlot, merger, info, 0, { color: true }))) return;
+                if (!layLink(shapeLink(b.building, b.info, b.outSlot, merger, info, 1, { color: true }))) return;
+                next.push({ ok: true, color, building: merger, info, outSlot: 0 });
+            }
+            level = next;
+        }
+
+        // one splitter per extra port: out0 feeds a port, out1 passes the trunk on
+        let prev = level[0]!;
+        for (let i = 0; i < ports.length - 1; i++) {
+            const port = ports[i]!;
+            const info = BUILDING_INFO.splitter;
+            // sit two tiles outside the port and face the outlet at it, so the
+            // last run is a two-tile belt instead of a lap around the block
+            const cells = portCells(port.info, port.painter.x, port.painter.y, port.painter.rot);
+            const approaches = portApproachCells(port.info, port.painter.x, port.painter.y, port.painter.rot);
+            const portCell = cells[port.slot]!;
+            const approach = approaches[port.slot]!;
+            const out = { x: Math.sign(approach.x - portCell.x), y: Math.sign(approach.y - portCell.y) };
+            const anchor = { x: approach.x + out.x, y: approach.y + out.y };
+            // out0 has to point back at the port: north/south/east/west = 0/2/3/1
+            const rot: Rot = out.y === 1 ? 0 : out.y === -1 ? 2 : out.x === 1 ? 3 : 1;
+            const spot = placeNear(info, anchor, rot);
+            if (!spot) return;
+            const splitter: Placement = {
+                step: `splitter:${color}#${++colorSerial}`,
+                stepId: `${idPrefix}splitter:${color}#${colorSerial}`,
+                kind: "splitter",
+                zh: info.zh,
+                x: spot.x,
+                y: spot.y,
+                w: 1,
+                h: 1,
+                rot,
+            };
+            buildings.push(splitter);
+            if (!layLink(shapeLink(prev.building, prev.info, prev.outSlot, splitter, info, 0, { color: true }))) return;
+            layLink(shapeLink(splitter, info, 0, port.painter, port.info, port.slot, { color: true }));
+            prev = { ok: true, color, building: splitter, info, outSlot: 1 };
+        }
+        const last = ports.at(-1)!;
+        layLink(shapeLink(prev.building, prev.info, prev.outSlot, last.painter, last.info, last.slot, { color: true }));
     }
 
     const paintColorsUsed = new Set<ColorChar>();
@@ -1949,7 +2112,13 @@ export function buildLayout({
         if (rootBuilding) layLink(hubLinkOf(rootBuilding));
     }
 
-    // 3c) colour belts: every painter input is fed by its colour chain
+    // 3c) colour belts. Ports of the same colour in one factory share a net: a
+    // chain feeds one port (0.4/s), so the group keeps one chain per port, but
+    // the chains merge into one trunk at the production end and a splitter row
+    // fans it back out inside the block. Merging at the consumer end would save
+    // nothing: the chains still start at their own miners, so the long belts
+    // would merely end at a merger instead of a painter.
+    const colourPorts = new Map<ColorChar, { painter: Placement; info: BuildingInfo; slot: number }[]>();
     for (const step of flat.steps) {
         const node = step.node;
         if (node.op !== "paint" && node.op !== "paint4") continue;
@@ -1959,14 +2128,28 @@ export function buildLayout({
         const colors: readonly (ColorChar | null)[] = node.op === "paint4" ? node.colors : [node.color];
         colors.forEach((color, i) => {
             if (!color || color === "u") return;
-            // one chain per port, grown next to the painter that consumes it
-            const chain = buildColorChain(color, { x: painter.x + info.w + 3, y: painter.y });
-            if (!chain || !chain.ok) {
-                missing.add(`颜色:${color}`);
-                return;
-            }
-            layLink(shapeLink(chain.building, chain.info, chain.outSlot, painter, info, i + 1, { color: true }));
+            const list = colourPorts.get(color) ?? [];
+            list.push({ painter, info, slot: i + 1 });
+            colourPorts.set(color, list);
         });
+    }
+    for (const [color, ports] of colourPorts) {
+        // a belt carries 2 items/s and one port pulls 0.4, so five ports per trunk
+        for (let start = 0; start < ports.length; start += 5) {
+            const chunk = ports.slice(start, start + 5);
+            const head = chunk[0]!;
+            const anchor = { x: head.painter.x + head.info.w + 3, y: head.painter.y };
+            if (chunk.length < 3 || !allowColourNet) {
+                const chain = buildColorChain(color, anchor);
+                if (!chain || !chain.ok) {
+                    missing.add(`颜色:${color}`);
+                    continue;
+                }
+                layLink(shapeLink(chain.building, chain.info, chain.outSlot, head.painter, head.info, head.slot, { color: true }));
+                continue;
+            }
+            buildSharedColorNet(color, chunk, anchor);
+        }
     }
 
     // 3d) an output port with nowhere to go backs up and stalls the machine, so

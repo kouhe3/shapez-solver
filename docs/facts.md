@@ -45,12 +45,17 @@
 | F36 | 混色器锚点实验：把 `buildColorChain` 的混色器落点从「上色器旁」改为「两个操作数矿机的中点」——完整版 seed 47742 布线失败 112 → 73（色料 67→33、厂内 29→24、中心 16 不变），传送带 40183 → 37358 格，建图 15.5 → 12.1 s，建筑 808 → 806；seed 1234 106 → 63；demo seed 47742 仍 48/48、0 失败 | L4 | `bun work/probe/gapstats.ts`（实验 A：锚左矿机 → 94 条；实验 B：中点 → 73 条）；`bun run cli all 47742 --set=full --json`、`bun run cli all 1234 --set=full --json`、`bun run check:tunnels` | 已证（实测） | routing-gaps 基线（112 → 73）、混色器布点策略 |
 | F37 | 运输零件的解锁：`reward_balancer` 是 L3 奖励 → 2×1 平衡器 L4 可用；`reward_merger` L9 → 1×1 合流器 L10；`reward_splitter` L19 → 1×1 分流器 L20。2×1 平衡器 2 进 2 出，`process_BALANCER` 按 `nextOutputSlot % availableSlots` 轮流投放，所以可以 1 进 2 出当分流，但单出口会轮流空转/回堵，不能把两条带并成一条；合流要等 L10，1×1 分流要等 L20 | L2 | `ref/modes/levels.js:41,115,186`（balancer）、`:229`（merger）、`:309`（splitter）；`ref/buildings/balancer.js:60-72`（尺寸）、`:148-230`（槽位）；`ref/systems/item_processor.js:342-362`（轮流投放到两个出口） | 已证（机制） | 共享色料网的解锁回退（L4 前每口一链；L10 前不能合并 trunk；L20 前只有 2×1 分流） |
 
+| F38 | 自制地图基准（不经存档，纯网格 + 随机障碍 + 链路）：64×64 随机图 80 条链路顺序布线，40 条时 40/40（带子填充 39%）、60 条时 53/60（47%）、80 条时 66/80（69%）——空旷网格的容量悬崖在 40–47% 填充率之间；工厂拓扑（15 个 12×10 实心块 + 4×4 中心，每块一条根链接进中心）走廊 2 格 9/15、4 格 12/15、6 格 13/15、8 格以上 14/15，残余失败全部落在中心入口环（唯一空面已被别条带占住且下潜规则不允许）；真实战役外壳 453×434 = 196,602 格、37,358 格带 = 19% 填充，73 条失败属走廊/中心的结构问题而非全局密度 | L5 | `bun run bench:router`、`bun run bench:router --mode=factory`、`bun run bench:router --mode=chain --distinct=1`、`bun work/campaign-fill.ts` | 已证（实测） | 路由器独立记分牌；共享色料网与走廊宽度的判据 |
+
+| F39 | 共享色料网落地（方案 1 第一版）：同厂同色的色口按 ≤5 口一组（trunk 受 2/s 限制），每口仍一条链（0.4/s），链锚在组内第一台的基底矿机（生产端），在矿脉侧用合流器并成一条 trunk，进块后用分流器按端口朝向逐个分流；k≤2 的组仍每口一链（并带省下的带子抵不过零件与短带）。完整版 seed 47742：布线失败 73 → 58（-20.5%）、带 37358 → 35422（-5.2%）、建筑 806 → 787、色料机 265 → 225、合流器 17 台、分流器 4 台；demo 输出与 `plan-all.svg` 字节不变（试玩版无分流器 → 自动退回每口一链）；`bun run test` 224 checks 0 failure；`check:tunnels` demo 48/48、full 713 routed / 58 gaps / 1447 spans | L5 | `bun run cli all 47742 --set=full`、`bun run cli all 47742`（demo）、`bun run check:tunnels`、`bun run test`、`bun work/gap-census.ts` | 已证（实测） | routing-gaps 方案 1 第一版；剩余失败以中心 16 条、厂内 12 条为主 |
+
 ## 重放
 
 ```bash
 bun run test                           # 全部检查，含解锁等级、布线判据与缩略图表示
 bun run check:tunnels                  # 隧道合法性普查：full 396/809、demo 46/48，违规计数全 0
 bun run bench:key                      # tile 键表示：数字键 ~16× 于 "x|y" 字符串（F19/F20）
+bun run bench:router                   # 自制地图：随机密度阶梯、--mode=factory / --mode=chain
 bun run cli all 47742 --until=9        # 13 种可建 / 26 种需求（试玩版）
 bun run cli all 47742 --set=full       # 34 种：928 个合法隧道跨度（check:tunnels 复核）
 bun run cli solve "RpRp----"           # 色料链必须出现混色器
