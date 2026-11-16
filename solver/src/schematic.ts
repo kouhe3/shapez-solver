@@ -148,18 +148,6 @@ function silhouette(
     return out;
 }
 
-/** filled triangle whose tip sits at (cx, cy) and points along `deg` (0 = +x, 90 = +y) */
-function arrowHead(cx: number, cy: number, len: number, deg: number, fill: string = INK.line): string {
-    const a = (deg * Math.PI) / 180;
-    const cos = Math.cos(a);
-    const sin = Math.sin(a);
-    const bx = cx - cos * len;
-    const by = cy - sin * len;
-    const hx = -sin * len * 0.55;
-    const hy = cos * len * 0.55;
-    return `<path d="M ${r2(cx)} ${r2(cy)} L ${r2(bx + hx)} ${r2(by + hy)} L ${r2(bx - hx)} ${r2(by - hy)} Z" fill="${fill}"/>`;
-}
-
 /** SVG path through the routed cells, with collinear runs collapsed */
 function polylinePath(pts: Array<[number, number]>, x1: number, y1: number, x2: number, y2: number): string {
     const all: Array<[number, number]> = [[x1, y1], ...pts, [x2, y2]];
@@ -451,9 +439,10 @@ export function schematicSVG(
         const deg = b.rot * 90;
         if (deg) out.push(`<g transform="rotate(${deg} ${r2(cx)} ${r2(cy)})">`);
         out.push(silhouette(b.kind, b.detail, ux, uy, info.w * t, info.h * t));
-        // ports: in = socket, out = arrow tab pointing away from the body.
-        // The trash can takes items on all four sides, so its markers would
-        // just be a ring of dots — the belt lines already show where it feeds.
+        // inputs: one socket per port. Outputs are left unmarked — the belt
+        // band already leaves from the port, and a marker there reads as a
+        // direction arrow lying on the belt. The trash can takes items on all
+        // four sides, so its sockets would just be a ring of dots.
         const showPorts = b.kind !== "trash";
         (showPorts ? info.ins || [] : []).forEach((port, i) => {
             const x = ux + port.x * t;
@@ -469,15 +458,6 @@ export function schematicSVG(
                     )}" rx="${r2(ps * 0.22)}" fill="${INK.line}"/>`
                 );
             }
-        });
-        (showPorts ? info.outs || [] : []).forEach((port) => {
-            const x = ux + port.x * t;
-            const y = uy + port.y * t;
-            const dx = port.x - info.w / 2;
-            const dy = port.y - info.h / 2;
-            const angle = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 0 : 180) : dy >= 0 ? 90 : -90;
-            const a = (angle * Math.PI) / 180;
-            out.push(arrowHead(x + Math.cos(a) * t * 0.14, y + Math.sin(a) * t * 0.14, t * 0.3, angle));
         });
         if (deg) out.push(`</g>`);
     }
@@ -508,9 +488,7 @@ export function schematicSVG(
     legend.push(
         `<rect x="${lx + 1}" y="${ly - 9}" width="7" height="7" rx="1.5" fill="${INK.line}"/><text x="${lx + 22}" y="${ly}">输入口</text>`
     );
-    ly += 16;
-    legend.push(`${arrowHead(lx + 10, ly - 5, 9, 0)}<text x="${lx + 22}" y="${ly}">输出口</text>`);
-    ly += 14;
+    ly += 18;
     legend.push(
         `<rect x="${lx + 1}" y="${ly - 10}" width="7" height="7" fill="${TUNNEL_SENDER}"/><rect x="${lx + 9}" y="${ly - 10}" width="7" height="7" fill="${TUNNEL_RECEIVER}"/><text x="${lx + 22}" y="${ly}">隧道：蓝=入口 绿=出口</text>`
     );

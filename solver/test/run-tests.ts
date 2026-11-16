@@ -974,6 +974,25 @@ beginSection("schematic (game chunk-overview representation)");
     // the legend swatch carries the same fill but no transform
     check("one span → one sender", spanSvg.split('fill="#6d9dff" transform=').length - 1, 1);
     check("one span → one receiver", spanSvg.split('fill="#71ff9c" transform=').length - 1, 1);
+
+    // no output tab is drawn: the belt band already leaves from the port, and
+    // a triangle tab there read as a direction arrow lying on the belt
+    const cutLayout: SchematicLayout = {
+        hub: { x: 0, y: 0 },
+        buildings: [
+            { step: "c1", stepId: "c1", kind: "cutHalf", zh: "切割机", x: 0, y: 0, w: 2, h: 1, rot: 0 },
+        ],
+        connections: [],
+        beltEstimate: 0,
+    };
+    const cutSvg = schematicSVG(cutLayout, [], { tile: 30 });
+    // a triangle is a three-point path; the sheet must not carry any
+    check(
+        "no output arrow tabs drawn",
+        cutSvg.match(/<path d="M [\d.-]+ [\d.-]+ L [\d.-]+ [\d.-]+ L [\d.-]+ [\d.-]+ Z"/g),
+        null
+    );
+    check("legend no longer lists an output port", cutSvg.includes("输出口"), false);
 }
 
 if (!quick) {
