@@ -35,9 +35,6 @@ export function isMixedColor(color: ColorChar): boolean {
     return MIXED_COLOR_TABLE[color] === true;
 }
 
-/** the parts a colour chain is built from */
-export const COLOR_OP_LABELS: Record<"base" | "mixer", string> = { base: "采矿机", mixer: "混色器" };
-
 export function mixColor(a: ColorChar, b: ColorChar): ColorChar {
     return BITS_COLOR[(COLOR_BITS[a] || 0) | (COLOR_BITS[b] || 0)] ?? "u";
 }

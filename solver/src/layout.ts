@@ -12,7 +12,9 @@
 
 import * as P from "./plan.js";
 import { SOURCE_RATE } from "./rates.js";
-import { COLOR_NEEDS, COLOR_OP_LABELS, colorChain, colorChains } from "./color.js";
+import { BUILDING_NAMES } from "./catalogue.js";
+import type { BuildingKind } from "./catalogue.js";
+import { COLOR_NEEDS, colorChain, colorChains } from "./color.js";
 import type { ColorChain } from "./color.js";
 import type { ColorChar } from "./shape.js";
 import type { MapItem, Patch } from "./map.js";
@@ -74,13 +76,9 @@ function rotatePoint(x: number, y: number, w: number, h: number, rot: Rot): [num
 export interface BuildingInfo {
     w: number;
     h: number;
-    zh: string;
     ins: Port[];
     outs: Port[];
 }
-
-/** every part this solver places: a plan op, a mixer, or a trash can */
-export type BuildingKind = P.PlanOp | "mixer" | "trash" | "splitter" | "merger";
 
 /* ------------------------------------------------------------------ *
  * the map: deposits and the shared placement state
@@ -434,21 +432,18 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     base: {
         w: 1,
         h: 1,
-        zh: "采矿机",
         ins: [],
         outs: [{ x: 0.5, y: 0 }],
     },
     rotate: {
         w: 1,
         h: 1,
-        zh: "旋转器",
         ins: [{ x: 0.5, y: 1 }],
         outs: [{ x: 0.5, y: 0 }],
     },
     cutHalf: {
         w: 2,
         h: 1,
-        zh: "切割机",
         ins: [{ x: 0.5, y: 1 }],
         outs: [
             { x: 0.5, y: 0 },
@@ -458,7 +453,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     cutQuad: {
         w: 4,
         h: 1,
-        zh: "四向切割机",
         ins: [{ x: 0.5, y: 1 }],
         outs: [
             { x: 0.5, y: 0 },
@@ -470,7 +464,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     stack: {
         w: 2,
         h: 1,
-        zh: "堆叠器",
         ins: [
             { x: 0.5, y: 1 },
             { x: 1.5, y: 1 },
@@ -480,7 +473,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     paint: {
         w: 2,
         h: 1,
-        zh: "上色器",
         ins: [
             { x: 0, y: 0.5 },
             { x: 1.5, y: 0, kind: "color" },
@@ -490,7 +482,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     paint4: {
         w: 4,
         h: 1,
-        zh: "四色上色器",
         ins: [
             { x: 0, y: 0.5 },
             { x: 0.5, y: 1, kind: "color" },
@@ -503,7 +494,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     mixer: {
         w: 2,
         h: 1,
-        zh: "混色器",
         ins: [
             { x: 0.5, y: 1, kind: "color" },
             { x: 1.5, y: 1, kind: "color" },
@@ -517,7 +507,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     splitter: {
         w: 1,
         h: 1,
-        zh: "分流器",
         ins: [{ x: 0.5, y: 1 }],
         outs: [
             { x: 0.5, y: 0 },
@@ -527,7 +516,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     merger: {
         w: 1,
         h: 1,
-        zh: "合流器",
         ins: [
             { x: 0.5, y: 1 },
             { x: 1, y: 0.5 },
@@ -540,7 +528,6 @@ export const BUILDING_INFO: Record<BuildingKind, BuildingInfo> = {
     trash: {
         w: 1,
         h: 1,
-        zh: "垃圾桶",
         ins: [
             { x: 0.5, y: 0 },
             { x: 1, y: 0.5 },
@@ -1271,17 +1258,17 @@ export function planBom(flat: PlanTree, chains: ColorChain[] = colorChains(flat.
         if (step.fuseInto) continue;
         const info = BUILDING_INFO[step.op];
         if (!info) continue;
-        add(info.zh);
+        add(BUILDING_NAMES[step.op]);
         if (info.outs.length > 1) {
             // only the slots somebody belts away are used; a fused cutter can
             // have two or more of them
             let used = consumers.get(step.id) ? 1 : 0;
             for (const alias of aliases.get(step.id) || []) if (consumers.get(alias)) used += 1;
-            add(BUILDING_INFO.trash.zh, info.outs.length - used);
+            add(BUILDING_NAMES.trash, info.outs.length - used);
         }
     }
     for (const chain of chains) {
-        for (const op of chain.ops) add(op.kind === "mixer" ? COLOR_OP_LABELS.mixer : COLOR_OP_LABELS.base);
+        for (const op of chain.ops) add(op.kind === "mixer" ? BUILDING_NAMES.mixer : BUILDING_NAMES.base);
     }
     return [...bom.entries()].map(([zh, n]) => ({ zh, n }));
 }
@@ -1568,8 +1555,8 @@ export function buildLayout({
                 toHub: false,
                 merged: false,
                 slot: q.inSlot,
-                fromLabel: sInfo.zh,
-                toLabel: dInfo.zh,
+                fromLabel: BUILDING_NAMES[src.kind],
+                toLabel: BUILDING_NAMES[dst.kind],
                 outSlot: q.outSlot,
                 outCount: sInfo.outs.length,
                 x1,
@@ -1629,7 +1616,7 @@ export function buildLayout({
                 toHub: !!q.toHub,
                 merged: mergeInto,
                 slot,
-                fromLabel: sInfo.zh,
+                fromLabel: BUILDING_NAMES[src.kind],
                 toLabel,
                 outSlot: q.outSlot,
                 outCount: sInfo.outs.length,
@@ -1705,7 +1692,7 @@ export function buildLayout({
         const [ix, iy] = portCentre(dInfo, inPort, dst.rot);
         const goal = portCells(dInfo, dst.x, dst.y, dst.rot)[q.inSlot]!;
         const goalApproach = portApproachCells(dInfo, dst.x, dst.y, dst.rot)[q.inSlot] || null;
-        return finish(goal, dst.x + ix, dst.y + iy, dst.stepId, dInfo.zh, q.inSlot, false, null, goalApproach);
+        return finish(goal, dst.x + ix, dst.y + iy, dst.stepId, BUILDING_NAMES[dst.kind], q.inSlot, false, null, goalApproach);
     }
 
     /**
@@ -1867,7 +1854,7 @@ export function buildLayout({
                     step: `color:${op.color}:miner#${serial}`,
                     stepId: `${idPrefix}color:${op.color}:miner#${serial}`,
                     kind: "base",
-                    zh: "采矿机",
+                    zh: BUILDING_NAMES.base,
                     x: found.x,
                     y: found.y,
                     w: 1,
@@ -1916,7 +1903,7 @@ export function buildLayout({
                     step: "",
                     stepId: "",
                     kind: "mixer",
-                    zh: info.zh,
+                    zh: BUILDING_NAMES.mixer,
                     x: candidate.x,
                     y: candidate.y,
                     w: info.w,
@@ -1954,7 +1941,7 @@ export function buildLayout({
                 step: `color:${op.color}:mixer#${serial}`,
                 stepId: `${idPrefix}color:${op.color}:mixer#${serial}`,
                 kind: "mixer",
-                zh: info.zh,
+                zh: BUILDING_NAMES.mixer,
                 x: pos.x,
                 y: pos.y,
                 w: info.w,
@@ -2025,7 +2012,7 @@ export function buildLayout({
                     step: `merger:${color}#${++colorSerial}`,
                     stepId: `${idPrefix}merger:${color}#${colorSerial}`,
                     kind: "merger",
-                    zh: info.zh,
+                    zh: BUILDING_NAMES.merger,
                     x: spot.x,
                     y: spot.y,
                     w: 1,
@@ -2061,7 +2048,7 @@ export function buildLayout({
                 step: `splitter:${color}#${++colorSerial}`,
                 stepId: `${idPrefix}splitter:${color}#${colorSerial}`,
                 kind: "splitter",
-                zh: info.zh,
+                zh: BUILDING_NAMES.splitter,
                 x: spot.x,
                 y: spot.y,
                 w: 1,
@@ -2147,7 +2134,7 @@ export function buildLayout({
             step: step.id,
             stepId: idPrefix + step.id,
             kind: "base",
-            zh: "采矿机",
+            zh: BUILDING_NAMES.base,
             x: found.x,
             y: found.y,
             w: 1,
@@ -2225,7 +2212,7 @@ export function buildLayout({
                     step: step.id,
                     stepId: idPrefix + step.id,
                     kind: step.op,
-                    zh: info.zh,
+                    zh: BUILDING_NAMES[step.op],
                     x,
                     y,
                     w: size.w,
@@ -2414,7 +2401,7 @@ export function buildLayout({
                 step: `trash:${step.id}:${slot}`,
                 stepId: `${idPrefix}trash:${step.id}:${slot}`,
                 kind: "trash",
-                zh: "垃圾桶",
+                zh: BUILDING_NAMES.trash,
                 x: cell.x,
                 y: cell.y,
                 w: 1,

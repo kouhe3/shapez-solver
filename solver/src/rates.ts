@@ -12,6 +12,7 @@
  */
 
 import type { PlanOp } from "./plan.js";
+import { BUILDING_NAMES } from "./catalogue.js";
 
 /** the only field a rate reads off a plan step */
 export interface RatedStep {
@@ -52,18 +53,6 @@ export const STEP_RATE: Record<PlanOp | "mixer", number> = {
     mixer: 0.4,
 };
 
-/** Chinese label per kind, for the bottleneck line */
-const KIND_ZH: Record<PlanOp | "mixer", string> = {
-    base: "采矿机",
-    cutHalf: "切割机",
-    cutQuad: "四向切割机",
-    rotate: "旋转器",
-    stack: "堆叠器",
-    paint: "上色器",
-    paint4: "四色上色器",
-    mixer: "混色器",
-};
-
 /**
  * A factory is one chain: every machine sees every item, so the slowest machine
  * sets the output rate. `steps` is a flattened plan (`plan.js` `flatten`).
@@ -84,7 +73,7 @@ export function bottleneck(steps: readonly RatedStep[]): Bottleneck | null {
     for (const step of steps) {
         const r = STEP_RATE[step.op];
         if (r === undefined) continue;
-        if (!worst || r < worst.rate) worst = { op: step.op, zh: KIND_ZH[step.op] || step.op, rate: r };
+        if (!worst || r < worst.rate) worst = { op: step.op, zh: BUILDING_NAMES[step.op], rate: r };
     }
     return worst;
 }

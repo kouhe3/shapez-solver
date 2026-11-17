@@ -66,6 +66,7 @@ shape code string
 - `SheetView` (`campaign.ts:188`) is the sheet's whole interface: hub, buildings, connections, sources, colours, missing resources, routing gaps, belt count, BOM, one frame per factory. `Layout` stays the single-factory type — the sheet is not a fake `Layout` and carries no `world`.
 - Whoever moves a run writes its derived fields (`path`, `tunnelSpans`, `tunnelCells`, `beltTiles`) — `buildLayout` and the repair pass alike. The sheet only sums `beltTiles`; nothing re-derives a path from the world. Colour sources are counted from `Placement.color` (miners and mixers), never from synthetic step ids.
 - `validateSheet` (`solver/src/validate.ts`) answers "would this stand up in the game" from the drawing alone: span length and straight ends, port facing, hijack, crossings, and tile ownership (one belt, one tunnel end, one direction per tile). It re-derives every rule itself — never `routeBelt`'s state, never `World`; the census is its production adapter, and tests corrupt a real layout to prove it bites.
+- Names are one table: `catalogue.ts` owns the three id spaces (`BuildingKind`, `PlanOp`, `BuildingId`), the ordered `BUILDING_KINDS` both legends draw, `BUILDING_NAMES`, and the unlock ids' `GAME_BUILDING_NAMES` (rotater variants derive from the base name). Drawings, BOM lines, bottleneck labels, the CLI and the UI read it; `BUILDING_INFO` carries geometry only, and `Placement.zh` is a copy filled from the catalogue when the sheet is built.
 - `--until=N` is a **snapshot**, not an incremental build plan: factories above the cap are deferred and not laid out, nothing is reserved for them, and block positions come from greedy allocation over the set actually built (F35). Measured on the demo set: cap=1 lays out 2 blocks (coincidentally at their full-sheet positions), cap=5 moves `--CuCu--` from `[-63,-18]` to `[57,0]`.
 - `beltEstimate` counts routed belt cells (tunnel ends count, underground cells do not). Belts, orientation, throughput and wire logic are **not modelled**; the rate numbers are estimates.
 
@@ -165,12 +166,13 @@ Gotchas:
 
 Touch all of:
 
-1. `plan.ts`: node interface + union (`31-88`), cost-carrying builder (`102-129`), `evalNode` case (`137-177`), labels (`183-201`), `flatten` detail case (`245-273`), `evalKey` case (`290-308`).
-2. `solver.ts`: `ALL_BUILDINGS` (`30-39`), `ROTATION_BUILDING` if rotater-like (`46-50` / `hasRotation`), the gate checks in `planShape`.
-3. `layout.ts`: `BUILDING_INFO` is an exhaustive `Record<BuildingKind,…>` so TS forces the entry (`413-508`); extend `outputSlot` for multi-output machines (`578-583`).
-4. `rates.ts`: exhaustive `STEP_RATE` (`44-53`) and `KIND_ZH` (`56-65`).
-5. `campaign.ts`: exhaustive `OP_BUILDING` (`27-35`) + `levelOfPlan` (`192-217`); `levels.ts` `REWARD_BUILDINGS` / `availableLevels` for the unlock level.
-6. `schematic.ts`: hand lists `ALL_KINDS` (`34-44`), `KIND_COLOR` (`87-97`, fallback `131`), `OVERLAY` (`105-108`).
+1. `catalogue.ts`: the `BuildingKind` union, `BUILDING_KINDS` in legend order, `BUILDING_NAMES`; add the unlock id to `GAME_BUILDING_NAMES` when `ALL_BUILDINGS` grows — both records are exhaustive, so TS forces it.
+2. `plan.ts`: node interface + union, cost-carrying builder, `evalNode` case, `flatten` detail case, `evalKey` case.
+3. `solver.ts`: `ALL_BUILDINGS`, `ROTATION_BUILDING` if rotater-like (`hasRotation`), the gate checks in `planShape`.
+4. `layout.ts`: `BUILDING_INFO` is an exhaustive `Record<BuildingKind,…>` so TS forces the geometry entry; extend `outputSlot` for multi-output machines.
+5. `rates.ts`: exhaustive `STEP_RATE`.
+6. `campaign.ts`: exhaustive `OP_BUILDING` + `levelOfPlan`; `levels.ts` `REWARD_BUILDINGS` / `availableLevels` for the unlock level.
+7. `schematic.ts`: `KIND_COLOR` and `OVERLAY` — the drawing's own paint, not the vocabulary.
 
 ### Adding a decomposition strategy
 
@@ -183,6 +185,7 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 |`solver/src/shape.ts`|The algebra: parse (`:150`), hash (`:225`), cut (`:291-295`), stack (`:309`), paint (`:374`). A change propagates everywhere.|
 |`solver/src/plan.ts`|Plan AST (`:31-88`), builders (`:102-129`), `evalNode` (`:137`), `flatten` (`:227`), `verifyPlan` (`:322`), `parseTarget` (`:338`), `planToJSON` (`:358`).|
 |`solver/src/solver.ts`|Candidate families and budgets (`:199-200`), `planShape` (`:581`), `solve` (`:740`).|
+|`solver/src/catalogue.ts`|`BuildingKind`, `BUILDING_KINDS`, `BUILDING_NAMES`, `GAME_BUILDING_NAMES`: the only place a machine gets a name.|
 |`solver/src/layout.ts`|`BUILDING_INFO` port table (`:443`), `routeBelt` (`:693`), `patchCellsByCentre` (`:967`), `allocateBlock` (`:1096`), `expandPlanTree` (`:1226`), `buildLayout` (`:1336`), `buildColorChain` (`:1864`). One factory per call.|
 |`solver/src/campaign.ts`|`planCampaign` (`:282`), `SheetView` (`:188`): the sheet module — per-shape solve + layout, the world it owns, campaign-level repair (`repairRoutingGaps` `:784`), throughput, colour gaps, belt ledger.|
 |`solver/src/validate.ts`|`validateSheet` + `VIOLATION_KINDS`: sheet legality from the drawing (spans, turns, port facing, hijack, tile ownership). Independent of `routeBelt` and `World`.|

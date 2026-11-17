@@ -11,8 +11,6 @@
  */
 
 import * as S from "./src/shape.js";
-import * as P from "./src/plan.js";
-import type { PlanStep } from "./src/plan.js";
 import { shapeASCII } from "./src/render.js";
 import { solve, ALL_BUILDINGS } from "./src/solver.js";
 import type { SolveSuccess } from "./src/solver.js";
@@ -27,6 +25,7 @@ import { planCampaign } from "./src/campaign.js";
 import { formatRate, formatDuration, HUB_ENTRIES } from "./src/rates.js";
 import { colorChains } from "./src/color.js";
 import { planBom, expandPlanTree } from "./src/layout.js";
+import { BUILDING_NAMES } from "./src/catalogue.js";
 import { initRouterWasm } from "./src/router-engine.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -67,11 +66,6 @@ function needSetName(name: string): NeedSetName {
     throw new Error(`unknown need set: ${name}`);
 }
 
-function label(step: PlanStep): string {
-    const zh = P.OP_LABELS[step.op] || step.op;
-    return zh;
-}
-
 function printPlan(res: SolveSuccess): void {
     const flat = res.flat;
     console.log(`目标: ${S.hash(res.target)}`);
@@ -85,7 +79,7 @@ function printPlan(res: SolveSuccess): void {
                 ? "按象限上色: " + step.node.colors.map((c) => c || "-").join("/")
                 : step.detail;
         console.log(
-            `  ${step.id.padEnd(idWidth)}  ${label(step).padEnd(6)}  ${String(inputs).padEnd(9)}  ${String(
+            `  ${step.id.padEnd(idWidth)}  ${BUILDING_NAMES[step.op].padEnd(6)}  ${String(inputs).padEnd(9)}  ${String(
                 detail
             ).padEnd(24)}  => ${step.outKey}`
         );
@@ -151,7 +145,7 @@ function cmdSolve(): void {
                         ? res.flat.steps.map((s) => ({
                               id: s.id,
                               op: s.op,
-                              building: P.OP_LABELS[s.op],
+                              building: BUILDING_NAMES[s.op],
                               inputs: s.inputs.map((i) => i.id),
                               detail: s.detail,
                               out: s.outKey,

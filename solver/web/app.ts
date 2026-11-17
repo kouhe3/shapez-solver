@@ -20,48 +20,13 @@ import type { NeedSetName } from "../src/needs.js";
 import type { CampaignResult } from "../src/campaign.js";
 import { colorChains } from "../src/color.js";
 import { planBom, expandPlanTree, fuseCuts, fusedCost } from "../src/layout.js";
-import type { BuildingKind, PlanTree } from "../src/layout.js";
+import type { PlanTree } from "../src/layout.js";
 import type { CampaignJob, CampaignReply } from "./worker.js";
+import { BUILDING_KINDS, BUILDING_NAMES, GAME_BUILDING_NAMES } from "../src/catalogue.js";
+import type { BuildingKind } from "../src/catalogue.js";
 
-const BUILDING_LABELS: Record<string, string> = {
-    cutter: "切割机",
-    quadCutter: "四向切割机",
-    rotaterCW: "旋转器 (顺时针)",
-    rotaterCCW: "旋转器 (逆时针)",
-    rotater180: "旋转器 (180°)",
-    stacker: "堆叠器",
-    painter: "上色器",
-    quadPainter: "四色上色器",
-};
-
-/** layout building kinds, in the order the legend shows them */
-const KIND_ORDER: BuildingKind[] = [
-    "base",
-    "cutHalf",
-    "cutQuad",
-    "rotate",
-    "stack",
-    "paint",
-    "paint4",
-    "mixer",
-    "splitter",
-    "merger",
-    "trash",
-];
-
-const KIND_LABELS: Record<BuildingKind, string> = {
-    base: "采矿机",
-    cutHalf: "切割机",
-    cutQuad: "四向切割机",
-    rotate: "旋转器",
-    stack: "堆叠器",
-    paint: "上色器",
-    paint4: "四色上色器",
-    mixer: "混色器",
-    splitter: "分流器",
-    merger: "合并器",
-    trash: "垃圾桶",
-};
+/** the unlock list also spells parts the layout never names (balancer, tunnel) */
+const gameBuildingLabel = (id: string): string => (GAME_BUILDING_NAMES as Record<string, string>)[id] ?? id;
 
 /** every id passed here exists in index.html; a missing one is a bug, not a state */
 function mustGet<T extends HTMLElement>(id: string): T {
@@ -242,7 +207,7 @@ function renderBuildings(): void {
             updateSolveState();
         });
         label.appendChild(cb);
-        label.appendChild(document.createTextNode(BUILDING_LABELS[b] || b));
+        label.appendChild(document.createTextNode(gameBuildingLabel(b)));
         buildingList.appendChild(label);
     }
 }
@@ -287,7 +252,7 @@ function onLevelChange(): void {
     setBuildings(buildings);
     levelHint.textContent =
         `第 ${lvl.level} 关需要 ${lvl.required} 个；可用建筑：` +
-        ([...buildings].map((b) => BUILDING_LABELS[b] || b).join("、") || "仅采矿机");
+        ([...buildings].map(gameBuildingLabel).join("、") || "仅采矿机");
     onInputChanged();
 }
 
@@ -518,7 +483,7 @@ function buildRecipeItems(flat: PlanTree): RecipeItem[] {
                 kind: "plan",
                 step: rep,
                 outlets: [],
-                title: `${key} · ${P.OP_LABELS[rep.op] ?? rep.op}`,
+                title: `${key} · ${BUILDING_NAMES[rep.op]}`,
                 detail: rep.detail,
                 inputs: [],
                 wave: 0,
@@ -1034,7 +999,7 @@ async function renderPlan(res: SolveResult): Promise<void> {
     for (const [op, n] of counts) {
         const chip = document.createElement("span");
         chip.className = "chip";
-        chip.textContent = `${P.OP_LABELS[op] || op} ×${n}`;
+        chip.textContent = `${BUILDING_NAMES[op]} ×${n}`;
         resultMeta.appendChild(chip);
     }
 
@@ -1269,9 +1234,9 @@ function legendRow(color: string, label: string): string {
 function renderSheetLegend(res: CampaignResult): void {
     const kinds = new Set<BuildingKind>(res.sheet.buildings.map((b) => b.kind));
     const parts: string[] = ["<h4>建筑</h4>"];
-    for (const kind of KIND_ORDER) {
+    for (const kind of BUILDING_KINDS) {
         if (!kinds.has(kind)) continue;
-        parts.push(legendRow(KIND_COLOR[kind] ?? "#dfe3ea", KIND_LABELS[kind]));
+        parts.push(legendRow(KIND_COLOR[kind] ?? "#dfe3ea", BUILDING_NAMES[kind]));
     }
     const res0 = MAP_THEME.resources;
     parts.push(`<div class="sep"></div><h4>资源</h4>`);

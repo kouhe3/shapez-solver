@@ -30,7 +30,8 @@ import {
     portApproachCells,
     rotatedSize,
 } from "../src/layout.js";
-import type { BuildingKind, Connection, Tile, World } from "../src/layout.js";
+import type { Connection, Tile, World } from "../src/layout.js";
+import type { BuildingKind } from "../src/catalogue.js";
 import { schematicSVG } from "../src/schematic.js";
 import type { SchematicLayout } from "../src/schematic.js";
 import { colorChain, colorChains } from "../src/color.js";

@@ -6,8 +6,10 @@
 
 import { COLOR_HEX, parse } from "./shape.js";
 import type { ColorChar, Shape } from "./shape.js";
+import { BUILDING_KINDS, BUILDING_NAMES } from "./catalogue.js";
+import type { BuildingKind } from "./catalogue.js";
 import { BUILDING_INFO } from "./layout.js";
-import type { BuildingKind, Connection, PlanFrame, Placement, Tile } from "./layout.js";
+import type { Connection, PlanFrame, Placement, Tile } from "./layout.js";
 import type { Patch } from "./map.js";
 import { shapeSVG } from "./render.js";
 import { formatRate } from "./rates.js";
@@ -30,20 +32,6 @@ export interface MapTheme {
     background: string;
     resources: { shape: string } & Partial<Record<ColorChar, string>>;
 }
-
-const ALL_KINDS: BuildingKind[] = [
-    "base",
-    "cutHalf",
-    "cutQuad",
-    "rotate",
-    "stack",
-    "paint",
-    "paint4",
-    "mixer",
-    "splitter",
-    "merger",
-    "trash",
-];
 
 // Values taken from the game itself so the sheet matches what the player sees:
 // themes/light.json for the map layer, MetaHubBuilding for the hub.
@@ -482,7 +470,7 @@ export function schematicSVG(
     const legend: string[] = [];
     legend.push(`<text x="${lx}" y="${ly}" font-weight="600">图例</text>`);
     ly += 18;
-    const kindsInUse = ALL_KINDS.filter((kind) => layout.buildings.some((b) => b.kind === kind));
+    const kindsInUse = BUILDING_KINDS.filter((kind) => layout.buildings.some((b) => b.kind === kind));
     for (const kind of kindsInUse) {
         // the same map-view block the drawing uses, so the legend is a key
         if (OVERLAY[kind] || kind === "rotate") {
@@ -492,7 +480,7 @@ export function schematicSVG(
                 `<rect x="${lx + 1}" y="${ly - 13}" width="24" height="13" fill="${KIND_COLOR[kind] || "#dfe3ea"}"/>`
             );
         }
-        legend.push(`<text x="${lx + 30}" y="${ly}">${esc(BUILDING_INFO[kind].zh)}</text>`);
+        legend.push(`<text x="${lx + 30}" y="${ly}">${esc(BUILDING_NAMES[kind])}</text>`);
         ly += 18;
     }
     legend.push(

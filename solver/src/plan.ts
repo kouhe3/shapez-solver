@@ -21,6 +21,7 @@ import {
     stack,
 } from "./shape.js";
 import type { ColorChar, Layer, Rotation, Shape, ShapeType } from "./shape.js";
+import { BUILDING_NAMES } from "./catalogue.js";
 import { colorChains } from "./color.js";
 import type { ColorChain } from "./color.js";
 
@@ -179,26 +180,6 @@ export function evalNode(node: PlanNode): Shape {
 /* ------------------------------------------------------------------ *
  * flattening (what the UI / CLI shows)
  * ------------------------------------------------------------------ */
-
-export const OP_LABELS: Record<PlanOp, string> = {
-    base: "采矿机",
-    rotate: "旋转器",
-    cutHalf: "切割机",
-    cutQuad: "四向切割机",
-    stack: "堆叠器",
-    paint: "上色器",
-    paint4: "四色上色器",
-};
-
-export const OP_LABELS_EN: Record<PlanOp, string> = {
-    base: "Extractor",
-    rotate: "Rotater",
-    cutHalf: "Cutter",
-    cutQuad: "Quad Cutter",
-    stack: "Stacker",
-    paint: "Painter",
-    paint4: "Quad Painter",
-};
 
 export interface PlanStep {
     id: string;
@@ -368,7 +349,7 @@ export function planToJSON(root: PlanNode): PlanJSON {
         steps: flat.steps.map((s) => ({
             id: s.id,
             op: s.op,
-            label: OP_LABELS[s.op],
+            label: BUILDING_NAMES[s.op],
             inputs: s.inputs.map((i) => i.id),
             detail: s.detail,
             out: s.outKey,
