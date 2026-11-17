@@ -37,6 +37,7 @@ import { colorChain, colorChains } from "../src/color.js";
 import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
+import { validateSheet } from "../src/validate.js";
 import { initRouterWasm } from "../src/router-engine.js";
 import { readFileSync } from "node:fs";
 
@@ -821,6 +822,56 @@ beginSection("campaign: one map, one hub, no overlaps");
     check("campaign: colour count is the coloured machines", paint.totals.throughput.builtSourceCount, chain.length);
     check("campaign: only miners and mixers carry a colour", [...new Set(chain.map((b) => b.kind))].sort(), ["base", "mixer"]);
     check("campaign: a covered colour needs no extra source", paint.totals.throughput.colorGap, []);
+    check("campaign: the sheet is legal as drawn", validateSheet(res.sheet), []);
+}
+
+beginSection("sheet: the drawing validates, and the checker sees damage");
+{
+    const scan = scanForTypes(47742, { types: requiredTypes(neededShapes({ set: "demo" })), startRadius: 8, maxRadius: 32 });
+    const solved = solve("CrCrCrCr", { maxAttempts: 30000, buildings: new Set(ALL_BUILDINGS) });
+    // hub at the map origin is what the CLI and the campaign use; the colour
+    // miner's belt crosses the painter's leg here, so the fixture has a tunnel
+    const layout = buildLayout({ plan: solved.plan!, patches: scan.patches, hub: { x: -2, y: -2 } });
+    const tunnel = layout.connections.findIndex((c) => c.tunnelSpans.length > 0);
+    checkTrue("fixture: the layout has one tunnel to corrupt", tunnel >= 0);
+    check("fixture: legal as drawn", validateSheet(layout), []);
+
+    const crossing = structuredClone(layout);
+    crossing.connections[tunnel]!.tunnelCells.push({ x: 0, y: 0 });
+    check(
+        "checker: a crossing off the underground run",
+        validateSheet(crossing).map((v) => [v.kind, v.connection, v.tile?.x, v.tile?.y]),
+        [["staleCrossing", tunnel, 0, 0]]
+    );
+
+    const overlap = structuredClone(layout);
+    const beltPath = overlap.connections[0]!.path!;
+    beltPath.push({ ...beltPath[3]! });
+    check(
+        "checker: a run that visits a tile twice",
+        validateSheet(overlap).map((v) => [v.kind, v.connection]),
+        [["selfOverlap", 0]]
+    );
+
+    const clash = structuredClone(layout);
+    const shared = clash.connections[0]!.path![3]!;
+    clash.connections[1]!.path!.push({ x: shared.x, y: shared.y });
+    check(
+        "checker: two runs on one belt tile",
+        validateSheet(clash).map((v) => [v.kind, v.connection, v.other]),
+        [["tileClaimed", 1, 0]]
+    );
+
+    const turn = structuredClone(layout);
+    const conn = turn.connections[tunnel]!;
+    const span = conn.tunnelSpans[0]!;
+    const si = conn.path!.findIndex((p) => p.x === span.sender.x && p.y === span.sender.y);
+    conn.path![si - 1] = { x: span.sender.x, y: span.sender.y - 1 };
+    check(
+        "checker: a belt leaving a sender on a turn",
+        validateSheet(turn).map((v) => [v.kind, v.connection]),
+        [["senderTurn", tunnel]]
+    );
 }
 
 beginSection("layout: one cutter serves every output slot at once");
