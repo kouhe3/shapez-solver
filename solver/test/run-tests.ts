@@ -13,7 +13,7 @@ import { DEMO_LEVELS, FULL_LEVELS, buildingsForLevel, availableLevels } from "..
 import { generateChunk, scanMap, scanForTypes, availableResources, patchMinerCapacity } from "../src/map.js";
 import type { Patch } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
-import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
+import { decodeSavegame, encodeSavegame, compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import {
     BUILDING_INFO,
     expandPlanTree,
@@ -1244,6 +1244,11 @@ beginSection("savegame codec (lz + key/value interning)");
     check("compressObject roundtrip", back, sample);
     const text = JSON.stringify({ keys: ["a"], values: ["b"], data: { "#": 1 } });
     check("lz roundtrip", decompressX64(compressX64(text)), text);
+    const stored = encodeSavegame(sample);
+    check("encodeSavegame version byte", stored.charCodeAt(0), 1);
+    const reread = decodeSavegame(stored);
+    check("encodeSavegame writes the zero crc", reread.crc, "00000000");
+    check("encodeSavegame roundtrip", reread.payload, sample);
 }
 
 beginSection("savegame map info");
