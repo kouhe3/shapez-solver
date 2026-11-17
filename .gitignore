@@ -15,3 +15,6 @@
 # generated campaign sheets; plan-all.svg is tracked on purpose
 /plan-*.svg
 !/plan-all.svg
+
+# rust router build output
+/native/router/target/
