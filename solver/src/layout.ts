@@ -310,10 +310,6 @@ export interface PlanFrame {
 /** what `buildLayout` reports */
 export interface Layout {
     hub: Tile;
-    /** the shape this layout builds (campaign sheets) */
-    tag: string | null;
-    block: BlockRect | null;
-    world: World;
     buildings: Placement[];
     connections: Connection[];
     sources: LayoutSource[];
@@ -325,10 +321,6 @@ export interface Layout {
     beltEstimate: number;
     bom: BomEntry[];
     steps: P.PlanStep[];
-    /** dependency depth per step id */
-    depth: Map<string, number>;
-    /** campaign sheets only: one entry per factory */
-    plans?: PlanFrame[];
 }
 
 /** what `buildLayout` takes */
@@ -345,8 +337,6 @@ export interface BuildLayoutArgs {
     world?: World | null;
     /** namespaces step ids when several plans share a world */
     idPrefix?: string;
-    /** the target this layout builds (campaign sheets) */
-    tag?: string | null;
     /** may a belt cross another one (tunnel unlocked)? Before L6 every crossing is illegal */
     allowTunnels?: boolean;
     /** may colour ports of one factory share a net (splitter unlocked, L20)? */
@@ -1341,7 +1331,6 @@ export function buildLayout({
     blockHeight = 12,
     world = null,
     idPrefix = "",
-    tag = null,
     allowTunnels = true,
     allowColourNet = false,
 }: BuildLayoutArgs): Layout {
@@ -2584,9 +2573,6 @@ export function buildLayout({
 
     return {
         hub,
-        tag,
-        block,
-        world: shared,
         buildings,
         connections,
         sources,
@@ -2596,6 +2582,5 @@ export function buildLayout({
         beltEstimate,
         bom: [...bom.entries()].map(([zh, n]) => ({ zh, n })),
         steps: flat.steps,
-        depth,
     };
 }

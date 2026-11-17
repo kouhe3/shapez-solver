@@ -421,7 +421,6 @@ export function planCampaign({
             hub,
             world,
             idPrefix: `p${index}:`,
-            tag: need.code,
             allowTunnels,
             allowColourNet,
         });
