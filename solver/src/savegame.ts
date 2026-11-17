@@ -90,8 +90,12 @@ export function decodeSavegame(raw: string): DecodedSavegame {
 
 /** Reverse: pack a savegame payload back into the stored string form. */
 export function encodeSavegame(payload: unknown): string {
-    const json = compressObject(payload);
-    return "\x01crc32-00000000-" + compressX64(JSON.stringify(json));
+    // decodeSavegame decompresses first and then looks for the JSON body, so
+    // the header belongs inside the compressed text. The real header is
+    // `crc32` + 27 dashes + a trailing crc32; write zeroes in place of the
+    // checksum like the game's own "not computed" placeholder.
+    const header = "crc32" + "-".repeat(27) + "00000000";
+    return "\x01" + compressX64(header + JSON.stringify(compressObject(payload)));
 }
 
 /* ------------------------------------------------------------------ *
