@@ -1345,31 +1345,37 @@ function blockCollisions(world: World, x: number, y: number, width: number, heig
 const BLOCK_GAP = 4;
 
 /**
- * Block origin for one factory: the nearest window around the hub that no
- * deposit or existing building sits in, else the emptiest window seen. Windows
- * may overlap each other — only the buildings packed into them have to be
- * disjoint — so the grid is fine grained and ordered by distance.
+ * Block origin for one factory: the nearest window around `anchor` that no
+ * deposit or existing building sits in, else the emptiest window seen.
+ * `anchor` is a preferred window *origin*: the caller passes the hub itself
+ * (legacy) or the deposit centroid minus half a window, so the miner belt —
+ * the longest run in the factory — is as short as possible.
+ * Windows may overlap each other — only the buildings packed into them have
+ * to be disjoint — so the grid is fine grained and ordered by distance.
  */
-function allocateBlock(world: World, width: number, height: number): BlockRect | null {
-    const { hub } = world;
+function allocateBlock(world: World, width: number, height: number, anchor: Tile = world.hub): BlockRect | null {
     // tile the map with one window per factory plus a lane between neighbours,
     // so a long belt can pass between two factories instead of through one
     const stepX = width + BLOCK_GAP;
     const stepY = height + BLOCK_GAP;
     const reach = 12;
+    const legacy = anchor.x === world.hub.x && anchor.y === world.hub.y;
     const candidates: { dx: number; dy: number; d: number }[] = [];
     for (let dx = -reach; dx <= reach; dx++) {
         for (let dy = -reach; dy <= reach; dy++) {
-            if (!dx && !dy) continue;
+            // the hub itself is occupied: the legacy path never tried it
+            if (legacy && !dx && !dy) continue;
             candidates.push({ dx, dy, d: Math.abs(dx) * stepX + Math.abs(dy) * stepY });
         }
     }
     candidates.sort((a, b) => a.d - b.d || a.dx - b.dx || a.dy - b.dy);
+    const originX = Math.round(anchor.x);
+    const originY = Math.round(anchor.y);
     let best: BlockRect | null = null;
     let bestHits = Infinity;
     for (const c of candidates) {
-        const x = hub.x + c.dx * stepX;
-        const y = hub.y + c.dy * stepY;
+        const x = originX + c.dx * stepX;
+        const y = originY + c.dy * stepY;
         const hits = blockCollisions(world, x, y, width, height, bestHits);
         if (hits < bestHits) {
             bestHits = hits;
@@ -1379,6 +1385,39 @@ function allocateBlock(world: World, width: number, height: number): BlockRect |
     }
     if (best) world.blocks.push(best);
     return best;
+}
+
+/**
+ * The tile a factory should grow around: the average of the deposits its
+ * extractors will sit on (nearest matching patch per base step). With no
+ * deposits to anchor to — every base already placed, or a colour-only factory
+ * — the hub is the fallback.
+ */
+function factoryAnchor(world: World, flat: PlanTree): Tile {
+    const { hub } = world;
+    let sx = 0;
+    let sy = 0;
+    let n = 0;
+    for (const step of flat.steps) {
+        const node = step.node;
+        if (node.op !== "base") continue;
+        const code = node.code || `${node.type}u${node.type}u${node.type}u${node.type}u`;
+        let best: Patch | null = null;
+        let bestD = Infinity;
+        for (const patch of world.patches) {
+            if (patch.item.kind !== "shape" || patch.item.code !== code) continue;
+            const d = Math.hypot(patch.x - hub.x, patch.y - hub.y);
+            if (d < bestD) {
+                bestD = d;
+                best = patch;
+            }
+        }
+        if (!best) continue;
+        sx += best.x;
+        sy += best.y;
+        n += 1;
+    }
+    return n ? { x: Math.round(sx / n), y: Math.round(sy / n) } : hub;
 }
 
 /**
@@ -2336,7 +2375,19 @@ export function buildLayout({
     const lastDepth = byDepth.size ? Math.max(...byDepth.keys()) : 0;
     const neededHeight = Math.max(blockHeight, (lastDepth + extraRows) * 4 + 6);
     const hasProcessors = byDepth.size > 0;
-    const block = hasProcessors ? allocateBlock(shared, blockWidth, neededHeight) : null;
+    // grow the window around this factory's own deposits, not the hub: the
+    // miner belt is the one run that cannot be shortened afterwards. A shared
+    // colour net (L20) packs tightly enough that a moved window loses splits,
+    // so those factories keep the old hub-anchored window.
+    let anchor: Tile = shared.hub;
+    if (!allowColourNet) {
+        const centroid = factoryAnchor(shared, flat);
+        anchor = {
+            x: Math.round(centroid.x - blockWidth / 2),
+            y: Math.round(centroid.y - neededHeight / 2),
+        };
+    }
+    const block = hasProcessors ? allocateBlock(shared, blockWidth, neededHeight, anchor) : null;
     const blockX = block ? block.x : hub.x + 8;
     const blockY = block ? block.y : hub.y - 8;
 
@@ -2349,10 +2400,13 @@ export function buildLayout({
         if (node.op !== "base") continue;
         const type = node.type;
         const code = node.code || `${type}u${type}u${type}u${type}u`;
-        const found = placeExtractor(shared, (item) => item.kind === "shape" && item.code === code, {
-            x: hub.x + 2,
-            y: hub.y + 2,
-        });
+        // with a deposit-anchored window the mineral should also be the one
+        // nearest that window; a shared colour net keeps the legacy search
+        // around the hub so its packing stays bit-identical
+        const minerFrom = allowColourNet
+            ? { x: hub.x + 2, y: hub.y + 2 }
+            : { x: blockX + blockWidth / 2, y: blockY + neededHeight / 2 };
+        const found = placeExtractor(shared, (item) => item.kind === "shape" && item.code === code, minerFrom);
         if (!found) {
             missing.add(`shape:${code}`);
             sources.push({ step, missing: `地图上找不到 ${code} 矿脉`, patch: null });
