@@ -58,11 +58,13 @@ shape code string
 
 ### World, layout and campaign
 
-- `BUILDING_INFO` (`layout.ts:413`) is the single source of tile geometry: ports in tile units, y down, multi-output index = `ItemEjector` slot index. Tests align it against upstream.
-- `routeBelt` (`layout.ts:623`) is a Dijkstra over `(tile, phase, heading)`; phases 0 = surface, 1–4 = underground, 5 = surfaced. `MAX_UNDERGROUND = 4` = tiles strictly between ends (the game's 5-tile tier-0 span). `TunnelSpan`s are derived after the search; `claimRoute` commits exactly the tested run.
-- Tile keys are packed numbers `(x+4096)*8192+(y+4096)` (`cellKey`, `layout.ts:984`), ~16× faster than `"x|y"` strings for `World` lookups.
+- `BUILDING_INFO` (`layout.ts:443`) is the single source of tile geometry: ports in tile units, y down, multi-output index = `ItemEjector` slot index. Tests align it against upstream.
+- `routeBelt` (`layout.ts:693`) is a Dijkstra over `(tile, phase, heading)`; phases 0 = surface, 1–4 = underground, 5 = surfaced. `MAX_UNDERGROUND = 4` = tiles strictly between ends (the game's 5-tile tier-0 span). `TunnelSpan`s are derived after the search; `claimRoute` commits exactly the tested run.
+- Tile keys are packed numbers `(x+4096)*8192+(y+4096)` (`cellKey`, `layout.ts:957`), ~16× faster than `"x|y"` strings for `World` lookups.
 - The hub is 4×4 with 16 outside entry tiles (`HUB_ENTRIES = 16` in `rates.ts:41`); see *Hub and sustained demand* below.
-- `planCampaign` (`campaign.ts:235`): per need → `solve` → `buildLayout` in its own block (`allocateBlock`, `layout.ts:1113`) → collect placements / connections / colour chains / BOM → throughput and gap accounting. One shared `World` for all factories.
+- `planCampaign` (`campaign.ts:282`): per need → `solve` → `buildLayout` in its own block (`allocateBlock`, `layout.ts:1096`) → collect placements / connections / colour chains / BOM → campaign-level repair (`repairRoutingGaps`, `campaign.ts:784`) → one belt/colour ledger. One shared `World` for all factories, created and owned by this module; it never leaves the seam.
+- `SheetView` (`campaign.ts:188`) is the sheet's whole interface: hub, buildings, connections, sources, colours, missing resources, routing gaps, belt count, BOM, one frame per factory. `Layout` stays the single-factory type — the sheet is not a fake `Layout` and carries no `world`.
+- Whoever moves a run writes its derived fields (`path`, `tunnelSpans`, `tunnelCells`, `beltTiles`) — `buildLayout` and the repair pass alike. The sheet only sums `beltTiles`; nothing re-derives a path from the world. Colour sources are counted from `Placement.color` (miners and mixers), never from synthetic step ids.
 - `--until=N` is a **snapshot**, not an incremental build plan: factories above the cap are deferred and not laid out, nothing is reserved for them, and block positions come from greedy allocation over the set actually built (F35). Measured on the demo set: cap=1 lays out 2 blocks (coincidentally at their full-sheet positions), cap=5 moves `--CuCu--` from `[-63,-18]` to `[57,0]`.
 - `beltEstimate` counts routed belt cells (tunnel ends count, underground cells do not). Belts, orientation, throughput and wire logic are **not modelled**; the rate numbers are estimates.
 
@@ -100,10 +102,10 @@ Run from the repo root; every script below is defined in `package.json`.
 # Setup + gates
 bun install                    # once: the single devDependency (@types/bun)
 bun run verify                 # bun check + full suite — primary gate (~2 s)
-bun run test                   # 215 checks, 0 failure, ~1.6 s
-bun run test:quick             # 180 checks, skips both level loops, ~1.2 s
+bun run test                   # 254 checks, 0 failure, ~2.1 s
+bun run test:quick             # 219 checks, skips both level loops, ~1.3 s
 bun run test --filter=router   # 23 checks, 192 skipped
-bun run check:tunnels          # campaign tunnel legality, ~15-17 s (not in verify)
+bun run check:tunnels          # campaign tunnel legality, ~31 s full (not in verify)
 bun run check:filter           # harness self-check, ~48 s (not in verify)
 bun run bench:key              # tile-key microbenchmark, ~3 s (ratio ~16-18x)
 bun run build:router           # cargo: rebuild solver/router.wasm
@@ -180,8 +182,8 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 |`solver/src/shape.ts`|The algebra: parse (`:150`), hash (`:225`), cut (`:291-295`), stack (`:309`), paint (`:374`). A change propagates everywhere.|
 |`solver/src/plan.ts`|Plan AST (`:31-88`), builders (`:102-129`), `evalNode` (`:137`), `flatten` (`:227`), `verifyPlan` (`:322`), `parseTarget` (`:338`), `planToJSON` (`:358`).|
 |`solver/src/solver.ts`|Candidate families and budgets (`:199-200`), `planShape` (`:581`), `solve` (`:740`).|
-|`solver/src/layout.ts`|`BUILDING_INFO` port table (`:413`), `routeBelt` (`:623`), `expandPlanTree` (`:1157`), `buildLayout` (`:1231`), `allocateBlock` (`:1113`), `buildColorChain` (`:1657`), campaign-level `repairRoutingGaps`.|
-|`solver/src/campaign.ts`|`planCampaign` (`:235`): per-shape solve + layout, throughput, colour gaps, routing gaps.|
+|`solver/src/layout.ts`|`BUILDING_INFO` port table (`:443`), `routeBelt` (`:693`), `patchCellsByCentre` (`:967`), `allocateBlock` (`:1096`), `expandPlanTree` (`:1226`), `buildLayout` (`:1336`), `buildColorChain` (`:1864`). One factory per call.|
+|`solver/src/campaign.ts`|`planCampaign` (`:282`), `SheetView` (`:188`): the sheet module — per-shape solve + layout, the world it owns, campaign-level repair (`repairRoutingGaps` `:784`), throughput, colour gaps, belt ledger.|
 |`solver/src/needs.ts`|Level + upgrade-tier shape requirements (`neededShapes`, `:152`). Feeds `cli all`.|
 |`solver/src/levels.ts`|`DEMO_LEVELS` (`:54`), `FULL_LEVELS` (`:66`), unlock tables. The regression corpus.|
 |`solver/src/map.ts`|Exact port of the game map generator (`scanMap` `:330`, `scanForTypes` `:404`, `nearestPatch` `:434`).|
@@ -217,10 +219,10 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 - `--filter=<regex>` selects checks whose **section name or label** matches (unanchored, OR). `--timings` prints `(N checks, M fail, X ms)` per section. `--quick` skips both corpus loops (26 sections → 24).
 - **Covered:** shape codec + hashing, rotations, cut/stack, the `BUILDING_INFO` port table vs upstream slots, connection start slots, map determinism (seed 47742), savegame round-trip, tunnel-router legality, needs/unlock logic, campaign placement, throughput rates, level 20, the 9 demo and 26 full levels, and the schematic representation.
 - **Gaps to know:** the level suites assert only `ok` + `verification.ok`, never `cost` — optimality regressions pass silently (the product criterion is the Pareto frontier, ADR-0001, so `cost` is a proxy). `schematic.ts` *is* covered; `web/app.ts`, `server.ts`, `render.ts`, `cli.ts` and `setup-ref.ts` are not. The corpus loops increment failures outside `--filter`, so filtering neither hides nor speeds them up.
-- **`bun run check:tunnels`** (≈2 min full) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends, bookkeeping. Floors the routed count (demo ≥ 44, full ≥ 390). Measured: demo 48/48 routed, 44 spans; full 798/798 routed (0 gaps), 1828 spans. Run after touching `routeBelt`, `repairRoutingGaps`, `World` bookkeeping or `schematic.ts`.
-- **`bun run check:filter`** (≈48 s) asserts the harness partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. 26 sections. Run after touching `run-tests.ts`.
+- **`bun run check:tunnels`** (≈31 s full) rebuilds the campaign for seed 47742 and re-derives every tunnel **from the sheet alone** — `Connection.path` + `tunnelSpans`, never `World` (that is the sheet module's own state): span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends. Floors the routed count (demo ≥ 44, full ≥ 390). Measured 2026-11-17: demo 48 routed / 21 spans; full 801 routed / 1819 spans, 0 gaps. The four assertions that compared the world's tile tables against the drawing went with the world: they checked internal bookkeeping, not the drawing. Run after touching `routeBelt`, the repair pass, `World` bookkeeping or `schematic.ts`.
+- **`bun run check:filter`** (≈48 s) asserts the harness partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. 28 sections. Run after touching `run-tests.ts`.
 - **`bun run bench:key`** measures string vs packed-number tile keys: ratio ≈ 16-18×. Keep `World` keyed by numbers.
-- **`bun run bench:router`** runs the synthetic routing corpus (default 64×64 / 80 nets / seed 7) on the wasm router; `bun run verify` runs all 247 checks on the same backend.
+- **`bun run bench:router`** runs the synthetic routing corpus (default 64×64 / 80 nets / seed 7) on the wasm router; `bun run verify` runs all 254 checks on the same backend.
 - **`bun run fuzz --n=40 --seed=1234 --budget=30000`** rebuilds randomly generated producible shapes; the default run is ~25 ms, so raise `--n` / `--budget` before quoting it as evidence.
 
 ### Domain constraints — do not "fix" these

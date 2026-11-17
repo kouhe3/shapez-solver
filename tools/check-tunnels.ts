@@ -7,8 +7,11 @@
  *
  * 判据：退出码 0 = 没有任何游戏建不出的隧道，且 routed 不低于 F16 的下限
  * （full 390 / demo 44；修完的实测值 396 / 46，余量留给无害抖动）。所有检查都从
- * `Connection.path`、`Connection.tunnelSpans` 和 `World` 的簿记独立重算，不复用
- * `routeBelt` 的推导。
+ * 图纸本身（`Connection.path` 与 `Connection.tunnelSpans`）独立重算，不复用
+ * `routeBelt` 的推导，也不读 `World` 的瓦片表——那张表是 sheet module 的内部
+ * 状态，不是接口的一部分。图纸推导不出的四类自洽断言（端表等于路径声明、
+ * 地下格记得方向、每个非端/非地下格都是带、覆盖计数）随之删除：它们检查的是
+ * 内部簿记与图纸一致，而现在只有图纸是输出。
  *
  * 覆盖：种子 47742、中心 (-2,-2)、扫描半径 8（demo）/10（full），与
  * `bun run cli all 47742` 的默认一致；tier-0 隧道（两端间距 ≤ 5 格，
@@ -71,8 +74,6 @@ interface TunnelReport {
     endOnBelt: number;
     /** a same-direction tunnel end inside a span, or above another tunnel */
     hijack: number;
-    /** a path tile that is neither a belt, an underground tile nor an end */
-    coverage: number;
     /** a sender / receiver on a port tile facing away from the machine */
     portDirection: number;
     /** a belt path visits the same tile twice (one tile cannot hold two belts) */
@@ -108,7 +109,6 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
         endOverlap: 0,
         endOnBelt: 0,
         hijack: 0,
-        coverage: 0,
         portDirection: 0,
         selfOverlap: 0,
         bookkeeping: 0,
@@ -123,9 +123,38 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
         untilLevel: null,
         levels: set === "demo" ? DEMO_LEVELS : FULL_LEVELS,
     });
-    const layout = res.layout;
+    const layout = res.sheet;
     const buildingByStep = new Map(layout.buildings.map((b) => [b.stepId, b]));
-    const world = layout.world;
+
+    // The drawing is the whole input. Rebuild the three tile tables the game
+    // would see — surface belts, tunnel ends, tunnel-under directions — from
+    // the paths and spans, so every check below stays a check on the sheet.
+    const beltTiles = new Set<number>();
+    const endTiles = new Map<number, number>();
+    const underTiles = new Map<number, number>();
+    for (const c of layout.connections) {
+        if (!c.routed || !c.path) continue;
+        const ends = new Set<number>();
+        const under = new Set<number>();
+        for (const span of c.tunnelSpans) {
+            const d = dirIndex(span.dx, span.dy);
+            for (const cell of span.cells) {
+                const k = cellKey(cell.x, cell.y);
+                under.add(k);
+                underTiles.set(k, (underTiles.get(k) || 0) | (1 << d));
+            }
+            for (const end of [span.sender, span.receiver]) {
+                const k = cellKey(end.x, end.y);
+                endTiles.set(k, d);
+                ends.add(k);
+            }
+        }
+        for (const cell of c.path) {
+            const k = cellKey(cell.x, cell.y);
+            if (ends.has(k) || under.has(k)) continue;
+            beltTiles.add(k);
+        }
+    }
 
     // every tunnel end / span of every connection, for the cross-tunnel checks
     const ends: EndRef[] = [];
@@ -208,24 +237,14 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
             const d = dirIndex(dx, dy);
             for (const end of [span.sender, span.receiver]) {
                 const k = cellKey(end.x, end.y);
-                if (world.tunnelEnds.get(k) !== d) report.bookkeeping++;
-                if (world.belts.has(k)) report.endOnBelt++;
-            }
-            for (const cell of span.cells) {
-                const k = cellKey(cell.x, cell.y);
-                if (((world.tunnelUnder.get(k) || 0) >>> d & 1) === 0) report.bookkeeping++;
+                if (endTiles.get(k) !== d) report.bookkeeping++;
+                if (beltTiles.has(k)) report.endOnBelt++;
             }
         }
         // a crossing the router recorded must be one of this connection's
         // underground tiles and must still carry the over-belt
         for (const cell of c.tunnelCells) {
-            if (!undergroundKeys.has(keyOf(cell)) || !world.belts.has(cellKey(cell.x, cell.y))) report.bookkeeping++;
-        }
-        // every path tile that is not an end or underground must carry a belt
-        for (const cell of path) {
-            const k = keyOf(cell);
-            if (undergroundKeys.has(k) || connectionEndKeys.has(k)) continue;
-            if (!world.belts.has(cellKey(cell.x, cell.y))) report.coverage++;
+            if (!undergroundKeys.has(keyOf(cell)) || !beltTiles.has(cellKey(cell.x, cell.y))) report.bookkeeping++;
         }
         // no stale ends / under-cells beyond what the paths claim: a global
         // count keeps a buggy claim from hiding behind the per-path checks
@@ -255,13 +274,8 @@ function checkCampaign(set: "demo" | "full", seed: number): { report: TunnelRepo
     }
     for (const end of ends) {
         const d = dirIndex(end.dx, end.dy);
-        if ((((world.tunnelUnder.get(cellKey(end.cell.x, end.cell.y)) || 0) >>> d) & 1) !== 0) report.hijack++;
+        if ((((underTiles.get(cellKey(end.cell.x, end.cell.y)) || 0) >>> d) & 1) !== 0) report.hijack++;
     }
-
-    // the world's end table must be exactly the ends the paths claim
-    const claimedEnds = new Set(ends.map((end) => cellKey(end.cell.x, end.cell.y)));
-    for (const k of claimedEnds) if (!world.tunnelEnds.has(k)) report.bookkeeping++;
-    for (const [k] of world.tunnelEnds) if (!claimedEnds.has(k)) report.bookkeeping++;
 
     const bad = Object.entries(report).filter(([name, n]) => name !== "routed" && name !== "unrouted" && name !== "spans" && n !== 0);
     const pass = bad.length === 0 && report.routed >= ROUTED_FLOOR[set];

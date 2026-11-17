@@ -1267,7 +1267,7 @@ function legendRow(color: string, label: string): string {
 
 /** pinned to the sheet's top-left corner: only what this drawing actually uses */
 function renderSheetLegend(res: CampaignResult): void {
-    const kinds = new Set<BuildingKind>(res.layout.buildings.map((b) => b.kind));
+    const kinds = new Set<BuildingKind>(res.sheet.buildings.map((b) => b.kind));
     const parts: string[] = ["<h4>建筑</h4>"];
     for (const kind of KIND_ORDER) {
         if (!kinds.has(kind)) continue;
@@ -1333,9 +1333,9 @@ async function onAll(): Promise<void> {
             untilLevel,
         });
         const usedPatches: Patch[] = [];
-        for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
-        for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
-        sheetStage.innerHTML = schematicSVG(res.layout, usedPatches, { campaign: true });
+        for (const s of res.sheet.sources) if (s.patch) usedPatches.push(s.patch);
+        for (const c of res.sheet.colors) if (c.patch) usedPatches.push(c.patch);
+        sheetStage.innerHTML = schematicSVG(res.sheet, usedPatches, { campaign: true });
         sheetHint.hidden = true;
         renderSheetLegend(res);
         sheetPz.fit();

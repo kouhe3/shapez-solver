@@ -750,7 +750,7 @@ beginSection("campaign: one map, one hub, no overlaps");
 
     const cells = new Set<string>();
     let clashes = 0;
-    for (const b of res.layout.buildings) {
+    for (const b of res.sheet.buildings) {
         for (let dx = 0; dx < b.w; dx++) {
             for (let dy = 0; dy < b.h; dy++) {
                 const k = b.x + dx + "|" + (b.y + dy);
@@ -760,12 +760,12 @@ beginSection("campaign: one map, one hub, no overlaps");
         }
     }
     check("campaign: buildings never overlap", clashes, 0);
-    check("campaign: one miner per factory", res.layout.buildings.filter((b) => b.kind === "base").length, 3);
-    check("campaign: a belt run into the hub per shape", res.layout.connections.filter((c) => c.toHub).length, 3);
+    check("campaign: one miner per factory", res.sheet.buildings.filter((b) => b.kind === "base").length, 3);
+    check("campaign: a belt run into the hub per shape", res.sheet.connections.filter((c) => c.toHub).length, 3);
     check(
         "campaign: belt total is the sum of the legs",
         res.totals.belts,
-        res.layout.connections.reduce((n, c) => n + c.beltTiles, 0)
+        res.sheet.connections.reduce((n, c) => n + c.beltTiles, 0)
     );
     check(
         "campaign: every factory reports a rate",
@@ -778,16 +778,49 @@ beginSection("campaign: one map, one hub, no overlaps");
         true
     );
     // an unconnected output port backs up and stalls the machine
-    const cans = res.layout.buildings.filter((b) => b.kind === "trash").length;
+    const cans = res.sheet.buildings.filter((b) => b.kind === "trash").length;
     check("campaign: cutter offcuts get a trash can", cans, 1);
-    check("campaign: every waste belt lands in one", res.layout.connections.filter((c) => c.waste).length, cans);
+    check("campaign: every waste belt lands in one", res.sheet.connections.filter((c) => c.waste).length, cans);
     const fanout = new Map<string, number>();
-    for (const c of res.layout.connections) {
+    for (const c of res.sheet.connections) {
         if (c.toHub) continue;
         const key = `${c.from}|${c.outSlot}`;
         fanout.set(key, (fanout.get(key) || 0) + 1);
     }
     check("campaign: no output port feeds two belts", Math.max(0, ...fanout.values()), 1);
+    check(
+        "campaign: belt total adds up per factory",
+        res.totals.belts,
+        res.entries.reduce((n, e) => n + e.belts, 0)
+    );
+    // the run's own count is what the sheet adds up, so it has to describe the
+    // path that is actually drawn — after the build and after any repair
+    const staleBeltCounts = res.sheet.connections.filter(
+        (c) => c.routed && c.path && c.beltTiles !== c.path.length - c.tunnelSpans.reduce((n, span) => n + span.cells.length, 0)
+    ).length;
+    check("campaign: every run's belt count matches its path", staleBeltCounts, 0);
+    check(
+        "campaign: one frame per drawn factory",
+        res.sheet.plans.length,
+        res.entries.filter((e) => e.status === "ok").length
+    );
+
+    // a painted factory is the only one that builds colour sources, and every
+    // machine on a chain carries the colour it puts out
+    const colourPatches: Patch[] = [
+        { x: 0, y: 0, size: 2, item: { kind: "color", color: "r" } },
+        { x: 10, y: 0, size: 2, item: { kind: "color", color: "g" } },
+    ];
+    const paint = planCampaign({
+        shapes: [{ code: "CyCyCyCy", sources: [] }],
+        patches: colourPatches,
+        hub: { x: 40, y: 40 },
+    });
+    const chain = paint.sheet.buildings.filter((b) => b.color !== undefined);
+    check("campaign: yellow pulls one mixer and two miners", paint.totals.throughput.builtSourceCount, 3);
+    check("campaign: colour count is the coloured machines", paint.totals.throughput.builtSourceCount, chain.length);
+    check("campaign: only miners and mixers carry a colour", [...new Set(chain.map((b) => b.kind))].sort(), ["base", "mixer"]);
+    check("campaign: a covered colour needs no extra source", paint.totals.throughput.colorGap, []);
 }
 
 beginSection("layout: one cutter serves every output slot at once");
@@ -856,8 +889,8 @@ beginSection("campaign: only the lines buildable by L9");
     check("campaign L9: cyan is L9 (mixer), not L7", cyan && ("availableAt" in cyan ? cyan.availableAt : undefined), 9);
     check(
         "campaign L9: every link is routed or reported",
-        res.layout.connections.filter((c) => !c.routed).length,
-        res.layout.routingGaps.length
+        res.sheet.connections.filter((c) => !c.routed).length,
+        res.sheet.routingGaps.length
     );
 
     // a lower cap has to skip the level goals that are still ahead

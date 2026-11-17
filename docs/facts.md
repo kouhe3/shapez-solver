@@ -64,18 +64,19 @@
 | F49 | Rust 版布线核心（`native/router`，同语义 Dijkstra：同样的 7 桶环、LIFO 顺序与重复格截断）通过 wasm 接入 `routeBelt` 后，seed 47742 full 战役（2490 次路由调用、617,702,969 个弹出状态）输出与 JS 后端逐字节相同（三份 SVG SHA-256 均为 `5c5b1779c33efe48b2f0330bbd639e9ca437957073b1c9f2adde08caea1b8c26`）；router 用时 JS 123.75 s → wasm 29.66 s（encode 5.04 + search 24.56 + claim 0.006）；合成 64×64/80 nets（480 调用、15,774,526 状态）JS 1887 ms → wasm 649 ms，routed/gaps/beltCells 三列与 states 完全一致；三后端 `bun run verify` 均 247/0 | L4 | `bun run cli all 47742 --set=full --router=js\|wasm --out=work/{js,wasm}-full.svg` + `sha256sum`；`bun tools/bench-router.ts --router=js\|wasm`；`SHAPEZ_ROUTER=wasm bun run verify`；`SHAPEZ_ROUTER=wasm bun run check:tunnels` 得 demo 48/21、full 801/1819（与 js 完全相同） | 已证（行为） | Rust 布线可用 |
 | F50 | native（同一 crate 编译 host cdylib + `bun:ffi`）相对 wasm 收益很小：full 战役 search 21.58 s vs 24.56 s（−12%），端到端 29.65 s vs 31.26 s（−5%）；两者相同的 encode（JS 侧每调用 4 平面快照，6.2 / 5.0 s）说明剩余成本在 JS↔Rust 边界而不是 wasm 运行时。只算搜索的天花板 21.6 s ≈ 5.7× 于 JS 的 123.75 s；再快需要把 `World` 状态镜像进 Rust 或整条管线 Rust 化 | L4 | `bun run cli all 47742 --set=full --router=native`；`bun tools/bench-router.ts --router=native`（search 475 ms / 15,774,526 状态，与 wasm 相同）；`SHAPEZ_ROUTER=native bun run check:tunnels` full 25.5 s | 已证（行为） | 后端选型：wasm 足够，native 仅 Bun |
 | F51 | wasm 定为唯一布线后端（用户决定，2026-11-17）：删除 `routeBeltJs`（287 行 JS Dijkstra）、`router-native.ts`、`--router` / `SHAPEZ_ROUTER` 开关与 `routerStats` 统计；`routeBelt` 直接 `routerSearch`，CLI/测试/check:tunnels 入口同步加载 `solver/router.wasm`，web worker 在首个 campaign 前 fetch `/router.wasm`。输出与清理前参考 SVG 同哈希（demo `ea7440b4…`、full `5c5b1779…`），`bun run verify` 247/0，`check:tunnels` full 801 routed / 1819 spans / 0 gaps（29.9 s，清理前 wasm 31.2 s） | L4 | `bun run verify`；`bun run cli all 47742`；`bun run cli all 47742 --set=full`（30.3 s）；`bun run check:tunnels`；`sha256sum` | 已证（行为） | 单一后端 |
+| F52 | 战役图 module 落地（2026-11-17）：`repairRoutingGaps` 连同 `RepairSnapshot`/`RepairEnds`/`connectionEnds`/`connectionRun`/`applyRun` 从 `layout.ts` 搬进 `campaign.ts`（全仓库唯一调用者），`layout.ts` 只剩单厂 `buildLayout`；`CampaignResult.layout` 换成 `sheet: SheetView`（hub / buildings / connections / sources / colors / missing / routingGaps / beltEstimate / bom / plans），`World` 不再穿过 seam。repair 自己刷新 `tunnelCells` 并返回总带格，sheet 只求和 —— `path − Σ隧道格` 公式只剩 `commitLink` 与 `applyRun` 两处，且都写进 `conn.beltTiles`。色源清点从正则 `^color:([a-z]):` 改为 `Placement.color`，并给混色器补上 `color`（该字段注释本就写作 miner or mixer，之前漏写，按字段计数会少算混色器）。`tools/check-tunnels.ts` 改为只从图纸推导三张瓦片表（belt / tunnelEnd / tunnelUnder），不再读 `World`；随之删除四类「世界簿记与图纸一致」的自洽断言（端表等于路径声明、地下格记得方向、每个非端/非地下格都是带、coverage 计数），它们的对象现在是 module 私有状态。验收：改动前后 `cli all 47742` 与 `--set=full` 的 SVG 逐字节相同（sha256 demo `ea7440b4d030419da814cf8530242e2a9152cbf5e63c0fb22d211411ccf14210`、full `5c5b1779c33efe48b2f0330bbd639e9ca437957073b1c9f2adde08caea1b8c26`，后者与 F49 相同），CLI 文本除输出路径外逐字节相同；`bun run test` 254/0；`bun run check:filter` 28 sections、分区 254/254；`bun run check:tunnels` demo 48 routed / 21 spans、full 801 routed / 1819 spans、0 违规、0 gaps。 | L3/L4 | 上文命令可重放；改后 full 的 `totals` 仍是 778 建筑 / 35395 带格 / 0 布线失败（与改前文本一致） | 已证（行为） | sheet 的 interface；后续 sheet 级策略（中心并带、走廊预留、色料网）都在这个 module 内 |
 
 ## 重放
 
 ```bash
-bun run test                           # 全部检查，含解锁等级、布线判据与缩略图表示
-bun run check:tunnels                  # 隧道合法性普查：full 396/809、demo 46/48，违规计数全 0
+bun run test                           # 254 项，含解锁等级、布线判据与缩略图表示
+bun run check:tunnels                  # 隧道合法性普查：demo 48 routed / 21 spans、full 801 routed / 1819 spans，0 gaps，违规计数全 0
 bun run bench:key                      # tile 键表示：数字键 ~16× 于 "x|y" 字符串（F19/F20）
 bun run build:router                   # Rust 布线器 → solver/router.wasm
-bun run verify                         # 247 项（布线后端即 wasm）
+bun run verify                         # 254 项（布线后端即 wasm）
 bun run bench:router                   # 自制地图：随机密度阶梯、--mode=factory / --mode=chain
 bun run cli all 47742 --until=9        # 13 种可建 / 26 种需求（试玩版）
-bun run cli all 47742 --set=full       # 34 种：928 个合法隧道跨度（check:tunnels 复核）
+bun run cli all 47742 --set=full       # 34 种 / 778 建筑 / 35395 带格 / 0 布线失败（check:tunnels 复核 1819 spans）
 bun run cli solve "RpRp----"           # 色料链必须出现混色器
 ```
 

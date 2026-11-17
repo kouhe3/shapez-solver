@@ -328,14 +328,14 @@ function cmdAll(): void {
                     missingTypes: scan.missingTypes,
                     totals: res.totals,
                     entries: res.entries,
-                    bom: res.layout.bom,
-                    colors: res.layout.colors.map((c) =>
+                    bom: res.sheet.bom,
+                    colors: res.sheet.colors.map((c) =>
                         c.direct
                             ? { color: c.color, direct: true, patch: { x: c.patch.x, y: c.patch.y } }
                             : { color: c.color, direct: false, mix: c.mix }
                     ),
-                    missing: res.layout.missing,
-                    belts: res.layout.beltEstimate,
+                    missing: res.sheet.missing,
+                    belts: res.sheet.beltEstimate,
                     throughput: res.totals.throughput,
                 },
                 null,
@@ -419,7 +419,7 @@ function cmdAll(): void {
         );
         if (res.totals.routingGaps) {
             console.log(
-                `⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住，图纸上用红色 ✕ 标出（${res.layout.routingGaps
+                `⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住，图纸上用红色 ✕ 标出（${res.sheet.routingGaps
                     .map((g) => `${g.fromLabel}→${g.toLabel}`)
                     .join("、")}）`
             );
@@ -431,20 +431,20 @@ function cmdAll(): void {
         for (const t of scan.missingTypes) {
             console.log(`⚠ 半径 ${scan.radius} 内没有 ${t} 矿脉：需要它的图形无法建造`);
         }
-        console.log(`材料: ${res.layout.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
-        for (const c of res.layout.colors) {
+        console.log(`材料: ${res.sheet.bom.map((b) => `${b.zh}×${b.n}`).join(", ")}`);
+        for (const c of res.sheet.colors) {
             if (c.direct) console.log(`颜色 ${c.color}: 地图上有矿脉 (${c.patch.x.toFixed(0)},${c.patch.y.toFixed(0)})`);
             else console.log(`颜色 ${c.color}: 无直接矿脉，需混合 ${c.mix ? c.mix.join("+") : "—"}`);
         }
-        for (const m of res.layout.missing) console.log(`缺失资源: ${m}`);
+        for (const m of res.sheet.missing) console.log(`缺失资源: ${m}`);
     }
 
     const outPath = flags.get("out") ?? (flags.get("json") ? null : `plan-${ctx.seed}.svg`);
     if (outPath) {
         const usedPatches = [];
-        for (const s of res.layout.sources) if (s.patch) usedPatches.push(s.patch);
-        for (const c of res.layout.colors) if (c.patch) usedPatches.push(c.patch);
-        fs.writeFileSync(String(outPath), schematicSVG(res.layout, usedPatches, { campaign: true }), "utf8");
+        for (const s of res.sheet.sources) if (s.patch) usedPatches.push(s.patch);
+        for (const c of res.sheet.colors) if (c.patch) usedPatches.push(c.patch);
+        fs.writeFileSync(String(outPath), schematicSVG(res.sheet, usedPatches, { campaign: true }), "utf8");
         console.log(`\n图纸已写入 ${outPath}`);
     }
 }
