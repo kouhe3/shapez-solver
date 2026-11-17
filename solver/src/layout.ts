@@ -25,6 +25,7 @@ import type { ColorChain } from "./color.js";
 import type { ColorChar } from "./shape.js";
 import type { Patch } from "./map.js";
 import { routerSearch } from "./router-engine.js";
+import { createRouterLog, SyncMap, SyncSet, type RouterLog } from "./router-log.js";
 
 /* ------------------------------------------------------------------ *
  * geometry (port tables, tiles)
@@ -105,6 +106,14 @@ export interface BlockRect {
 export interface World {
     hub: Tile;
     patches: Patch[];
+    /**
+     * Tiles the router may not cross: every wall, approach corridor and the
+     * claims of the factory currently being laid out. Rebuilt per factory;
+     * the router sees it through the world's dirty-cell log.
+     */
+    blocked: Set<number>;
+    /** dirty-cell log for the router's resident copy of this world */
+    router: RouterLog;
     /** tiles taken by a building, a port or an approach corridor */
     occupied: Set<number>;
     /** tiles belonging to a deposit; only a miner may sit on one */
@@ -643,7 +652,7 @@ export interface RouteOutcome {
  * staircase; crossing a belt costs 3 and a completed tunnel end another 2, so
  * the router prefers short, shallow tunnels.
  */
-export function routeBeltDetailed(world: World, blocked: ReadonlySet<number>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteOutcome {
+export function routeBeltDetailed(world: World, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteOutcome {
     const margin = opts.margin ?? 20;
     const minX = Math.min(start.x, goal.x) - margin;
     const minY = Math.min(start.y, goal.y) - margin;
@@ -651,7 +660,6 @@ export function routeBeltDetailed(world: World, blocked: ReadonlySet<number>, st
     const height = Math.abs(goal.y - start.y) + 2 * margin + 1;
     const res = routerSearch({
         world,
-        blocked,
         start,
         goal,
         minX,
@@ -672,8 +680,8 @@ export function routeBeltDetailed(world: World, blocked: ReadonlySet<number>, st
 }
 
 /** `routeBeltDetailed(...).run` for callers that do not act on the box verdict */
-export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
-    return routeBeltDetailed(world, blocked, start, goal, opts).run;
+export function routeBelt(world: World, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
+    return routeBeltDetailed(world, start, goal, opts).run;
 }
 
 /** derive spans/crossings and (unless `dryRun`) claim the searched run */
@@ -872,6 +880,7 @@ export function patchCellsByCentre(patch: Patch): (Tile & { d: number })[] {
  * which belong to a deposit (only a miner may sit on a deposit tile).
  */
 export function createWorld({ hub, patches }: WorldInit): World {
+    const router = createRouterLog();
     const occupied = new Set<number>();
     const deposits = new Set<number>();
     for (const p of patches) {
@@ -882,27 +891,29 @@ export function createWorld({ hub, patches }: WorldInit): World {
     }
     // machine bodies and their port tiles never carry a belt; kept across
     // factories so a later route cannot cut through an earlier factory
-    const walls = new Set<number>();
+    const walls = new SyncSet(router);
     for (let dx = 0; dx < HUB_SIZE; dx++) {
         for (let dy = 0; dy < HUB_SIZE; dy++) walls.add(cellKey(hub.x + dx, hub.y + dy));
     }
     return {
         hub,
         patches,
+        blocked: new SyncSet(router),
+        router,
         occupied,
         deposits,
         blocks: [],
         walls,
         /** tiles a belt must run through to reach a port; never built on */
-        approaches: new Set<number>(),
+        approaches: new SyncSet(router),
         /** tile → "h" | "v" | "turn": the belt already laid there */
-        belts: new Map<number, BeltHeading>(),
+        belts: new SyncMap<BeltHeading>(router),
         /** tiles where one belt passes under another through a tunnel */
-        tunnelCells: new Set<number>(),
+        tunnelCells: new SyncSet(router),
         /** tile → direction index of the tunnel end building sitting there */
-        tunnelEnds: new Map<number, number>(),
+        tunnelEnds: new SyncMap<number>(router),
         /** tile → bitmask of tunnel directions running underneath */
-        tunnelUnder: new Map<number, number>(),
+        tunnelUnder: new SyncMap<number>(router),
         /** outside tiles already claimed by a belt feeding the hub */
         hubApproaches: new Set<number>(),
         hubBound: new Map<number, number>(),

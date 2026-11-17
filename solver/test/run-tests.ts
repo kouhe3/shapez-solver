@@ -488,7 +488,7 @@ beginSection("router: walls, tunnels, dead ends");
     const world = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     // a vertical wall with exactly one gap at y = 0
     for (let y = -5; y <= 5; y++) if (y !== 0) world.walls.add(cellKey(0, y));
-    const through = routeBelt(world, world.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
+    const through = routeBelt(world, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
     checkTrue("router: uses the gap in a wall", !!through && through.cells.some((c) => c.x === 0 && c.y === 0));
     check("router: gap route is the straight run", through && through.cells.length, 5);
 
@@ -496,12 +496,12 @@ beginSection("router: walls, tunnels, dead ends");
     // are buildings, so it passes underneath the body
     const thin = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     for (let y = -30; y <= 30; y++) thin.walls.add(cellKey(0, y));
-    const under = routeBelt(thin, thin.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
+    const under = routeBelt(thin, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
     checkTrue(
         "router: tunnels under a one-tile wall",
         !!under && under.spans.length === 1 && under.spans[0]!.cells.some((c) => c.x === 0 && c.y === 2)
     );
-    const beforeTunnel = routeBelt(thin, thin.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: false, margin: 10, dryRun: true });
+    const beforeTunnel = routeBelt(thin, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: false, margin: 10, dryRun: true });
     check("router: before L6 a one-tile wall seals", beforeTunnel, null);
 
     // the router tells a box-limited failure from a definitive one: a room
@@ -514,32 +514,32 @@ beginSection("router: walls, tunnels, dead ends");
             if (shell >= 4) room.walls.add(cellKey(x, y));
         }
     }
-    const sealedRoom = routeBeltDetailed(room, room.walls, { x: 0, y: 0 }, { x: 20, y: 0 }, { allowCross: true, margin: 20, dryRun: true });
+    const sealedRoom = routeBeltDetailed(room, { x: 0, y: 0 }, { x: 20, y: 0 }, { allowCross: true, margin: 20, dryRun: true });
     check("router: a sealed room has no run", sealedRoom.run, null);
     check("router: a sealed room is definitive, not box-limited", sealedRoom.boxLimited, false);
 
     // a wall that runs past the box on both ends: the detour needs a wider box
     const longWall = createWorld({ hub: { x: 40, y: 40 }, patches: [] });
     for (let y = -10; y <= 10; y++) longWall.walls.add(cellKey(0, y));
-    const tight = routeBeltDetailed(longWall, longWall.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, margin: 3, dryRun: true });
+    const tight = routeBeltDetailed(longWall, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, margin: 3, dryRun: true });
     check("router: a wall past the box blocks the run", tight.run, null);
     check("router: that failure is box-limited", tight.boxLimited, true);
-    const loose = routeBeltDetailed(longWall, longWall.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, margin: 15, dryRun: true });
+    const loose = routeBeltDetailed(longWall, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, margin: 15, dryRun: true });
     checkTrue("router: the wider box rounds the wall", !!loose.run && loose.run.cells.some((c) => Math.abs(c.y) > 10));
 
     // deeper than one tier-0 tunnel: five tiles of wall cannot be crossed
     const sealed = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     for (let x = 0; x < 5; x++) for (let y = -30; y <= 30; y++) sealed.walls.add(cellKey(x, y));
-    const dead = routeBelt(sealed, sealed.walls, { x: -2, y: 2 }, { x: 7, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
+    const dead = routeBelt(sealed, { x: -2, y: 2 }, { x: 7, y: 2 }, { allowCross: true, margin: 10, dryRun: true });
     check("router: a wall deeper than a tunnel has no route", dead, null);
 
     // a belt across the only straight run: crossing needs a tunnel, and the
     // tunnel only goes under a perpendicular belt
     const crossing = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     for (let y = -1; y <= 1; y++) crossing.belts.set(cellKey(0, y), "v");
-    const tunnel = routeBelt(crossing, crossing.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
+    const tunnel = routeBelt(crossing, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
     check("router: crosses a perpendicular belt", tunnel && tunnel.crossings, [{ x: 0, y: 0 }]);
-    const noTunnel = routeBelt(crossing, crossing.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, dryRun: true });
+    const noTunnel = routeBelt(crossing, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, dryRun: true });
     checkTrue(
         "router: before L6 it goes around",
         !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
@@ -548,7 +548,7 @@ beginSection("router: walls, tunnels, dead ends");
     // may cross under it
     const turning = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     turning.belts.set(cellKey(0, 0), "turn");
-    const relaxed = routeBelt(turning, turning.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, {
+    const relaxed = routeBelt(turning, { x: -2, y: 0 }, { x: 2, y: 0 }, {
         allowCross: true,
         relaxCross: true,
         dryRun: true,
@@ -564,7 +564,7 @@ beginSection("router: walls, tunnels, dead ends");
         ends: [...reusable.tunnelEnds].sort((l, r) => l[0] - r[0]),
         crossings: [...reusable.tunnelCells].sort((l, r) => l - r),
     };
-    const laid = routeBelt(reusable, reusable.walls, { x: -3, y: 0 }, { x: 3, y: 0 }, { allowCross: true });
+    const laid = routeBelt(reusable, { x: -3, y: 0 }, { x: 3, y: 0 }, { allowCross: true });
     checkTrue("rip-up: the run is laid", !!laid);
     check("rip-up: the run claims belts", reusable.belts.size > before.belts.length, true);
     if (laid) releaseRoute(reusable, laid);
@@ -588,7 +588,7 @@ beginSection("router: tunnel legality (span limit, straight ends, own tile)");
     const four = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     for (let x = 0; x <= 3; x++) four.belts.set(cellKey(x, 0), "v");
     sealedCorridor(four, -2, 5);
-    const deep = routeBelt(four, four.walls, { x: -2, y: 0 }, { x: 5, y: 0 }, { allowCross: true, dryRun: true });
+    const deep = routeBelt(four, { x: -2, y: 0 }, { x: 5, y: 0 }, { allowCross: true, dryRun: true });
     check("tunnel: four underground tiles are one span", deep && deep.spans.length, 1);
     check("tunnel: span tiles", deep && deep.spans[0]!.cells, [
         { x: 0, y: 0 },
@@ -607,7 +607,7 @@ beginSection("router: tunnel legality (span limit, straight ends, own tile)");
     const five = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     for (let x = 0; x <= 4; x++) five.belts.set(cellKey(x, 0), "v");
     sealedCorridor(five, -2, 6);
-    const tooDeep = routeBelt(five, five.walls, { x: -2, y: 0 }, { x: 6, y: 0 }, { allowCross: true, dryRun: true });
+    const tooDeep = routeBelt(five, { x: -2, y: 0 }, { x: 6, y: 0 }, { allowCross: true, dryRun: true });
     check("tunnel: five underground tiles are impossible", tooDeep, null);
 
     // the sender has to sit on a straight run: an L-shaped corridor that turns
@@ -618,7 +618,7 @@ beginSection("router: tunnel legality (span limit, straight ends, own tile)");
         for (let y = -6; y <= 4; y++) if (!corridor[x + "|" + y]) bent.walls.add(cellKey(x, y));
     }
     bent.belts.set(cellKey(0, -1), "h");
-    const turnIn = routeBelt(bent, bent.walls, { x: -1, y: 0 }, { x: 0, y: -2 }, { allowCross: true, dryRun: true });
+    const turnIn = routeBelt(bent, { x: -1, y: 0 }, { x: 0, y: -2 }, { allowCross: true, dryRun: true });
     check("tunnel: a sender on a turn is rejected", turnIn, null);
 
     // two crossings two tiles apart with a bend between them would need the
@@ -630,24 +630,24 @@ beginSection("router: tunnel legality (span limit, straight ends, own tile)");
     }
     gapTwo.belts.set(cellKey(0, 0), "v");
     gapTwo.belts.set(cellKey(1, -1), "h");
-    const bentGap = routeBelt(gapTwo, gapTwo.walls, { x: -1, y: 0 }, { x: 1, y: -2 }, { allowCross: true, dryRun: true });
+    const bentGap = routeBelt(gapTwo, { x: -1, y: 0 }, { x: 1, y: -2 }, { allowCross: true, dryRun: true });
     check("tunnel: two crossings two apart with a bend are rejected", bentGap, null);
 
     // a tunnel end is a building on its tile: no belt there, but a belt of a
     // different direction may pass underneath
     const endWorld = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     endWorld.tunnelEnds.set(cellKey(0, 0), 0);
-    const acrossEnd = routeBelt(endWorld, endWorld.walls, { x: 0, y: -2 }, { x: 0, y: 2 }, { allowCross: true, dryRun: true });
+    const acrossEnd = routeBelt(endWorld, { x: 0, y: -2 }, { x: 0, y: 2 }, { allowCross: true, dryRun: true });
     checkTrue("tunnel end: a perpendicular belt may pass underneath", !!acrossEnd);
     check("tunnel end: the pass is one underground tile", acrossEnd && acrossEnd.spans[0] && acrossEnd.spans[0].cells, [
         { x: 0, y: 0 },
     ]);
-    const alongEnd = routeBelt(endWorld, endWorld.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
+    const alongEnd = routeBelt(endWorld, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true, dryRun: true });
     checkTrue(
         "tunnel end: a same-direction belt goes around",
         !!alongEnd && alongEnd.spans.every((span) => !span.cells.some((c) => c.x === 0 && c.y === 0))
     );
-    const noTunnel = routeBelt(endWorld, endWorld.walls, { x: 0, y: -2 }, { x: 0, y: 2 }, { allowCross: false, dryRun: true });
+    const noTunnel = routeBelt(endWorld, { x: 0, y: -2 }, { x: 0, y: 2 }, { allowCross: false, dryRun: true });
     checkTrue(
         "tunnel end: before L6 the tile is closed",
         !!noTunnel && noTunnel.cells.every((c) => !(c.x === 0 && c.y === 0))
@@ -657,7 +657,7 @@ beginSection("router: tunnel legality (span limit, straight ends, own tile)");
     // the tunnel's direction
     const claim = createWorld({ hub: { x: 20, y: 20 }, patches: [] });
     for (let y = -1; y <= 1; y++) claim.belts.set(cellKey(0, y), "v");
-    const claimed = routeBelt(claim, claim.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true });
+    const claimed = routeBelt(claim, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: true });
     checkTrue("tunnel: claimed", !!claimed);
     check(
         "tunnel: ends are buildings, not belts",
@@ -683,7 +683,7 @@ beginSection("router: tunnel legality (span limit, straight ends, own tile)");
     for (let x = 0; x <= 3; x++) chain.belts.set(cellKey(x, 0), "v");
     chain.belts.set(cellKey(6, 0), "v");
     sealedCorridor(chain, -2, 8);
-    const chained = routeBelt(chain, chain.walls, { x: -2, y: 0 }, { x: 8, y: 0 }, { allowCross: true, dryRun: true });
+    const chained = routeBelt(chain, { x: -2, y: 0 }, { x: 8, y: 0 }, { allowCross: true, dryRun: true });
     check("tunnel: seven underground tiles split into two runs", chained && chained.spans.length, 2);
     check("tunnel: a receiver may feed the next sender", chained && [chained.spans[0]!.receiver, chained.spans[1]!.sender], [
         { x: 4, y: 0 },
@@ -964,7 +964,7 @@ beginSection("links: a failed link is retried by the rip-up pass");
     const world = createWorld({ hub, patches: [] });
     const claims = createTileClaims(world);
     // no tunnels: a wall is a wall, so the first search has to fail
-    const links = createLinkScheduler({ world, hub, blocked: claims.blocked, tuning: DEFAULT_TUNING, allowTunnels: false });
+    const links = createLinkScheduler({ world, hub, tuning: DEFAULT_TUNING, allowTunnels: false });
     const info = BUILDING_INFO.rotate;
     const src: Placement = { step: "a", stepId: "a", kind: "rotate", zh: BUILDING_NAMES.rotate, x: 0, y: 0, w: 1, h: 1, rot: 0 };
     const dst: Placement = { ...src, step: "b", stepId: "b", x: 9 };

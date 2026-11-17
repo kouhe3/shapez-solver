@@ -1,24 +1,37 @@
 /**
  * wasm binding for the Rust belt router (`native/router`) — the only router
  * engine. `routeBelt` keeps the `World` and the claim/spans bookkeeping; this
- * module ships the search box to wasm.
+ * module keeps the wasm side of the world in step with it.
  *
- * One u32 per cell is the router's whole view of the map, indexed
- * `(y - minY) * width + (x - minX)` and packed little-endian:
+ * The router owns a resident copy of every search-relevant cell, one u32 per
+ * tile:
  *
  *   bits 0-7    flags: bit0 blocked, bit1 exempt, bit2 tunnel cell
  *   bits 8-15   belt: 0 none, 1 "h", 2 "v", 3 "turn"
  *   bits 16-23  end: 0 none, else direction index + 1
  *   bits 24-31  under: bitmask of tunnel directions running underneath
+ *
+ * `World` stays authoritative in JS. Every mutation of a mirrored structure
+ * marks its tile in `World.router.dirty` (see `router-log.ts`); each search
+ * flushes just those tiles — a packed key and its packed word — and wasm
+ * builds the search box from its own pages. Encoding the whole map per search
+ * (the old JS cost) is gone.
  */
 import type { Tile, World } from "./layout.js";
+import type { RouterLog } from "./router-log.js";
 
 interface WasmExports {
     memory: WebAssembly.Memory;
     alloc(size: number): number;
     dealloc(ptr: number, size: number): void;
+    new_world(): number;
+    free_world(id: number): void;
     route(
-        input: number,
+        worldId: number,
+        cellsPtr: number,
+        cellsLen: number,
+        exemptPtr: number,
+        exemptLen: number,
         width: number,
         height: number,
         minX: number,
@@ -39,12 +52,15 @@ const F_RELAX_CROSS = 2;
 const F_GOAL_JOIN = 4;
 const F_FRONTIER = 8;
 
-/** packed tile key, identical to `cellKey` in layout.ts */
-const keyOf = (x: number, y: number): number => (x + 4096) * 8192 + (y + 4096);
-
 let wasm: WasmExports | null = null;
-let inputPtr = 0;
-let inputCap = 0;
+/** bumped by every `initRouterWasm`; ids from an older instance are stale */
+let epoch = 0;
+
+/** scratch buffers inside wasm memory, sized in u32 cells */
+let cellPtr = 0;
+let cellCap = 0;
+let exemptPtr = 0;
+let exemptCap = 0;
 
 /** compile and instantiate the module; the caller owns loading the bytes */
 export function initRouterWasm(bytes: Uint8Array | ArrayBuffer): void {
@@ -54,12 +70,15 @@ export function initRouterWasm(bytes: Uint8Array | ArrayBuffer): void {
     const module = new WebAssembly.Module(source);
     const instance = new WebAssembly.Instance(module, {});
     const exports = instance.exports as unknown as WasmExports;
-    if (!exports.memory || typeof exports.route !== "function") {
+    if (!exports.memory || typeof exports.route !== "function" || typeof exports.new_world !== "function") {
         throw new Error("router wasm: bad exports");
     }
     wasm = exports;
-    inputPtr = 0;
-    inputCap = 0;
+    epoch++;
+    cellPtr = 0;
+    cellCap = 0;
+    exemptPtr = 0;
+    exemptCap = 0;
 }
 
 export interface RouterSearchResult {
@@ -76,15 +95,14 @@ export interface RouterSearchResult {
      * no wider box can produce a run, so callers may skip their wider pass.
      */
     boxLimited: boolean;
-    /** milliseconds spent writing the planes */
-    encodeMs: number;
-    /** milliseconds inside the search */
+    /** milliseconds spent flushing changed cells to wasm */
+    flushMs: number;
+    /** milliseconds inside the search (box build included) */
     searchMs: number;
 }
 
 export interface RouterRequest {
     world: World;
-    blocked: ReadonlySet<number>;
     start: Tile;
     goal: Tile;
     minX: number;
@@ -101,95 +119,113 @@ export interface RouterRequest {
     frontier: Set<number> | null;
 }
 
+/** grow a wasm scratch buffer to hold `count` u32 cells */
+function reserveScratch(kind: "cells" | "exempt", count: number): number {
+    const engine = wasm!;
+    const used = kind === "cells" ? cellCap : exemptCap;
+    if (count <= used) return kind === "cells" ? cellPtr : exemptPtr;
+    // double instead of exact so a growing map does not realloc every search
+    const next = Math.max(count, used * 2, 64);
+    const bytes = next * 4;
+    const oldPtr = kind === "cells" ? cellPtr : exemptPtr;
+    if (oldPtr !== 0) engine.dealloc(oldPtr, used * 4);
+    const ptr = engine.alloc(bytes);
+    if (ptr === 0) throw new Error("router wasm: alloc failed");
+    if (kind === "cells") {
+        cellPtr = ptr;
+        cellCap = next;
+    } else {
+        exemptPtr = ptr;
+        exemptCap = next;
+    }
+    return ptr;
+}
+
+/** the packed word the router stores for one tile */
+function cellWord(world: World, key: number): number {
+    let word = 0;
+    if (world.walls.has(key) || world.approaches.has(key) || world.blocked.has(key)) word |= 1;
+    if (world.tunnelCells.has(key)) word |= 4;
+    const belt = world.belts.get(key);
+    if (belt !== undefined) word |= (belt === "h" ? 1 : belt === "v" ? 2 : 3) << 8;
+    const end = world.tunnelEnds.get(key);
+    if (end !== undefined) word |= (end + 1) << 16;
+    const under = world.tunnelUnder.get(key);
+    if (under !== undefined) word |= under << 24;
+    return word >>> 0;
+}
+
+/** every authoritative cell, for a fresh wasm world (first search or a reset) */
+function markWorldDirty(world: World): void {
+    const dirty = world.router.dirty;
+    for (const key of world.belts.keys()) dirty.add(key);
+    for (const key of world.tunnelCells) dirty.add(key);
+    for (const key of world.tunnelEnds.keys()) dirty.add(key);
+    for (const key of world.tunnelUnder.keys()) dirty.add(key);
+    for (const key of world.blocked) dirty.add(key);
+    for (const key of world.walls) dirty.add(key);
+    for (const key of world.approaches) dirty.add(key);
+}
+
+/** allocate (or revive) the wasm-side world this `World` talks to */
+function worldId(world: World): number {
+    const engine = wasm!;
+    const log: RouterLog = world.router;
+    if (log.id !== null && log.epoch === epoch) return log.id;
+    log.id = engine.new_world();
+    log.epoch = epoch;
+    markWorldDirty(world);
+    return log.id;
+}
+
+/** write the dirty cells into wasm and hand back the pair buffer */
+function flushDirty(world: World): { ptr: number; count: number } {
+    const dirty = world.router.dirty;
+    const count = dirty.size;
+    if (count === 0) return { ptr: 0, count: 0 };
+    const ptr = reserveScratch("cells", count * 2);
+    const view = new Uint32Array(wasm!.memory.buffer, ptr, count * 2);
+    let at = 0;
+    for (const key of dirty) {
+        view[at++] = key;
+        view[at++] = cellWord(world, key);
+    }
+    dirty.clear();
+    // `count` is pairs; wasm takes the entry count (key + word)
+    return { ptr, count: count * 2 };
+}
+
+/** drop the wasm-side state of a world that will never be routed again */
+export function disposeRouterWorld(world: World): void {
+    const log = world.router;
+    const id = log.id;
+    log.id = null;
+    log.epoch = 0;
+    log.dirty.clear();
+    if (id !== null && wasm !== null) wasm.free_world(id);
+}
+
 export function routerSearch(req: RouterRequest): RouterSearchResult {
     const engine = wasm;
     if (!engine) throw new Error("router wasm: not initialised");
-    const { world, blocked, start, goal, minX, minY, width, height } = req;
-    const size = width * height;
+    const { world, start, goal, minX, minY, width, height } = req;
     // The wasm entry takes the box as raw integers; `NaN`/0 would slip past
     // the buffer check below (NaN comparisons are false) and trap in `route`.
     if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
         throw new Error(`router: bad box ${width}×${height}`);
     }
+    const id = worldId(world);
 
     const t0 = performance.now();
-    if (size * 4 > inputCap) {
-        if (inputPtr !== 0) engine.dealloc(inputPtr, inputCap);
-        inputPtr = engine.alloc(size * 4);
-        inputCap = size * 4;
-        if (inputPtr === 0) throw new Error("router wasm: alloc failed");
-    }
-    // `alloc` may have grown the heap, so the view is created after it. One
-    // little-endian u32 per cell: flags | belt << 8 | end << 16 | under << 24.
-    const words = new Uint32Array(engine.memory.buffer, inputPtr, size);
+    const cells = flushDirty(world);
     const exempt = req.exempt;
-    /** box index of a packed tile key, or -1 when it sits outside the box */
-    const indexInBox = (key: number): number => {
-        const ix = Math.floor(key / 8192) - 4096 - minX;
-        if (ix < 0 || ix >= width) return -1;
-        const iy = (key % 8192) - 4096 - minY;
-        if (iy < 0 || iy >= height) return -1;
-        return iy * width + ix;
-    };
-    // The map is sparse: most tiles carry nothing at all. Walking the six
-    // structures beats one Set/Map lookup per box cell as soon as the box is
-    // bigger than the number of entries, which is exactly the wide boxes
-    // where encoding used to cost the most.
-    const entries =
-        blocked.size +
-        (exempt === null ? 0 : exempt.size) +
-        world.tunnelCells.size +
-        world.belts.size +
-        world.tunnelEnds.size +
-        world.tunnelUnder.size;
-    if (size > entries) {
-        words.fill(0);
-        for (const key of blocked) {
-            const i = indexInBox(key);
-            if (i >= 0) words[i] = (words[i] ?? 0) | 1;
-        }
-        if (exempt !== null) {
-            for (const key of exempt) {
-                const i = indexInBox(key);
-                if (i >= 0) words[i] = (words[i] ?? 0) | 2;
-            }
-        }
-        for (const key of world.tunnelCells) {
-            const i = indexInBox(key);
-            if (i >= 0) words[i] = (words[i] ?? 0) | 4;
-        }
-        for (const [key, heading] of world.belts) {
-            const i = indexInBox(key);
-            if (i >= 0) words[i] = (words[i] ?? 0) | ((heading === "h" ? 1 : heading === "v" ? 2 : 3) << 8);
-        }
-        for (const [key, dir] of world.tunnelEnds) {
-            const i = indexInBox(key);
-            if (i >= 0) words[i] = (words[i] ?? 0) | ((dir + 1) << 16);
-        }
-        for (const [key, under] of world.tunnelUnder) {
-            const i = indexInBox(key);
-            if (i >= 0) words[i] = (words[i] ?? 0) | (under << 24);
-        }
-    } else {
-        for (let y = 0; y < height; y++) {
-            const row = y * width;
-            const wy = minY + y;
-            for (let x = 0; x < width; x++) {
-                const i = row + x;
-                const key = keyOf(minX + x, wy);
-                let f = 0;
-                if (blocked.has(key)) f |= 1;
-                if (exempt !== null && exempt.has(key)) f |= 2;
-                if (world.tunnelCells.has(key)) f |= 4;
-                const belt = world.belts.get(key);
-                const end = world.tunnelEnds.get(key);
-                words[i] =
-                    f |
-                    ((belt === undefined ? 0 : belt === "h" ? 1 : belt === "v" ? 2 : 3) << 8) |
-                    ((end === undefined ? 0 : end + 1) << 16) |
-                    ((world.tunnelUnder.get(key) ?? 0) << 24);
-            }
-        }
+    let exemptCount = 0;
+    if (exempt !== null && exempt.size > 0) {
+        exemptCount = exempt.size;
+        const ptr = reserveScratch("exempt", exemptCount);
+        const view = new Uint32Array(engine.memory.buffer, ptr, exemptCount);
+        let at = 0;
+        for (const key of exempt) view[at++] = key;
     }
     let flags = 0;
     if (req.allowCross) flags |= F_ALLOW_CROSS;
@@ -199,7 +235,11 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
     const t1 = performance.now();
 
     const ptr = engine.route(
-        inputPtr,
+        id,
+        cells.ptr,
+        cells.count,
+        exemptPtr,
+        exemptCount,
         width,
         height,
         minX,
@@ -230,18 +270,18 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
         }
     }
     if (pathLen === 0) {
-        return { cells: null, phases: [], headings: [], states, attempts, boxLimited, encodeMs: t1 - t0, searchMs: t2 - t1 };
+        return { cells: null, phases: [], headings: [], states, attempts, boxLimited, flushMs: t1 - t0, searchMs: t2 - t1 };
     }
     off = 20;
-    const cells: Tile[] = new Array(pathLen);
+    const cellsOut: Tile[] = new Array(pathLen);
     const phases: number[] = new Array(pathLen);
     const headings: number[] = new Array(pathLen);
     for (let i = 0; i < pathLen; i++) {
         const index = view.getUint32(off, true);
         phases[i] = view.getUint32(off + 4, true);
         headings[i] = view.getUint32(off + 8, true);
-        cells[i] = { x: (index % width) + minX, y: Math.floor(index / width) + minY };
+        cellsOut[i] = { x: (index % width) + minX, y: Math.floor(index / width) + minY };
         off += 12;
     }
-    return { cells, phases, headings, states, attempts, boxLimited, encodeMs: t1 - t0, searchMs: t2 - t1 };
+    return { cells: cellsOut, phases, headings, states, attempts, boxLimited, flushMs: t1 - t0, searchMs: t2 - t1 };
 }

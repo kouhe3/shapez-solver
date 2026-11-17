@@ -108,8 +108,6 @@ export type QueuedLink =
 export interface LinkSchedulerArgs {
     world: World;
     hub: Tile;
-    /** what the router may not cross; the caller keeps it current */
-    blocked: ReadonlySet<number>;
     tuning: PlacementTuning;
     allowTunnels: boolean;
 }
@@ -141,7 +139,7 @@ export interface LinkScheduler {
     schedule(): void;
 }
 
-export function createLinkScheduler({ world, hub, blocked, tuning, allowTunnels }: LinkSchedulerArgs): LinkScheduler {
+export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSchedulerArgs): LinkScheduler {
     const allowCross = allowTunnels !== false;
 
     const connections: Connection[] = [];
@@ -183,7 +181,7 @@ export function createLinkScheduler({ world, hub, blocked, tuning, allowTunnels 
         // a short link inside one factory only needs a small box: searching ±20
         // tiles around it costs 7× more and finds the same run
         const span = Math.abs(goal.x - start.x) + Math.abs(goal.y - start.y);
-        const near = routeBeltDetailed(world, blocked, start, goal, {
+        const near = routeBeltDetailed(world, start, goal, {
             allowCross,
             goalMayJoin: join,
             exempt,
@@ -197,7 +195,7 @@ export function createLinkScheduler({ world, hub, blocked, tuning, allowTunnels 
         // the near box was never the limit: no reachable tile touched its
         // edge, so a wider box finds exactly the same (empty) component
         if (!near.boxLimited) return null;
-        return routeBeltDetailed(world, blocked, start, goal, {
+        return routeBeltDetailed(world, start, goal, {
             allowCross,
             goalMayJoin: join,
             exempt,

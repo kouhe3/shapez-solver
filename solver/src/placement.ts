@@ -152,7 +152,7 @@ export function createPlacementSession({
 }: PlacementArgs): PlacementSession {
     const tuning: PlacementTuning = { ...DEFAULT_TUNING, ...overrides };
     const claims = createTileClaims(world);
-    const links = createLinkScheduler({ world, hub, blocked: claims.blocked, tuning, allowTunnels });
+    const links = createLinkScheduler({ world, hub, tuning, allowTunnels });
 
     const buildings: Placement[] = [];
     const sources: LayoutSource[] = [];

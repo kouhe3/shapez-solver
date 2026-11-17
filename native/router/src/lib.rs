@@ -1,15 +1,17 @@
 //! Belt router: the same Dijkstra as `routeBelt` in `solver/src/layout.ts`,
-//! compiled to wasm32 and fed a dense snapshot of the search box.
+//! compiled to wasm32.
 //!
-//! The JS caller owns the `World`; this side only answers the question "which
-//! run is cheapest in this box". Tile predicates arrive as four byte planes
-//! (`flags`, `belt`, `end`, `under`) indexed `(y - minY) * width + (x - minX)`.
+//! The JS caller keeps the authoritative `World`; this side keeps a resident
+//! copy of every search-relevant tile (blocked, belt, tunnel end, tunnel-under
+//! mask, tunnel-cell flag) in lazily allocated 64×64 pages. A search ships only
+//! the cells that changed since the previous one, builds its box from the
+//! pages, and runs the search on it.
 //!
 //! The search is transcribed one-to-one, down to the LIFO bucket order and the
 //! repeated-tile cut, so the chosen run is byte-identical to the JS router.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const PHASES: u32 = 6;
 const MAX_UNDERGROUND: u32 = 4;
@@ -50,6 +52,19 @@ struct Scratch {
     ring: [Vec<u32>; 7],
 }
 
+const PAGE_BITS: i32 = 6;
+const PAGE_TILES: i32 = 1 << PAGE_BITS;
+const PAGE_CELLS: usize = (PAGE_TILES * PAGE_TILES) as usize;
+
+/// One resident world, in 64×64 pages of packed cells.
+///
+/// Cell layout (identical to the box layout):
+/// `flags | belt << 8 | end << 16 | under << 24`, where flags are
+/// bit0 blocked, bit1 exempt, bit2 tunnel cell.
+struct WorldState {
+    pages: HashMap<(i32, i32), Box<[u32]>>,
+}
+
 thread_local! {
     static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch {
         dist: Vec::new(),
@@ -57,6 +72,10 @@ thread_local! {
         ring: Default::default(),
     });
     static RESULT: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    /// slot 0 is unused; ids are indices into this table
+    static WORLDS: RefCell<Vec<Option<WorldState>>> = RefCell::new(vec![None]);
+    /// the search box, rebuilt from the resident pages on every call
+    static BOX: RefCell<Vec<u32>> = RefCell::new(Vec::new());
 }
 
 /// Scratch buffer for the input planes; the JS side writes them in place.
@@ -77,6 +96,122 @@ pub extern "C" fn dealloc(ptr: *mut u8, size: usize) {
 #[no_mangle]
 pub extern "C" fn result_ptr() -> usize {
     RESULT.with(|cell| cell.borrow().as_ptr() as usize)
+}
+
+/// Allocate a fresh resident world and return its slot id.
+#[no_mangle]
+pub extern "C" fn new_world() -> u32 {
+    WORLDS.with(|cell| {
+        let mut worlds = cell.borrow_mut();
+        for (id, slot) in worlds.iter_mut().enumerate().skip(1) {
+            if slot.is_none() {
+                *slot = Some(WorldState { pages: HashMap::new() });
+                return id as u32;
+            }
+        }
+        worlds.push(Some(WorldState { pages: HashMap::new() }));
+        (worlds.len() - 1) as u32
+    })
+}
+
+/// Drop a world and every page it allocated.
+#[no_mangle]
+pub extern "C" fn free_world(id: u32) {
+    WORLDS.with(|cell| {
+        if let Some(slot) = cell.borrow_mut().get_mut(id as usize) {
+            *slot = None;
+        }
+    });
+}
+
+#[inline]
+fn tile_of(key: u32) -> (i32, i32) {
+    (((key / 8192) as i32) - 4096, ((key % 8192) as i32) - 4096)
+}
+
+#[inline]
+fn page_of(x: i32, y: i32) -> (i32, i32) {
+    (x >> PAGE_BITS, y >> PAGE_BITS)
+}
+
+#[inline]
+fn page_index(x: i32, y: i32) -> usize {
+    (((y & (PAGE_TILES - 1)) as usize) << PAGE_BITS) | ((x & (PAGE_TILES - 1)) as usize)
+}
+
+/// Apply a flush from JS: packed `(key, word)` pairs, `word == 0` clears.
+fn apply_cells(world: &mut WorldState, cells: &[u32]) {
+    let mut at = 0;
+    while at + 1 < cells.len() {
+        let key = cells[at];
+        let word = cells[at + 1];
+        at += 2;
+        let (x, y) = tile_of(key);
+        let page_key = page_of(x, y);
+        let index = page_index(x, y);
+        if word == 0 {
+            if let Some(page) = world.pages.get_mut(&page_key) {
+                page[index] = 0;
+            }
+        } else {
+            let page = world
+                .pages
+                .entry(page_key)
+                .or_insert_with(|| vec![0u32; PAGE_CELLS].into_boxed_slice());
+            page[index] = word;
+        }
+    }
+}
+
+/// Copy the resident pages into the box buffer and stamp the per-search
+/// exempt tiles (bit 1).
+fn build_box(world: &WorldState, min_x: i32, min_y: i32, width: u32, height: u32, exempt: &[u32], out: &mut Vec<u32>) {
+    let w = width as usize;
+    let rows = height as usize;
+    out.clear();
+    out.resize(w * rows, 0);
+    let max_x = min_x + width as i32 - 1;
+    let max_y = min_y + height as i32 - 1;
+    let first_px = min_x >> PAGE_BITS;
+    let last_px = max_x >> PAGE_BITS;
+    let first_py = min_y >> PAGE_BITS;
+    let last_py = max_y >> PAGE_BITS;
+    for py in first_py..=last_py {
+        let row_y0 = (py << PAGE_BITS).max(min_y);
+        let row_y1 = ((py << PAGE_BITS) + PAGE_TILES - 1).min(max_y);
+        for px in first_px..=last_px {
+            let page = match world.pages.get(&(px, py)) {
+                Some(page) => page,
+                None => continue,
+            };
+            let col_x0 = (px << PAGE_BITS).max(min_x);
+            let col_x1 = ((px << PAGE_BITS) + PAGE_TILES - 1).min(max_x);
+            let len = (col_x1 - col_x0 + 1) as usize;
+            for y in row_y0..=row_y1 {
+                let src = page_index(col_x0, y);
+                let dst = ((y - min_y) as usize) * w + ((col_x0 - min_x) as usize);
+                out[dst..dst + len].copy_from_slice(&page[src..src + len]);
+            }
+        }
+    }
+    for &key in exempt {
+        let (x, y) = tile_of(key);
+        if x < min_x || x > max_x || y < min_y || y > max_y {
+            continue;
+        }
+        let index = ((y - min_y) as usize) * w + ((x - min_x) as usize);
+        out[index] |= 2;
+    }
+}
+
+/// Empty result: no path, no frontier, no states.
+fn empty_result() -> usize {
+    RESULT.with(|cell| {
+        let mut out = cell.borrow_mut();
+        out.clear();
+        out.resize(20, 0);
+    });
+    result_ptr()
 }
 
 #[inline]
@@ -101,11 +236,57 @@ fn relax(
     }
 }
 
-/// Run the search for one request; returns the result pointer.
+/// Apply the box's changed cells and run one search; returns the result pointer.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn route(
-    input: *const u8,
+    world_id: u32,
+    cells_ptr: *const u32,
+    cells_len: u32,
+    exempt_ptr: *const u32,
+    exempt_len: u32,
+    width: u32,
+    height: u32,
+    min_x: i32,
+    min_y: i32,
+    start_x: i32,
+    start_y: i32,
+    goal_x: i32,
+    goal_y: i32,
+    flags: u32,
+    start_dir: i32,
+    goal_dir: i32,
+) -> usize {
+    let cells: &[u32] = if cells_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(cells_ptr, cells_len as usize)
+    };
+    let exempt: &[u32] = if exempt_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(exempt_ptr, exempt_len as usize)
+    };
+    WORLDS.with(|cell| {
+        let mut worlds = cell.borrow_mut();
+        let world = match worlds.get_mut(world_id as usize).and_then(|slot| slot.as_mut()) {
+            Some(world) => world,
+            None => return empty_result(),
+        };
+        apply_cells(world, cells);
+        BOX.with(|buffer| {
+            let mut buffer = buffer.borrow_mut();
+            build_box(world, min_x, min_y, width, height, exempt, &mut buffer);
+            search(
+                &buffer, width, height, min_x, min_y, start_x, start_y, goal_x, goal_y, flags, start_dir, goal_dir,
+            )
+        })
+    })
+}
+
+/// The Dijkstra itself; `p` is the box plane indexed `(y - min_y) * w + (x - min_x)`.
+fn search(
+    p: &[u32],
     width: u32,
     height: u32,
     min_x: i32,
@@ -121,8 +302,6 @@ pub unsafe extern "C" fn route(
     let w = width as usize;
     let h = height as usize;
     let size = w * h;
-    // one little-endian u32 per cell: flags | belt << 8 | end << 16 | under << 24
-    let p = std::slice::from_raw_parts(input as *const u32, size);
 
     let index_of =
         |x: i32, y: i32| -> usize { ((y - min_y) as usize) * w + (x - min_x) as usize };

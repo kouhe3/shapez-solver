@@ -76,21 +76,20 @@ function run(scenario: Scenario, seed: number) {
 
     // endpoints are ports: a route may not swallow another net's terminal tile
     const nets: { a: { x: number; y: number }; b: { x: number; y: number } }[] = [];
-    const blocked = new Set<number>(world.walls);
     for (let i = 0; i < NETS; i++) {
         const a = free[Math.floor(rng() * free.length)]!;
         const b = free[Math.floor(rng() * free.length)]!;
         if (a.x === b.x && a.y === b.y) continue;
         nets.push({ a, b });
-        blocked.add(keyOf(a.x, a.y));
-        blocked.add(keyOf(b.x, b.y));
+        world.blocked.add(keyOf(a.x, a.y));
+        world.blocked.add(keyOf(b.x, b.y));
     }
 
     const t0 = performance.now();
     let routed = 0;
     let cost = 0;
     for (const net of nets) {
-        const run = routeBelt(world, blocked, net.a, net.b, { allowCross: true, margin: 20 });
+        const run = routeBelt(world, net.a, net.b, { allowCross: true, margin: 20 });
         if (!run) continue;
         routed++;
         cost += run.cells.length;
@@ -128,7 +127,6 @@ if (MODE === "factory" || MODE === "chain") {
             }
         }
 
-        const blocked = new Set<number>(world.walls);
         const nets: { a: { x: number; y: number }; b: { x: number; y: number }; kind: "root" | "chain" }[] = [];
         // the hub footprint is (0..3, 0..3); these are its outside ring tiles
         const entries = [
@@ -180,8 +178,8 @@ if (MODE === "factory" || MODE === "chain") {
             const best = entries[bestI]!;
             usedEntries.add(bestI);
             nets.push({ a, b: best, kind: "root" });
-            blocked.add(keyOf(a.x, a.y));
-            blocked.add(keyOf(best.x, best.y));
+            world.blocked.add(keyOf(a.x, a.y));
+            world.blocked.add(keyOf(best.x, best.y));
         }
 
         // colour chains: one long link from each block to its neighbour, the
@@ -194,8 +192,8 @@ if (MODE === "factory" || MODE === "chain") {
                 const a = { x: rightward ? b1.x + BW : b1.x - 1, y: b1.y + Math.floor(BH / 2) };
                 const b = { x: rightward ? b2.x - 1 : b2.x + BW, y: b2.y + Math.floor(BH / 2) };
                 nets.push({ a, b, kind: "chain" });
-                blocked.add(keyOf(a.x, a.y));
-                blocked.add(keyOf(b.x, b.y));
+                world.blocked.add(keyOf(a.x, a.y));
+                world.blocked.add(keyOf(b.x, b.y));
             }
         }
 
@@ -210,14 +208,14 @@ if (MODE === "factory" || MODE === "chain") {
             if (net.kind === "chain") chainTotal++;
             else rootTotal++;
             const gdir = net.kind === "root" ? goalDirOf(net.b) : null;
-            const run = routeBelt(world, blocked, net.a, net.b, {
+            const run = routeBelt(world, net.a, net.b, {
                 allowCross: true,
                 goalMayJoin: true,
                 goalDir: gdir,
                 margin: 20,
             });
             if (!run) {
-                const wide = routeBelt(world, blocked, net.a, net.b, {
+                const wide = routeBelt(world, net.a, net.b, {
                     allowCross: true,
                     goalMayJoin: true,
                     goalDir: gdir,
@@ -234,7 +232,7 @@ if (MODE === "factory" || MODE === "chain") {
                             ]
                                 .map(([dx, dy]) => {
                                     const k = keyOf(t.x + dx!, t.y + dy!);
-                                    return `${world.walls.has(k) ? "W" : world.belts.has(k) ? "B" : blocked.has(k) ? "X" : "."}`;
+                                    return `${world.walls.has(k) ? "W" : world.belts.has(k) ? "B" : world.blocked.has(k) ? "X" : "."}`;
                                 })
                                 .join("");
                         console.log(

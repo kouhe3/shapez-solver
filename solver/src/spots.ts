@@ -61,7 +61,12 @@ export interface TileClaims {
 }
 
 export function createTileClaims(world: World): TileClaims {
-    const blocked = new Set<number>([...world.walls, ...world.approaches]);
+    // one blocked layer per world: rebuild it for this factory so the router's
+    // resident copy drops the previous session's claims
+    const blocked = world.blocked;
+    blocked.clear();
+    for (const key of world.walls) blocked.add(key);
+    for (const key of world.approaches) blocked.add(key);
 
     /** can `info` stand at (x, y) turned `rot`? Reserves nothing. */
     function fits(info: BuildingInfo, x: number, y: number, rot: Rot): boolean {

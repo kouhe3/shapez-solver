@@ -23,6 +23,7 @@ import {
     runFits,
 } from "./layout.js";
 import { buildLayout } from "./placement.js";
+import { disposeRouterWorld } from "./router-engine.js";
 import { colourGap, sizeColorSupply } from "./color-supply.js";
 import type {
     BeltHeading,
@@ -586,7 +587,7 @@ export function planCampaign({
     const hubMerges = allConnections.filter((c) => c.toHub && c.merged).length;
     const balancerAt = unlock.get("balancer") || null;
 
-    return {
+    const result: CampaignResult = {
         ok: failed === 0 && deferred === 0 && impossible === 0 && gapList.length === 0,
         entries,
         totals: {
@@ -634,6 +635,9 @@ export function planCampaign({
             plans,
         },
     };
+    // the sheet carries no world: hand the wasm-side pages back
+    disposeRouterWorld(world);
+    return result;
 }
 
 /* ------------------------------------------------------------------ *
@@ -786,7 +790,12 @@ function repairRoutingGaps({
     near = 6,
 }: RepairRoutingArgs): RepairRoutingReport {
     const byStep = new Map(buildings.map((b): [string, Placement] => [b.stepId, b]));
-    const blocked = new Set<number>([...world.walls, ...world.approaches]);
+    // each session owns `world.blocked`: rebuild it from the walls this map
+    // accumulated, so the router's resident copy sees one blocked layer
+    const blocked = world.blocked;
+    blocked.clear();
+    for (const key of world.walls) blocked.add(key);
+    for (const key of world.approaches) blocked.add(key);
     const allowCross = allowTunnels !== false;
     /** the repair's second phase may cross a turn belt; the build never does */
     let relaxCross = false;
@@ -819,7 +828,7 @@ function repairRoutingGaps({
     function search(start: Tile, goal: Tile, exempt: ReadonlySet<number>, startDir: RepairEnds["startDir"], goalDir: RepairEnds["goalDir"], frontier?: Set<number>): RouteResult | null {
         const wide = wideMarginFor(start, goal);
         for (const margin of wide > nearMargin ? [nearMargin, wide] : [nearMargin]) {
-            const { run, boxLimited } = routeBeltDetailed(world, blocked, start, goal, {
+            const { run, boxLimited } = routeBeltDetailed(world, start, goal, {
                 allowCross,
                 relaxCross,
                 dryRun: true,
