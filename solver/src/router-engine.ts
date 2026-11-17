@@ -106,6 +106,11 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
     if (!engine) throw new Error("router wasm: not initialised");
     const { world, blocked, start, goal, minX, minY, width, height } = req;
     const size = width * height;
+    // The wasm entry takes the box as raw integers; `NaN`/0 would slip past
+    // the buffer check below (NaN comparisons are false) and trap in `route`.
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+        throw new Error(`router: bad box ${width}×${height}`);
+    }
 
     const t0 = performance.now();
     if (size * 4 > inputCap) {

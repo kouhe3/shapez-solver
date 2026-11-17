@@ -16,15 +16,15 @@
 | 仪器目录 | `tools/`：`check-tunnels.ts`、`check-test-filter.ts`、`bench-key-cost.ts` | — |
 | 只读 oracle | `ref/` → junction 到 `vendor/shapez.io/src/js/game`，上游固定在 `8a79de5255fb6756f3a1d26579b1e9bc36e0c811`（= demo build `8a79de52`），由 `bun setup-ref.ts` 稀疏 clone + 重建；`demo/v/8a79de52/` 是预构建镜像。两者都只读 | — |
 | backlog 发布 | `docs/agents/issue-tracker.md` → `.scratch/<feature-slug>/`（`.scratch/` 未建，首条 issue 时创建） | — |
-| 门禁 | `bun run verify`（`bun check` + `bun run test`，判据是 0 failure）；`bun run check:tunnels`（隧道合法性普查）；`bun run check:filter`（harness 自检）；`bash "C:/Users/K/.omp/agent/skills/face-spaghetti/scripts/append-only-check.sh" --worktree` | — |
+| 门禁 | `bun run verify`（`bun check` + `bun run test`，判据是 0 failure）；`bun run check:tunnels`（隧道合法性普查）；`bun run check:filter`（harness 自检）；`bash "$HOME/.omp/agent/skills/face-spaghetti/scripts/append-only-check.sh" --worktree` | — |
 
 判据命令只许指向 tracked 的 `tools/`（`bun run check:tunnels` 等）；一次性脚本留 `work/probe/`，台账行写路径 + 生成命令 + 输入。
 
 ## 本机事实
 
-- Bun：`C:\Users\K\AppData\Local\Microsoft\WinGet\Links\bun.exe`，版本 1.4.4；TypeScript 直接执行，无构建步骤，类型门是 `bun check`。
+- Bun：`%LOCALAPPDATA%\Microsoft\WinGet\Links\bun.exe`，版本 1.4.4；TypeScript 直接执行，无构建步骤，类型门是 `bun check`。
 - `bash` 在 PATH 上会命中 WSL 启动器（`%LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe`）；跑 skill 脚本必须用 Git Bash 全路径：`"C:\Program Files\Git\bin\bash.exe"`。
-- 本 skill 目录：`C:\Users\K\.omp\agent\skills\face-spaghetti`（`scripts/`、`references/` 都在其下）。
+- 本 skill 目录：`%USERPROFILE%\.omp\agent\skills\face-spaghetti`（`scripts/`、`references/` 都在其下）。
 - `ref/` 是 Windows 目录 junction，由 `bun setup-ref.ts` 创建；别手工建，别删除 `vendor/` 后忘记重跑。
 - Python 只用于 `cd demo && python -m http.server 8087` 这类静态服务，不参与求解或测试。
 

@@ -198,7 +198,15 @@ export function savegameMapInfo(payload: unknown): SavegameInfo {
     let hub: SavegamePoint = { x: -2, y: -2 };
     for (const e of (dump && dump.entities) || []) {
         const sm = e && e.components && e.components.StaticMapEntity;
-        if (sm && sm.code === 26 && sm.origin) hub = sm.origin;
+        if (!sm || sm.code !== 26 || !sm.origin) continue;
+        // Tiles pack into 13 bits per axis (`cellKey` in layout.ts), so a hub
+        // outside that range cannot be placed at all, and a non-number would
+        // feed NaN into the router box and trap inside wasm.
+        const { x, y } = sm.origin;
+        if (!Number.isInteger(x) || !Number.isInteger(y) || x < -4096 || x > 4095 || y < -4096 || y > 4095) {
+            throw new Error(`savegame hub origin out of range: (${String(x)}, ${String(y)})`);
+        }
+        hub = { x, y };
     }
     // a malformed dump can leave `hubGoals` null; the game always writes a level
     const level = (dump && dump.hubGoals && dump.hubGoals.level) as number | undefined;

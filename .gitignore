@@ -9,6 +9,9 @@
 /tree.json
 /savegame.raw.json
 /savegame.json
+# the tracked fixture is synthetic; a real save carries the player's session
+/savegame*.bin
+!/savegame.bin
 /preview-cu.svg
 /solver/tmp-sg.mjs
 

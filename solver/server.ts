@@ -47,12 +47,44 @@ function send(status: number, body: string, type = "application/json; charset=ut
     });
 }
 
+const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost)(?::\d+)?$/i;
+
+/**
+ * `/api/solve` runs synchronously on the server's only thread, so it must not
+ * be reachable from another origin or through a rebound host name: those are
+ * the two ways an arbitrary web page could make the server spin.
+ */
+function apiGuard(req: Request): Response | null {
+    if (req.method !== "GET") return send(405, JSON.stringify({ ok: false, error: "GET only" }));
+    const origin = req.headers.get("origin");
+    if (origin !== null && !LOOPBACK_HOST.test(hostOf(origin))) {
+        return send(403, JSON.stringify({ ok: false, error: "cross-origin request rejected" }));
+    }
+    const host = req.headers.get("host");
+    if (host !== null && !LOOPBACK_HOST.test(host)) {
+        return send(403, JSON.stringify({ ok: false, error: "non-loopback host rejected" }));
+    }
+    return null;
+}
+
+function hostOf(origin: string): string {
+    try {
+        return new URL(origin).host;
+    } catch {
+        return "";
+    }
+}
+
 function solveRequest(url: URL): Response {
     const shape = url.searchParams.get("shape");
     if (!shape) return send(400, JSON.stringify({ ok: false, error: "missing ?shape=" }));
+    if (shape.length > 64) return send(400, JSON.stringify({ ok: false, error: "shape too long" }));
     const buildingsParam = url.searchParams.get("buildings");
     const buildings = buildingsParam ? new Set(buildingsParam.split(",")) : new Set(ALL_BUILDINGS);
-    const budget = Number(url.searchParams.get("budget") || 30000);
+    const rawBudget = url.searchParams.get("budget");
+    const requested = rawBudget === null ? 30000 : Number(rawBudget);
+    // the abort test is `attempts > maxAttempts`; a NaN budget would disable it
+    const budget = Number.isFinite(requested) ? Math.min(Math.max(Math.floor(requested), 0), 200000) : 30000;
     try {
         const t0 = Date.now();
         const result: SolveResult = solve(shape, { buildings, maxAttempts: budget });
@@ -104,7 +136,7 @@ const MODULE_PATH = /^\/src\/([A-Za-z0-9_-]+)\.js$/;
 
 async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname === "/api/solve") return solveRequest(url);
+    if (url.pathname === "/api/solve") return apiGuard(req) ?? solveRequest(url);
     if (url.pathname === "/" || url.pathname === "/index.html") {
         return new Response(null, { status: 302, headers: { location: "/web/index.html" } });
     }
