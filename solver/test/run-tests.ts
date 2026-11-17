@@ -22,6 +22,7 @@ import {
     fusedCost,
     createWorld,
     routeBelt,
+    routeBeltDetailed,
     releaseRoute,
     cellKey,
     portCells,
@@ -502,6 +503,29 @@ beginSection("router: walls, tunnels, dead ends");
     );
     const beforeTunnel = routeBelt(thin, thin.walls, { x: -2, y: 2 }, { x: 2, y: 2 }, { allowCross: false, margin: 10, dryRun: true });
     check("router: before L6 a one-tile wall seals", beforeTunnel, null);
+
+    // the router tells a box-limited failure from a definitive one: a room
+    // whose walls are thicker than a tunnel never reaches the box edge, so no
+    // wider box can help — the repair pass uses that to skip its wide retry
+    const room = createWorld({ hub: { x: 40, y: 40 }, patches: [] });
+    for (let x = -8; x <= 8; x++) {
+        for (let y = -8; y <= 8; y++) {
+            const shell = Math.max(Math.abs(x), Math.abs(y));
+            if (shell >= 4) room.walls.add(cellKey(x, y));
+        }
+    }
+    const sealedRoom = routeBeltDetailed(room, room.walls, { x: 0, y: 0 }, { x: 20, y: 0 }, { allowCross: true, margin: 20, dryRun: true });
+    check("router: a sealed room has no run", sealedRoom.run, null);
+    check("router: a sealed room is definitive, not box-limited", sealedRoom.boxLimited, false);
+
+    // a wall that runs past the box on both ends: the detour needs a wider box
+    const longWall = createWorld({ hub: { x: 40, y: 40 }, patches: [] });
+    for (let y = -10; y <= 10; y++) longWall.walls.add(cellKey(0, y));
+    const tight = routeBeltDetailed(longWall, longWall.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, margin: 3, dryRun: true });
+    check("router: a wall past the box blocks the run", tight.run, null);
+    check("router: that failure is box-limited", tight.boxLimited, true);
+    const loose = routeBeltDetailed(longWall, longWall.walls, { x: -2, y: 0 }, { x: 2, y: 0 }, { allowCross: false, margin: 15, dryRun: true });
+    checkTrue("router: the wider box rounds the wall", !!loose.run && loose.run.cells.some((c) => Math.abs(c.y) > 10));
 
     // deeper than one tier-0 tunnel: five tiles of wall cannot be crossed
     const sealed = createWorld({ hub: { x: 20, y: 20 }, patches: [] });

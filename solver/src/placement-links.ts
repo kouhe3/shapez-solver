@@ -21,7 +21,7 @@ import {
     portCells,
     portCentre,
     releaseRoute,
-    routeBelt,
+    routeBeltDetailed,
     runFits,
     tileOfKey,
 } from "./layout.js";
@@ -183,7 +183,7 @@ export function createLinkScheduler({ world, hub, blocked, tuning, allowTunnels 
         // a short link inside one factory only needs a small box: searching ±20
         // tiles around it costs 7× more and finds the same run
         const span = Math.abs(goal.x - start.x) + Math.abs(goal.y - start.y);
-        const near = routeBelt(world, blocked, start, goal, {
+        const near = routeBeltDetailed(world, blocked, start, goal, {
             allowCross,
             goalMayJoin: join,
             exempt,
@@ -193,8 +193,11 @@ export function createLinkScheduler({ world, hub, blocked, tuning, allowTunnels 
             margin: Math.max(tuning.nearMarginFloor, Math.min(tuning.nearMargin, span)),
             dryRun: true,
         });
-        if (near || !wide) return near;
-        return routeBelt(world, blocked, start, goal, {
+        if (near.run || !wide) return near.run;
+        // the near box was never the limit: no reachable tile touched its
+        // edge, so a wider box finds exactly the same (empty) component
+        if (!near.boxLimited) return null;
+        return routeBeltDetailed(world, blocked, start, goal, {
             allowCross,
             goalMayJoin: join,
             exempt,
@@ -203,7 +206,7 @@ export function createLinkScheduler({ world, hub, blocked, tuning, allowTunnels 
             frontier: blameFrontier,
             margin: tuning.wideMargin,
             dryRun: true,
-        });
+        }).run;
     };
 
     /**

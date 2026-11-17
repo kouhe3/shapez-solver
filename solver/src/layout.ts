@@ -606,6 +606,18 @@ function directionIndex(dir: readonly [number, number] | null | undefined): numb
     return i < 0 ? -2 : i;
 }
 
+export interface RouteOutcome {
+    /** null when no legal run exists */
+    run: RouteResult | null;
+    /**
+     * Whether the search ever wanted to leave its box. On a null `run`,
+     * `false` means the box's whole reachable component was exhausted: the
+     * link is impossible for *any* box size while the map stands as it is, so
+     * a wider retry is pure waste.
+     */
+    boxLimited: boolean;
+}
+
 /**
  * Shortest legal belt run between two port tiles, as the game would lay it.
  *
@@ -631,7 +643,7 @@ function directionIndex(dir: readonly [number, number] | null | undefined): numb
  * staircase; crossing a belt costs 3 and a completed tunnel end another 2, so
  * the router prefers short, shallow tunnels.
  */
-export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
+export function routeBeltDetailed(world: World, blocked: ReadonlySet<number>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteOutcome {
     const margin = opts.margin ?? 20;
     const minX = Math.min(start.x, goal.x) - margin;
     const minY = Math.min(start.y, goal.y) - margin;
@@ -654,8 +666,14 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         goalDir: directionIndex(opts.goalDir),
         frontier: opts.frontier ?? null,
     });
-    if (!res.cells) return null;
-    return finishRun(world, { cells: res.cells, phases: res.phases, headings: res.headings }, opts);
+    const boxLimited = res.boxLimited;
+    if (!res.cells) return { run: null, boxLimited };
+    return { run: finishRun(world, { cells: res.cells, phases: res.phases, headings: res.headings }, opts), boxLimited };
+}
+
+/** `routeBeltDetailed(...).run` for callers that do not act on the box verdict */
+export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Tile, goal: Tile, opts: RouteOptions = {}): RouteResult | null {
+    return routeBeltDetailed(world, blocked, start, goal, opts).run;
 }
 
 /** derive spans/crossings and (unless `dryRun`) claim the searched run */

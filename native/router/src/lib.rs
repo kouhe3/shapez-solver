@@ -21,6 +21,23 @@ const P_BLOCKED: u8 = 1;
 const P_EXEMPT: u8 = 2;
 const P_TUNNEL_CELL: u8 = 4;
 
+#[inline]
+fn flags_at(p: &[u32], i: usize) -> u8 {
+    p[i] as u8
+}
+#[inline]
+fn belt_at(p: &[u32], i: usize) -> u8 {
+    (p[i] >> 8) as u8
+}
+#[inline]
+fn end_at(p: &[u32], i: usize) -> u8 {
+    (p[i] >> 16) as u8
+}
+#[inline]
+fn under_at(p: &[u32], i: usize) -> u8 {
+    (p[i] >> 24) as u8
+}
+
 /// request flags
 const F_ALLOW_CROSS: u32 = 1;
 const F_RELAX_CROSS: u32 = 2;
@@ -45,13 +62,13 @@ thread_local! {
 /// Scratch buffer for the input planes; the JS side writes them in place.
 #[no_mangle]
 pub extern "C" fn alloc(size: usize) -> *mut u8 {
-    let layout = std::alloc::Layout::from_size_align(size, 1).expect("layout");
+    let layout = std::alloc::Layout::from_size_align(size, 4).expect("layout");
     unsafe { std::alloc::alloc(layout) }
 }
 
 #[no_mangle]
 pub extern "C" fn dealloc(ptr: *mut u8, size: usize) {
-    let layout = std::alloc::Layout::from_size_align(size, 1).expect("layout");
+    let layout = std::alloc::Layout::from_size_align(size, 4).expect("layout");
     unsafe { std::alloc::dealloc(ptr, layout) }
 }
 
@@ -104,11 +121,8 @@ pub unsafe extern "C" fn route(
     let w = width as usize;
     let h = height as usize;
     let size = w * h;
-    let planes = std::slice::from_raw_parts(input, 4 * size);
-    let p_flags = &planes[0..size];
-    let p_belt = &planes[size..2 * size];
-    let p_end = &planes[2 * size..3 * size];
-    let p_under = &planes[3 * size..4 * size];
+    // one little-endian u32 per cell: flags | belt << 8 | end << 16 | under << 24
+    let p = std::slice::from_raw_parts(input as *const u32, size);
 
     let index_of =
         |x: i32, y: i32| -> usize { ((y - min_y) as usize) * w + (x - min_x) as usize };
@@ -134,6 +148,10 @@ pub unsafe extern "C" fn route(
     let mut chosen: Option<Vec<u32>> = None;
     let mut attempts: u32 = 0;
     let mut states_visited: u32 = 0;
+    // Whether the last attempt ever wanted to step outside the box. When it
+    // did not, the search exhausted the whole reachable component: a bigger
+    // box cannot change the answer, so the caller may skip its wider pass.
+    let mut last_limited = true;
 
     macro_rules! blame {
         ($k:expr) => {
@@ -151,6 +169,10 @@ pub unsafe extern "C" fn route(
         // `best < 0` = no run at all in this attempt: the JS router returns
         // null right away instead of re-searching the same exhausted box
         let mut dead_end = false;
+        let mut attempt_limited = false;
+        // the cut set stays empty on the first attempt (almost always the only
+        // one); skipping its hash lookups is worth more than the branch
+        let has_forbidden = !forbidden.is_empty();
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             let s = &mut *scratch;
@@ -161,22 +183,24 @@ pub unsafe extern "C" fn route(
             let dist = &mut s.dist[..total_states];
             let from = &mut s.from[..total_states];
             dist.fill(INF);
-            from.fill(-1);
             for bucket in s.ring.iter_mut() {
                 bucket.clear();
             }
             let ring = &mut s.ring;
             let mut max_cost: i32 = 0;
 
+            // `from` needs no full reset: it is only read for states this
+            // attempt relaxed, plus the four start states, which have no parent
             for d in 0..4u32 {
                 let state = start_index * PHASES * 4 + d;
                 dist[state as usize] = 0;
+                from[state as usize] = -1;
                 ring[0].push(state);
             }
 
             // `tunnelFree` / `senderOk` read the under plane at a box index.
             let tunnel_free = |key: usize, d: usize| -> bool {
-                (((p_under[key] as u32) >> d) & 1) == 0
+                (((under_at(p, key) as u32) >> d) & 1) == 0
             };
             let sender_ok = |d: usize, cell: u32, heading: u32, cur: u32| -> bool {
                 let dir = DIRS[d];
@@ -190,7 +214,7 @@ pub unsafe extern "C" fn route(
                 } else if d as u32 != heading {
                     return false;
                 }
-                (((p_under[cur as usize] as u32) >> d) & 1) == 0
+                (((under_at(p, cur as usize) as u32) >> d) & 1) == 0
             };
 
             let mut best: i64 = -1;
@@ -227,13 +251,14 @@ pub unsafe extern "C" fn route(
 
                     if phase == 0 {
                         for d in 0..4usize {
-                            if forbidden.contains(&(state * 4 + d as u32)) {
+                            if has_forbidden && forbidden.contains(&(state * 4 + d as u32)) {
                                 continue;
                             }
                             let dir = DIRS[d];
                             let nx = cx + dir.0;
                             let ny = cy + dir.1;
                             if nx < min_x || nx > max_x || ny < min_y || ny > max_y {
+                                attempt_limited = true;
                                 continue;
                             }
                             let ni = index_of(nx, ny);
@@ -244,7 +269,7 @@ pub unsafe extern "C" fn route(
                             let is_start = nx == start_x && ny == start_y;
                             let is_goal = nx == goal_x && ny == goal_y;
                             let step = 1 + if d as u32 == heading { 0 } else { 2 };
-                            let nf = p_flags[ni];
+                            let nf = flags_at(p, ni);
                             let blocked = !is_start
                                 && !is_goal
                                 && nf & P_EXEMPT == 0
@@ -268,7 +293,7 @@ pub unsafe extern "C" fn route(
                                 }
                                 continue;
                             }
-                            let belt = p_belt[ni];
+                            let belt = belt_at(p, ni);
                             if belt != 0 {
                                 if is_goal {
                                     if goal_join {
@@ -314,7 +339,7 @@ pub unsafe extern "C" fn route(
                                 );
                                 continue;
                             }
-                            let end = p_end[ni];
+                            let end = end_at(p, ni);
                             if end != 0 {
                                 if is_goal {
                                     continue;
@@ -372,13 +397,14 @@ pub unsafe extern "C" fn route(
                     if phase <= MAX_UNDERGROUND {
                         // underground: straight on only
                         let d = heading as usize;
-                        if forbidden.contains(&(state * 4 + d as u32)) {
+                        if has_forbidden && forbidden.contains(&(state * 4 + d as u32)) {
                             continue;
                         }
                         let dir = DIRS[d];
                         let nx = cx + dir.0;
                         let ny = cy + dir.1;
                         if nx < min_x || nx > max_x || ny < min_y || ny > max_y {
+                            attempt_limited = true;
                             continue;
                         }
                         let ni = index_of(nx, ny);
@@ -388,14 +414,14 @@ pub unsafe extern "C" fn route(
                         let nk = key_of(nx, ny);
                         let is_start = nx == start_x && ny == start_y;
                         let is_goal = nx == goal_x && ny == goal_y;
-                        let nf = p_flags[ni];
+                        let nf = flags_at(p, ni);
                         let is_blocked = !is_start
                             && !is_goal
                             && nf & P_EXEMPT == 0
                             && nf & P_BLOCKED != 0;
                         let next_phase = phase + 1;
-                        let belt = p_belt[ni];
-                        let end = p_end[ni];
+                        let belt = belt_at(p, ni);
+                        let end = end_at(p, ni);
                         if is_goal {
                             // may surface on the goal port, but nothing may sit
                             // there and the receiver has to face the machine
@@ -408,7 +434,7 @@ pub unsafe extern "C" fn route(
                             if DIRS[goal_dir as usize] != dir {
                                 continue;
                             }
-                            if (p_under[ni] as u32 >> d) & 1 != 0 {
+                            if (under_at(p, ni) as u32 >> d) & 1 != 0 {
                                 continue;
                             }
                             relax(
@@ -493,7 +519,7 @@ pub unsafe extern "C" fn route(
                             continue;
                         }
                         // free ground: the run may surface here or stay under
-                        if (p_under[ni] as u32 >> d) & 1 == 0 {
+                        if (under_at(p, ni) as u32 >> d) & 1 == 0 {
                             relax(
                                 dist,
                                 from,
@@ -523,13 +549,14 @@ pub unsafe extern "C" fn route(
 
                     // receiver: one forced straight step onto a surface tile
                     let d = heading as usize;
-                    if forbidden.contains(&(state * 4 + d as u32)) {
+                    if has_forbidden && forbidden.contains(&(state * 4 + d as u32)) {
                         continue;
                     }
                     let dir = DIRS[d];
                     let nx = cx + dir.0;
                     let ny = cy + dir.1;
                     if nx < min_x || nx > max_x || ny < min_y || ny > max_y {
+                        attempt_limited = true;
                         continue;
                     }
                     let ni = index_of(nx, ny);
@@ -539,12 +566,12 @@ pub unsafe extern "C" fn route(
                     let nk = key_of(nx, ny);
                     let is_start = nx == start_x && ny == start_y;
                     let is_goal = nx == goal_x && ny == goal_y;
-                    let nf = p_flags[ni];
+                    let nf = flags_at(p, ni);
                     if !is_start && !is_goal && nf & P_EXEMPT == 0 && nf & P_BLOCKED != 0 {
                         blame!(nk);
                         continue;
                     }
-                    let belt = p_belt[ni];
+                    let belt = belt_at(p, ni);
                     if belt != 0 {
                         if is_goal && goal_join {
                             relax(
@@ -559,7 +586,7 @@ pub unsafe extern "C" fn route(
                         }
                         continue;
                     }
-                    if p_end[ni] != 0 {
+                    if end_at(p, ni) != 0 {
                         continue;
                     }
                     relax(
@@ -606,6 +633,7 @@ pub unsafe extern "C" fn route(
                 dead_end = true;
             }
         });
+        last_limited = attempt_limited;
         if dead_end {
             break;
         }
@@ -620,11 +648,12 @@ pub unsafe extern "C" fn route(
     RESULT.with(|cell| {
         let mut out = cell.borrow_mut();
         out.clear();
-        out.reserve(16 + n * 12 + frontier.len() * 4);
+        out.reserve(20 + n * 12 + frontier.len() * 4);
         out.extend_from_slice(&(n as u32).to_le_bytes());
         out.extend_from_slice(&(frontier.len() as u32).to_le_bytes());
         out.extend_from_slice(&states_visited.to_le_bytes());
         out.extend_from_slice(&attempts.to_le_bytes());
+        out.extend_from_slice(&(last_limited as u32).to_le_bytes());
         for st in &path {
             let cell_index = st / (PHASES * 4);
             out.extend_from_slice(&cell_index.to_le_bytes());

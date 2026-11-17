@@ -3,15 +3,13 @@
  * engine. `routeBelt` keeps the `World` and the claim/spans bookkeeping; this
  * module ships the search box to wasm.
  *
- * The four byte planes are the router's whole view of the map:
+ * One u32 per cell is the router's whole view of the map, indexed
+ * `(y - minY) * width + (x - minX)` and packed little-endian:
  *
- *   flags  bit0 blocked, bit1 exempt, bit2 tunnel cell
- *   belt   0 none, 1 "h", 2 "v", 3 "turn"
- *   end    0 none, else direction index + 1
- *   under  bitmask of tunnel directions running underneath
- *
- * Plane order in wasm memory is `flags, belt, end, under`, each
- * `width * height` bytes, indexed `(y - minY) * width + (x - minX)`.
+ *   bits 0-7    flags: bit0 blocked, bit1 exempt, bit2 tunnel cell
+ *   bits 8-15   belt: 0 none, 1 "h", 2 "v", 3 "turn"
+ *   bits 16-23  end: 0 none, else direction index + 1
+ *   bits 24-31  under: bitmask of tunnel directions running underneath
  */
 import type { Tile, World } from "./layout.js";
 
@@ -72,6 +70,12 @@ export interface RouterSearchResult {
     /** popped states over every attempt of this search */
     states: number;
     attempts: number;
+    /**
+     * true when the search tried to step outside its box at least once. false
+     * on a failure means the box's whole reachable component was exhausted:
+     * no wider box can produce a run, so callers may skip their wider pass.
+     */
+    boxLimited: boolean;
     /** milliseconds spent writing the planes */
     encodeMs: number;
     /** milliseconds inside the search */
@@ -110,29 +114,76 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
         inputCap = size * 4;
         if (inputPtr === 0) throw new Error("router wasm: alloc failed");
     }
-    // `alloc` may have grown the heap, so the view is created after it
-    const planes = new Uint8Array(engine.memory.buffer, inputPtr, size * 4);
+    // `alloc` may have grown the heap, so the view is created after it. One
+    // little-endian u32 per cell: flags | belt << 8 | end << 16 | under << 24.
+    const words = new Uint32Array(engine.memory.buffer, inputPtr, size);
     const exempt = req.exempt;
-    const flagsPlane = planes.subarray(0, size);
-    const beltPlane = planes.subarray(size, 2 * size);
-    const endPlane = planes.subarray(2 * size, 3 * size);
-    const underPlane = planes.subarray(3 * size, 4 * size);
-    for (let y = 0; y < height; y++) {
-        const row = y * width;
-        const wy = minY + y;
-        for (let x = 0; x < width; x++) {
-            const i = row + x;
-            const key = keyOf(minX + x, wy);
-            let f = 0;
-            if (blocked.has(key)) f |= 1;
-            if (exempt !== null && exempt.has(key)) f |= 2;
-            if (world.tunnelCells.has(key)) f |= 4;
-            flagsPlane[i] = f;
-            const belt = world.belts.get(key);
-            beltPlane[i] = belt === undefined ? 0 : belt === "h" ? 1 : belt === "v" ? 2 : 3;
-            const end = world.tunnelEnds.get(key);
-            endPlane[i] = end === undefined ? 0 : end + 1;
-            underPlane[i] = world.tunnelUnder.get(key) ?? 0;
+    /** box index of a packed tile key, or -1 when it sits outside the box */
+    const indexInBox = (key: number): number => {
+        const ix = Math.floor(key / 8192) - 4096 - minX;
+        if (ix < 0 || ix >= width) return -1;
+        const iy = (key % 8192) - 4096 - minY;
+        if (iy < 0 || iy >= height) return -1;
+        return iy * width + ix;
+    };
+    // The map is sparse: most tiles carry nothing at all. Walking the six
+    // structures beats one Set/Map lookup per box cell as soon as the box is
+    // bigger than the number of entries, which is exactly the wide boxes
+    // where encoding used to cost the most.
+    const entries =
+        blocked.size +
+        (exempt === null ? 0 : exempt.size) +
+        world.tunnelCells.size +
+        world.belts.size +
+        world.tunnelEnds.size +
+        world.tunnelUnder.size;
+    if (size > entries) {
+        words.fill(0);
+        for (const key of blocked) {
+            const i = indexInBox(key);
+            if (i >= 0) words[i] = (words[i] ?? 0) | 1;
+        }
+        if (exempt !== null) {
+            for (const key of exempt) {
+                const i = indexInBox(key);
+                if (i >= 0) words[i] = (words[i] ?? 0) | 2;
+            }
+        }
+        for (const key of world.tunnelCells) {
+            const i = indexInBox(key);
+            if (i >= 0) words[i] = (words[i] ?? 0) | 4;
+        }
+        for (const [key, heading] of world.belts) {
+            const i = indexInBox(key);
+            if (i >= 0) words[i] = (words[i] ?? 0) | ((heading === "h" ? 1 : heading === "v" ? 2 : 3) << 8);
+        }
+        for (const [key, dir] of world.tunnelEnds) {
+            const i = indexInBox(key);
+            if (i >= 0) words[i] = (words[i] ?? 0) | ((dir + 1) << 16);
+        }
+        for (const [key, under] of world.tunnelUnder) {
+            const i = indexInBox(key);
+            if (i >= 0) words[i] = (words[i] ?? 0) | (under << 24);
+        }
+    } else {
+        for (let y = 0; y < height; y++) {
+            const row = y * width;
+            const wy = minY + y;
+            for (let x = 0; x < width; x++) {
+                const i = row + x;
+                const key = keyOf(minX + x, wy);
+                let f = 0;
+                if (blocked.has(key)) f |= 1;
+                if (exempt !== null && exempt.has(key)) f |= 2;
+                if (world.tunnelCells.has(key)) f |= 4;
+                const belt = world.belts.get(key);
+                const end = world.tunnelEnds.get(key);
+                words[i] =
+                    f |
+                    ((belt === undefined ? 0 : belt === "h" ? 1 : belt === "v" ? 2 : 3) << 8) |
+                    ((end === undefined ? 0 : end + 1) << 16) |
+                    ((world.tunnelUnder.get(key) ?? 0) << 24);
+            }
         }
     }
     let flags = 0;
@@ -159,13 +210,14 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
     const t2 = performance.now();
 
     // the call may have grown memory while building the answer
-    const head = new DataView(engine.memory.buffer, ptr, 16);
+    const head = new DataView(engine.memory.buffer, ptr, 20);
     const pathLen = head.getUint32(0, true);
     const frontierLen = head.getUint32(4, true);
     const states = head.getUint32(8, true);
     const attempts = head.getUint32(12, true);
-    const view = new DataView(engine.memory.buffer, ptr, 16 + pathLen * 12 + frontierLen * 4);
-    let off = 16 + pathLen * 12;
+    const boxLimited = head.getUint32(16, true) !== 0;
+    const view = new DataView(engine.memory.buffer, ptr, 20 + pathLen * 12 + frontierLen * 4);
+    let off = 20 + pathLen * 12;
     if (req.frontier) {
         for (let i = 0; i < frontierLen; i++) {
             req.frontier.add(view.getUint32(off, true));
@@ -173,9 +225,9 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
         }
     }
     if (pathLen === 0) {
-        return { cells: null, phases: [], headings: [], states, attempts, encodeMs: t1 - t0, searchMs: t2 - t1 };
+        return { cells: null, phases: [], headings: [], states, attempts, boxLimited, encodeMs: t1 - t0, searchMs: t2 - t1 };
     }
-    off = 16;
+    off = 20;
     const cells: Tile[] = new Array(pathLen);
     const phases: number[] = new Array(pathLen);
     const headings: number[] = new Array(pathLen);
@@ -186,5 +238,5 @@ export function routerSearch(req: RouterRequest): RouterSearchResult {
         cells[i] = { x: (index % width) + minX, y: Math.floor(index / width) + minY };
         off += 12;
     }
-    return { cells, phases, headings, states, attempts, encodeMs: t1 - t0, searchMs: t2 - t1 };
+    return { cells, phases, headings, states, attempts, boxLimited, encodeMs: t1 - t0, searchMs: t2 - t1 };
 }

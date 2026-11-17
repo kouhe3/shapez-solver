@@ -19,7 +19,7 @@ import {
     portCells,
     portCentre,
     releaseRoute,
-    routeBelt,
+    routeBeltDetailed,
     runFits,
 } from "./layout.js";
 import { buildLayout } from "./placement.js";
@@ -802,9 +802,24 @@ function repairRoutingGaps({
         return n;
     };
 
+    /**
+     * The two boxes a repair search may use. The wide one exists to let a
+     * *long* delivery detour around other factories, so it scales with the
+     * span instead of being a fixed 240: a 480-tile box around a five-tile
+     * hop costs millions of states and, measured on the full campaign, never
+     * changed the answer — a 60-tile detour is already a dozen times the
+     * link's own length.
+     */
+    const nearMargin = 60;
+    const wideMarginFor = (start: Tile, goal: Tile): number => {
+        const span = Math.abs(goal.x - start.x) + Math.abs(goal.y - start.y);
+        return Math.max(nearMargin, Math.min(240, 2 * span + 40));
+    };
+
     function search(start: Tile, goal: Tile, exempt: ReadonlySet<number>, startDir: RepairEnds["startDir"], goalDir: RepairEnds["goalDir"], frontier?: Set<number>): RouteResult | null {
-        for (const margin of [60, 240]) {
-            const run = routeBelt(world, blocked, start, goal, {
+        const wide = wideMarginFor(start, goal);
+        for (const margin of wide > nearMargin ? [nearMargin, wide] : [nearMargin]) {
+            const { run, boxLimited } = routeBeltDetailed(world, blocked, start, goal, {
                 allowCross,
                 relaxCross,
                 dryRun: true,
@@ -815,6 +830,10 @@ function repairRoutingGaps({
                 margin,
             });
             if (run) return run;
+            // the search exhausted every tile it could reach without touching
+            // the box edge, so the wide pass would re-walk the same dead
+            // component — a gap that no box size repairs while the map stands
+            if (!boxLimited) return null;
         }
         return null;
     }
@@ -1081,7 +1100,11 @@ function repairRoutingGaps({
             let touched = 0;
             const ripped = new Set<number>();
             for (const index of todo) {
-                const direct = find(index);
+                // one search answers both "is it routable" and "who blocks it":
+                // the frontier is filled on failure, so a second identical
+                // search per round would only burn the same states again
+                const frontier = new Set<number>();
+                const direct = find(index, frontier);
                 if (direct) {
                     commit(index, direct);
                     touched += 1;
@@ -1094,14 +1117,8 @@ function repairRoutingGaps({
                 }
                 let done = false;
                 for (let cascade = 0; cascade < cascades && !done; cascade++) {
-                    const frontier = new Set<number>();
-                    const run = find(index, frontier);
-                    if (run) {
-                        commit(index, run);
-                        touched += 1;
-                        done = true;
-                        break;
-                    }
+                    // `frontier` comes from the failure above (or from the
+                    // search at the end of the previous cascade)
                     const own = owners();
                     const scores = new Map<number, { hits: number; d: number }>();
                     for (const key of frontier) {
@@ -1128,6 +1145,13 @@ function repairRoutingGaps({
                         rip(victim);
                         ripped.add(victim);
                         touched += 1;
+                    }
+                    frontier.clear();
+                    const run = find(index, frontier);
+                    if (run) {
+                        commit(index, run);
+                        touched += 1;
+                        done = true;
                     }
                 }
                 if (!done && retryMiner(index)) touched += 1;
