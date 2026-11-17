@@ -11,7 +11,6 @@
 import { solve, solve as solveWithAllBuildings, ALL_BUILDINGS } from "./solver.js";
 import {
     BUILDING_INFO,
-    buildLayout,
     cellKey,
     claimRoute,
     createWorld,
@@ -24,6 +23,7 @@ import {
     runFits,
     sizeColorSupply,
 } from "./layout.js";
+import { buildLayout } from "./placement.js";
 import type {
     BeltHeading,
     BlockRect,

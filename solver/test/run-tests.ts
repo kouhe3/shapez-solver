@@ -15,7 +15,6 @@ import type { Patch } from "../src/map.js";
 import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import {
-    buildLayout,
     BUILDING_INFO,
     sizeColorSupply,
     expandPlanTree,
@@ -30,7 +29,9 @@ import {
     portApproachCells,
     rotatedSize,
 } from "../src/layout.js";
-import type { Connection, Tile, World } from "../src/layout.js";
+import { buildLayout, createPlacementSession } from "../src/placement.js";
+import type { Connection, Placement, Tile, World } from "../src/layout.js";
+import { BUILDING_NAMES } from "../src/catalogue.js";
 import type { BuildingKind } from "../src/catalogue.js";
 import { schematicSVG } from "../src/schematic.js";
 import type { SchematicLayout } from "../src/schematic.js";
@@ -910,6 +911,24 @@ beginSection("layout: one cutter serves every output slot at once");
     }
     check("a fused cutter still feeds each slot once", Math.max(0, ...fanout.values()), 1);
     check("the fused layout routes", L.routingGaps.length, 0);
+}
+
+beginSection("placement: the session lays and rips its own links");
+{
+    const hub = { x: 20, y: 20 };
+    const world = createWorld({ hub, patches: [] });
+    const session = createPlacementSession({ world, hub, stepById: new Map() });
+    const info = BUILDING_INFO.rotate;
+    const src: Placement = { step: "a", stepId: "a", kind: "rotate", zh: BUILDING_NAMES.rotate, x: 0, y: 0, w: 1, h: 1, rot: 0 };
+    const dst: Placement = { ...src, step: "b", stepId: "b", x: 9 };
+    check("session: a link between two parts lays", session.layLink(session.shapeLink(src, info, 0, dst, info, 0)), true);
+    check("session: one connection, routed", session.connections.map((c) => c.routed), [true]);
+    check("session: the belt ledger is the run", session.beltEstimate, session.connections[0]!.beltTiles);
+    checkTrue("session: the belts are on the map", world.belts.size > 0);
+    session.rip(0);
+    check("session: a ripped link is a gap again", session.connections[0]!.routed, false);
+    check("session: the ledger goes back to zero", session.beltEstimate, 0);
+    check("session: the map lost the belts", world.belts.size, 0);
 }
 
 beginSection("campaign: only the lines buildable by L9");

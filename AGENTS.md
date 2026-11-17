@@ -36,8 +36,8 @@ shape code string
 ### Reuse: absent by design (read this before "optimising" it)
 
 - `solve()` builds a **fresh `Solver` per call** (`solver.ts:743`); `memo` / `path` / `cycleHits` are instance state. `planCampaign` calls `solve()` once per needed shape (`campaign.ts:272-275`): the same intermediate shape is solved and built once per factory (F28).
-- Inside one target the memo returns the **same `PlanNode`** to several parents (the AST is a DAG), and `flatten` preserves that sharing. But `buildLayout` starts with `expandPlanTree(P.flatten(plan))` (`layout.ts:1244`), which **copies every shared sub-plan**: one output slot feeds exactly one belt, splitters unlock only at L4, and parts are free (`layout.ts:1144-1152`). Reuse exists only during the search, never in the layout (F29).
-- Colour production is **one chain per consumer port** (`buildColorChain`, `layout.ts:1647-1655`): two painter ports of the same colour grow two chains. `planCampaign`'s `sizeColorSupply` only sizes demand (`campaign.ts:441`). Factories share the map, the hub, deposits and belt lanes — never machines (F30).
+- Inside one target the memo returns the **same `PlanNode`** to several parents (the AST is a DAG), and `flatten` preserves that sharing. But `buildLayout` starts with `expandPlanTree(P.flatten(plan))` (`placement.ts:1370`), which **copies every shared sub-plan**: one output slot feeds exactly one belt, splitters unlock only at L4, and parts are free (the copy loop in `expandPlanTree`, `layout.ts:988`). Reuse exists only during the search, never in the layout (F29).
+- Colour production is **one chain per consumer port** (`buildColorChain`, `placement.ts:937`): two painter ports of the same colour grow two chains. `planCampaign`'s `sizeColorSupply` only sizes demand (`campaign.ts:528`). Factories share the map, the hub, deposits and belt lanes — never machines (F30).
 - Making reuse real means changing all three layers at once: cross-target memo + multi-consumer intermediates, a DAG-aware layout (splitter or shared sub-factory instead of `expandPlanTree`), and inter-factory belts. `docs/plans/routing-gaps.md` is the open plan in this area.
 
 ### Shape representation
@@ -58,11 +58,12 @@ shape code string
 
 ### World, layout and campaign
 
-- `BUILDING_INFO` (`layout.ts:443`) is the single source of tile geometry: ports in tile units, y down, multi-output index = `ItemEjector` slot index. Tests align it against upstream.
-- `routeBelt` (`layout.ts:693`) is a Dijkstra over `(tile, phase, heading)`; phases 0 = surface, 1–4 = underground, 5 = surfaced. `MAX_UNDERGROUND = 4` = tiles strictly between ends (the game's 5-tile tier-0 span). `TunnelSpan`s are derived after the search; `claimRoute` commits exactly the tested run.
-- Tile keys are packed numbers `(x+4096)*8192+(y+4096)` (`cellKey`, `layout.ts:957`), ~16× faster than `"x|y"` strings for `World` lookups.
+- `BUILDING_INFO` (`layout.ts:401`) is the single source of tile geometry: ports in tile units, y down, multi-output index = `ItemEjector` slot index. Tests align it against upstream.
+- `routeBelt` (`layout.ts:640`) is a Dijkstra over `(tile, phase, heading)`; phases 0 = surface, 1–4 = underground, 5 = surfaced. `MAX_UNDERGROUND = 4` = tiles strictly between ends (the game's 5-tile tier-0 span). `TunnelSpan`s are derived after the search; `claimRoute` commits exactly the tested run.
+- Tile keys are packed numbers `(x+4096)*8192+(y+4096)` (`cellKey`, `layout.ts:869`), ~16× faster than `"x|y"` strings for `World` lookups.
+- `placement.ts` turns a plan into one factory: `createPlacementSession` (`:425`) owns the world reservations, the link queue, the belt/entry owner maps and the rip-up pass, and `buildLayout` (`:1357`) is the choreography that places rows, extractors, colour chains and trash cans through it. The tuned knobs live once in `PlacementTuning` (`:66`, defaults `:96`): `maxTries`, the near/wide search boxes, `corridor`, `machineGap`, `blockGap`, the rip rounds, `hubEntryLegs` and `colorGroupSize`; `buildLayout({ tuning })` merges overrides, so an experiment no longer edits the source.
 - The hub is 4×4 with 16 outside entry tiles (`HUB_ENTRIES = 16` in `rates.ts:41`); see *Hub and sustained demand* below.
-- `planCampaign` (`campaign.ts:282`): per need → `solve` → `buildLayout` in its own block (`allocateBlock`, `layout.ts:1096`) → collect placements / connections / colour chains / BOM → campaign-level repair (`repairRoutingGaps`, `campaign.ts:784`) → one belt/colour ledger. One shared `World` for all factories, created and owned by this module; it never leaves the seam.
+- `planCampaign` (`campaign.ts:282`): per need → `solve` → `buildLayout` (`placement.ts:1357`) in its own block (`allocateBlock`, `placement.ts:224`) → collect placements / connections / colour chains / BOM → campaign-level repair (`repairRoutingGaps`, `campaign.ts:784`) → one belt/colour ledger. One shared `World` for all factories, created and owned by this module; it never leaves the seam.
 - `SheetView` (`campaign.ts:188`) is the sheet's whole interface: hub, buildings, connections, sources, colours, missing resources, routing gaps, belt count, BOM, one frame per factory. `Layout` stays the single-factory type — the sheet is not a fake `Layout` and carries no `world`.
 - Whoever moves a run writes its derived fields (`path`, `tunnelSpans`, `tunnelCells`, `beltTiles`) — `buildLayout` and the repair pass alike. The sheet only sums `beltTiles`; nothing re-derives a path from the world. Colour sources are counted from `Placement.color` (miners and mixers), never from synthetic step ids.
 - `validateSheet` (`solver/src/validate.ts`) answers "would this stand up in the game" from the drawing alone: span length and straight ends, port facing, hijack, crossings, and tile ownership (one belt, one tunnel end, one direction per tile). It re-derives every rule itself — never `routeBelt`'s state, never `World`; the census is its production adapter, and tests corrupt a real layout to prove it bites.
@@ -104,9 +105,9 @@ Run from the repo root; every script below is defined in `package.json`.
 # Setup + gates
 bun install                    # once: the single devDependency (@types/bun)
 bun run verify                 # bun check + full suite — primary gate (~2 s)
-bun run test                   # 261 checks, 0 failure, ~2.1 s
-bun run test:quick             # 226 checks, skips both level loops, ~1.3 s
-bun run test --filter=router   # 32 checks, 229 skipped
+bun run test                   # 268 checks, 0 failure, ~2.1 s
+bun run test:quick             # 233 checks, skips both level loops, ~1.3 s
+bun run test --filter=router   # 32 checks, 236 skipped
 bun run check:tunnels          # campaign tunnel legality, ~20 s full (not in verify)
 bun run check:filter           # harness self-check, ~48 s (not in verify)
 bun run bench:key              # tile-key microbenchmark, ~3 s (ratio ~16-18x)
@@ -158,7 +159,7 @@ Gotchas:
   - Invariant violations throw; *search* misses return `null`.
   - An unsolvable target is **not** an exception: `solve()` returns `{ ok: false, error, stats }`.
   - CLI prints to stderr and exits `2` on usage errors, `1` on failure.
-- **Deliberate mutation and caching** (do not "clean these up" without measuring): `shape.__hash`, the `evalNode` WeakMap, `flatten`'s per-call WeakMap, `decompCache` / `compCache`, `Solver.pieceTables`, and `buildLayout`'s `blocked` / `reserve` / `release` bookkeeping.
+- **Deliberate mutation and caching** (do not "clean these up" without measuring): `shape.__hash`, the `evalNode` WeakMap, `flatten`'s per-call WeakMap, `decompCache` / `compCache`, `Solver.pieceTables`, and `createPlacementSession`'s `blocked` / `reserve` / `release` bookkeeping.
 - **No `async` inside `solver/src/`.** Only `cli.ts cmdCheck` is async (dynamic import + spawn); `server.ts` serves through `Bun.serve` and transpiles `web/app.ts` per request.
 - **Map RNG order is fidelity-critical** (`map.ts`): reordering RNG calls changes every seed.
 
@@ -186,7 +187,8 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 |`solver/src/plan.ts`|Plan AST (`:31-88`), builders (`:102-129`), `evalNode` (`:137`), `flatten` (`:227`), `verifyPlan` (`:322`), `parseTarget` (`:338`), `planToJSON` (`:358`).|
 |`solver/src/solver.ts`|Candidate families and budgets (`:199-200`), `planShape` (`:581`), `solve` (`:740`).|
 |`solver/src/catalogue.ts`|`BuildingKind`, `BUILDING_KINDS`, `BUILDING_NAMES`, `GAME_BUILDING_NAMES`: the only place a machine gets a name.|
-|`solver/src/layout.ts`|`BUILDING_INFO` port table (`:443`), `routeBelt` (`:693`), `patchCellsByCentre` (`:967`), `allocateBlock` (`:1096`), `expandPlanTree` (`:1226`), `buildLayout` (`:1336`), `buildColorChain` (`:1864`). One factory per call.|
+|`solver/src/layout.ts`|The tile world: `BUILDING_INFO` port table (`:401`), `routeBelt` (`:640`), `sizeColorSupply` (`:838`), `cellKey` (`:869`), `patchCellsByCentre` (`:903`), `expandPlanTree` (`:986`), `planBom` (`:1028`).|
+|`solver/src/placement.ts`|One plan → one factory: `PlacementTuning` (`:66`), `PlacementSession` (`:366`), `createPlacementSession` (`:425`), `buildLayout` (`:1357`), `allocateBlock` (`:224`), `buildColorChain` (`:937`).|
 |`solver/src/campaign.ts`|`planCampaign` (`:282`), `SheetView` (`:188`): the sheet module — per-shape solve + layout, the world it owns, campaign-level repair (`repairRoutingGaps` `:784`), throughput, colour gaps, belt ledger.|
 |`solver/src/validate.ts`|`validateSheet` + `VIOLATION_KINDS`: sheet legality from the drawing (spans, turns, port facing, hijack, tile ownership). Independent of `routeBelt` and `World`.|
 |`solver/src/needs.ts`|Level + upgrade-tier shape requirements (`neededShapes`, `:152`). Feeds `cli all`.|
@@ -225,9 +227,9 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 - **Covered:** shape codec + hashing, rotations, cut/stack, the `BUILDING_INFO` port table vs upstream slots, connection start slots, map determinism (seed 47742), savegame round-trip, tunnel-router legality, sheet legality (a legal layout, plus injected damage the checker must see), needs/unlock logic, campaign placement, throughput rates, level 20, the 9 demo and 26 full levels, and the schematic representation.
 - **Gaps to know:** the level suites assert only `ok` + `verification.ok`, never `cost` — optimality regressions pass silently (the product criterion is the Pareto frontier, ADR-0001, so `cost` is a proxy). `schematic.ts` *is* covered; `web/app.ts`, `server.ts`, `render.ts`, `cli.ts` and `setup-ref.ts` are not. The corpus loops increment failures outside `--filter`, so filtering neither hides nor speeds them up.
 - **`bun run check:tunnels`** (≈20 s full) rebuilds the campaign for seed 47742 and hands the sheet to `validateSheet` — the rules live in `solver/src/validate.ts` and read the drawing only, never `World`: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends, and tile ownership (one belt, one end, one direction per tile). Floors the routed count (demo ≥ 44, full ≥ 390). Measured 2026-11-17: demo 48 routed / 21 spans; full 801 routed / 1819 spans, 0 gaps, 0 violations. Run after touching `routeBelt`, the repair pass or `validate.ts`.
-- **`bun run check:filter`** (≈50 s) asserts the harness partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. 29 sections. Run after touching `run-tests.ts`.
+- **`bun run check:filter`** (≈50 s) asserts the harness partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. 30 sections. Run after touching `run-tests.ts`.
 - **`bun run bench:key`** measures string vs packed-number tile keys: ratio ≈ 16-18×. Keep `World` keyed by numbers.
-- **`bun run bench:router`** runs the synthetic routing corpus (default 64×64 / 80 nets / seed 7) on the wasm router; `bun run verify` runs all 261 checks on the same backend.
+- **`bun run bench:router`** runs the synthetic routing corpus (default 64×64 / 80 nets / seed 7) on the wasm router; `bun run verify` runs all 268 checks on the same backend.
 - **`bun run fuzz --n=40 --seed=1234 --budget=30000`** rebuilds randomly generated producible shapes; the default run is ~25 ms, so raise `--n` / `--budget` before quoting it as evidence.
 
 ### Domain constraints — do not "fix" these
