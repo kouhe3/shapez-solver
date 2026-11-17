@@ -187,6 +187,9 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 |`solver/src/map.ts`|Exact port of the game map generator (`scanMap` `:330`, `scanForTypes` `:404`, `nearestPatch` `:434`).|
 |`solver/src/savegame.ts`|Savegame codec (`decodeSavegame` `:76`); writes a literal zero CRC, round-trip is not byte-identical.|
 |`solver/src/schematic.ts`|Campaign SVG (`schematicSVG` `:183`), 3×3 chunk-overview representation.|
+|`solver/src/router-engine.ts`|Router engine contract + box snapshot; `initRouterWasm` lives here.|
+|`native/router/src/lib.rs`|Rust Dijkstra transcribed from the JS router it replaced (bucket ring, cut retry, frontier).|
+|`tools/bench-router.ts`|Synthetic router benchmark over `routeBelt`.|
 |`solver/test/run-tests.ts`|Harness plus **all** expectations as inline literals.|
 |`tools/check-tunnels.ts`|Independent tunnel-legality census for the campaign (floors: demo ≥44, full ≥390).|
 |`tools/check-test-filter.ts`|Self-check of the harness filter/timings/section partition.|
@@ -197,7 +200,7 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 ## Runtime/Tooling Preferences
 
 - **Bun ≥ 1.4.4** (installed 1.4.4+38afee6c8). TypeScript sources run directly: no build step, no bundler, no `typescript` package.
-- **Zero runtime dependencies is a hard constraint**: only `node:` builtins and relative imports. `@types/bun` is types only. `bun.lock` resolves from `registry.npmmirror.com`.
+- **Zero runtime dependencies is a hard constraint**: only `node:` builtins and relative imports. `@types/bun` is types only. `bun.lock` resolves from `registry.npmmirror.com`. The Rust router adds no npm dependency: `solver/router.wasm` is a committed artifact, and cargo is only needed to rebuild it.
 - `bun check` is Bun's own checker (~50 ms), not tsc. Do not "fix" it by installing `typescript`.
 - Import specifiers: `solver/**` imports `./x.js` (Bun resolves to `.ts`); `tools/**` and `setup-ref.ts` import `.ts` directly. Both styles are intentional.
 - The web UI imports the solver **in the browser** and solves on the main thread (`app.ts:348-351`); it never calls `/api/solve`. The API is a separate headless surface.
@@ -217,6 +220,7 @@ Write `fn(shape): ShapePair[]` (pattern: `windowSplits` / `splitCandidates`), va
 - **`bun run check:tunnels`** (≈2 min full) rebuilds the campaign for seed 47742 and independently re-derives every tunnel: span ≤ 5 tiles, straight sender/receiver ends, no same-direction end inside a span (hijack/break), ends occupy their tile, no belt self-overlap, port-facing ends, bookkeeping. Floors the routed count (demo ≥ 44, full ≥ 390). Measured: demo 48/48 routed, 44 spans; full 798/798 routed (0 gaps), 1828 spans. Run after touching `routeBelt`, `repairRoutingGaps`, `World` bookkeeping or `schematic.ts`.
 - **`bun run check:filter`** (≈48 s) asserts the harness partition (per-section checks sum to the default total; `checks + skipped` equals it on every run), the `--timings` line count, and the exit codes of the no-match / bad-regex / bare / empty lanes. 26 sections. Run after touching `run-tests.ts`.
 - **`bun run bench:key`** measures string vs packed-number tile keys: ratio ≈ 16-18×. Keep `World` keyed by numbers.
+- **`bun run bench:router`** runs the synthetic routing corpus (default 64×64 / 80 nets / seed 7) on the wasm router; `bun run verify` runs all 247 checks on the same backend.
 - **`bun run fuzz --n=40 --seed=1234 --budget=30000`** rebuilds randomly generated producible shapes; the default run is ~25 ms, so raise `--n` / `--budget` before quoting it as evidence.
 
 ### Domain constraints — do not "fix" these
