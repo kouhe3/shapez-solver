@@ -16,7 +16,6 @@ import { compressX64, decompressX64 } from "../src/lz_factory.js";
 import { compressObject, decompressObject, savegameMapInfo } from "../src/savegame.js";
 import {
     BUILDING_INFO,
-    sizeColorSupply,
     expandPlanTree,
     planBom,
     fuseCuts,
@@ -29,7 +28,10 @@ import {
     portApproachCells,
     rotatedSize,
 } from "../src/layout.js";
-import { buildLayout, createPlacementSession } from "../src/placement.js";
+import { buildLayout, createPlacementSession, DEFAULT_TUNING } from "../src/placement.js";
+import { colourGap, sizeColorSupply } from "../src/color-supply.js";
+import { createLinkScheduler } from "../src/placement-links.js";
+import { createTileClaims } from "../src/spots.js";
 import type { Connection, Placement, Tile, World } from "../src/layout.js";
 import { BUILDING_NAMES } from "../src/catalogue.js";
 import type { BuildingKind } from "../src/catalogue.js";
@@ -40,6 +42,7 @@ import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
 import { validateSheet } from "../src/validate.js";
+import { recipeDiagram } from "../src/recipe.js";
 import { initRouterWasm } from "../src/router-engine.js";
 import { readFileSync } from "node:fs";
 
@@ -921,14 +924,115 @@ beginSection("placement: the session lays and rips its own links");
     const info = BUILDING_INFO.rotate;
     const src: Placement = { step: "a", stepId: "a", kind: "rotate", zh: BUILDING_NAMES.rotate, x: 0, y: 0, w: 1, h: 1, rot: 0 };
     const dst: Placement = { ...src, step: "b", stepId: "b", x: 9 };
-    check("session: a link between two parts lays", session.layLink(session.shapeLink(src, info, 0, dst, info, 0)), true);
-    check("session: one connection, routed", session.connections.map((c) => c.routed), [true]);
-    check("session: the belt ledger is the run", session.beltEstimate, session.connections[0]!.beltTiles);
+    check("session: a link between two parts lays", session.links.layLink(session.links.shapeLink(src, info, 0, dst, info, 0)), true);
+    check("session: one connection, routed", session.links.connections.map((c) => c.routed), [true]);
+    check("session: the belt ledger is the run", session.links.beltEstimate, session.links.connections[0]!.beltTiles);
     checkTrue("session: the belts are on the map", world.belts.size > 0);
-    session.rip(0);
-    check("session: a ripped link is a gap again", session.connections[0]!.routed, false);
-    check("session: the ledger goes back to zero", session.beltEstimate, 0);
+    session.links.rip(0);
+    check("session: a ripped link is a gap again", session.links.connections[0]!.routed, false);
+    check("session: the ledger goes back to zero", session.links.beltEstimate, 0);
     check("session: the map lost the belts", world.belts.size, 0);
+}
+
+beginSection("links: a failed link is retried by the rip-up pass");
+{
+    const hub = { x: 30, y: 30 };
+    const world = createWorld({ hub, patches: [] });
+    const claims = createTileClaims(world);
+    // no tunnels: a wall is a wall, so the first search has to fail
+    const links = createLinkScheduler({ world, hub, blocked: claims.blocked, tuning: DEFAULT_TUNING, allowTunnels: false });
+    const info = BUILDING_INFO.rotate;
+    const src: Placement = { step: "a", stepId: "a", kind: "rotate", zh: BUILDING_NAMES.rotate, x: 0, y: 0, w: 1, h: 1, rot: 0 };
+    const dst: Placement = { ...src, step: "b", stepId: "b", x: 9 };
+    const wall: number[] = [];
+    for (let y = -40; y <= 40; y++) wall.push(cellKey(6, y));
+    claims.block(wall);
+    check("links: a walled run is reported as a gap", links.layLink(links.shapeLink(src, info, 0, dst, info, 0)), false);
+    // the gap list is the scheduler's report, refreshed when it gives up
+    links.schedule();
+    check("links: the gap carries the link's ends", links.routingGaps.map((g) => [g.from, g.to]), [["a", "b"]]);
+    for (const key of wall) claims.blocked.delete(key);
+    links.schedule();
+    check("links: the retry closes the gap", links.connections.map((c) => c.routed), [true]);
+    check("links: the gap list is empty again", links.routingGaps, []);
+    checkTrue("links: the retried belts are on the map", world.belts.size > 0);
+}
+
+beginSection("colour supply: two ports of one colour grow two chains");
+{
+    const hub = { x: 0, y: 0 };
+    const patches: Patch[] = [
+        { x: 10, y: 10, size: 2, item: { kind: "color", color: "r" } },
+        { x: 14, y: 10, size: 2, item: { kind: "color", color: "g" } },
+    ];
+    const world = createWorld({ hub, patches });
+    const session = createPlacementSession({ world, hub, stepById: new Map() });
+    const first = session.colour.buildColorChain("y", { x: 12, y: 10 });
+    const second = session.colour.buildColorChain("y", { x: 12, y: 10 });
+    check("supply: two yellow chains each build", [first?.ok, second?.ok], [true, true]);
+    // y = r + g: each chain is its own two miners and one mixer
+    check("supply: two chains mine four deposits", session.buildings.filter((b) => b.kind === "base").length, 4);
+    check("supply: and place two mixers", session.buildings.filter((b) => b.kind === "mixer").length, 2);
+    check("supply: nothing is missing", [...session.missing], []);
+}
+
+beginSection("recipe: one card per machine, waves and lanes from the plan");
+{
+    const res = solve("RuCw--Cw:----Ru--");
+    checkTrue("recipe: the plan solves", res.ok && !!res.flat);
+    const diagram = recipeDiagram(res.flat!);
+    // a fused cutter is one machine with two outlets, not one card per product
+    check(
+        "recipe: a fused cutter is one card",
+        diagram.cards.filter((c) => c.outlets.length > 1).map((c) => [c.id, c.outlets.length]),
+        [
+            ["v2", 2],
+            ["v5", 2],
+        ]
+    );
+    // every line points right: an input sits in a strictly earlier wave
+    check(
+        "recipe: every feed points right",
+        diagram.feeds.filter((f) => diagram.cards[f.from]!.wave >= diagram.cards[f.to]!.wave).length,
+        0
+    );
+    // a line that skips a wave dives below the board on its own lane
+    check(
+        "recipe: only wave-skipping feeds get a lane",
+        diagram.feeds.map((f) => f.lane !== null),
+        diagram.feeds.map((f) => diagram.cards[f.to]!.wave - diagram.cards[f.from]!.wave >= 2)
+    );
+    check("recipe: lanes are numbered in feed order", diagram.feeds.flatMap((f) => (f.lane === null ? [] : [f.lane])), [0, 1, 2]);
+    // the stack names its two input ports on the line
+    check(
+        "recipe: a stack labels its two inputs",
+        diagram.feeds.filter((f) => f.label).map((f) => f.label),
+        ["下层", "上层", "下层", "上层", "下层", "上层", "下层", "上层"]
+    );
+}
+
+beginSection("recipe: a mixed colour is a chain of buildings");
+{
+    const res = solve("RpRp----");
+    const diagram = recipeDiagram(res.flat!);
+    const mixer = diagram.cards.find((card) => card.kind === "color" && card.sprite === "mixer");
+    check("recipe: magenta needs a mixer card", [mixer?.color, mixer?.owner], ["p", "v3 端口1"]);
+    // the two operand lines carry their own colours, r and b
+    check(
+        "recipe: the mixer is fed r and b",
+        diagram.feeds.filter((f) => f.to === diagram.cards.indexOf(mixer!)).map((f) => f.color),
+        ["r", "b"]
+    );
+    // the painter takes the shape on slot 0 and the chain's mixed colour on slot 1
+    const paint = diagram.cards.findIndex((card) => card.kind === "plan" && card.id === "v3");
+    check(
+        "recipe: the painter is fed magenta",
+        diagram.feeds.filter((f) => f.to === paint).map((f) => [f.slot, f.color ?? null]),
+        [
+            [0, null],
+            [1, "p"],
+        ]
+    );
 }
 
 beginSection("campaign: only the lines buildable by L9");
@@ -1044,6 +1148,9 @@ beginSection("throughput: the game's own rates");
         (["r", "g", "b"] as const).map((c) => supply.sources.get(c)),
         [2, 2, 2]
     );
+    // the drawing builds one chain per port; a colour with fewer is a shortfall
+    const gaps = colourGap(supply, new Map<S.ColorChar, number>([["w", 2], ["y", 2], ["r", 1], ["g", 2], ["b", 2]]));
+    check("gap: the short base colour is the one reported", gaps.map((g) => [g.color, g.need, g.have, g.kind]), [["r", 2, 1, "采矿机"]]);
 
     // a deposit is lossy: every miner needs its own tile to eject into
     const solid = (w: number, h: number): Array<[number, number]> =>

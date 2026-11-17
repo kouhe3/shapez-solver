@@ -21,6 +21,8 @@ import type { CampaignResult } from "../src/campaign.js";
 import { colorChains } from "../src/color.js";
 import { planBom, expandPlanTree, fuseCuts, fusedCost } from "../src/layout.js";
 import type { PlanTree } from "../src/layout.js";
+import { recipeDiagram } from "../src/recipe.js";
+import type { RecipeCard, RecipeDiagram, RecipeFeed } from "../src/recipe.js";
 import type { CampaignJob, CampaignReply } from "./worker.js";
 import { BUILDING_KINDS, BUILDING_NAMES, GAME_BUILDING_NAMES } from "../src/catalogue.js";
 import type { BuildingKind } from "../src/catalogue.js";
@@ -413,39 +415,9 @@ const HEAD = 36;
 const LANE_STEP = 13;
 const LANE_INSET = 16;
 
-interface RecipeItem {
-    id: string;
-    kind: "plan" | "color";
-    /** plan: the step that names the machine — a fused cutter's card id */
-    step?: P.PlanStep;
-    /** plan: every product this one machine yields (a fused cutter has one per slot) */
-    outlets: P.PlanStep[];
-    color?: S.ColorChar;
-    /** colour chains only: which machine sprite this card shows */
-    sprite?: string;
-    /** colour chains only: the painter port this chain feeds (`v16 端口2`) */
-    owner?: string;
-    title: string;
-    detail: string;
-    inputs: RecipeEdge[];
-    wave: number;
-    isFinal: boolean;
-}
-
-/**
- * One input edge: which machine feeds this card, which of its outlets carries
- * the product, and which input port it enters. Several edges may leave one
- * machine — a fused cutter's slots fan out to different consumers.
- */
-interface RecipeEdge {
-    item: RecipeItem;
-    /** plan feeds: the outlet step whose shape the line carries */
-    outlet?: P.PlanStep;
-    slot: number;
-}
-
+/** the card a box draws: card geometry lives here, the plan's rules in `recipe.ts` */
 interface ItemBox {
-    item: RecipeItem;
+    card: RecipeCard;
     x: number;
     y: number;
     w: number;
@@ -456,142 +428,26 @@ function shortCode(code: string, max: number): string {
     return code.length > max ? `${code.slice(0, max - 1)}…` : code;
 }
 
-function sizeOf(item: RecipeItem, colW: number): { w: number; h: number } {
-    return item.kind === "plan" ? { w: colW, h: PLAN_NODE.h } : COLOR_NODE;
-}
-
-/**
- * Machines plus the colour chains every painter port needs. A mixed colour
- * is real buildings (a mixer tree), so it belongs in the same dependency
- * graph; each port owns its own chain, matching what `buildLayout` places.
- *
- * One card per *machine*, never per output: a fused cutter has a single input
- * and one card, and its several slots fan out as separate lines behind it.
- */
-function buildRecipeItems(flat: PlanTree): RecipeItem[] {
-    const fused = fuseCuts(flat);
-    const items: RecipeItem[] = [];
-    const byMachine = new Map<string, RecipeItem>();
-
-    for (const step of fused.steps) {
-        const key = step.fuseInto ?? step.id;
-        let item = byMachine.get(key);
-        if (!item) {
-            const rep = step.fuseInto ? fused.steps.find((s) => s.id === key) ?? step : step;
-            item = {
-                id: key,
-                kind: "plan",
-                step: rep,
-                outlets: [],
-                title: `${key} · ${BUILDING_NAMES[rep.op]}`,
-                detail: rep.detail,
-                inputs: [],
-                wave: 0,
-                isFinal: false,
-            };
-            byMachine.set(key, item);
-            items.push(item);
-        }
-        item.outlets.push(step);
-        if (step === fused.final) item.isFinal = true;
-    }
-    // the machine's inputs are its representative step's inputs: a fused
-    // cutter's slots all read the same belt
-    //
-    // `step.inputs` still holds the pre-fuse step objects, so an alias step
-    // (`v6` fused into `v2`) has no `fuseInto` of its own: resolve through a
-    // step-id → card map so the edge reaches the machine card, not a missing
-    // per-slot card.
-    const machineOf = new Map<string, RecipeItem>();
-    for (const step of fused.steps) {
-        const machine = byMachine.get(step.fuseInto ?? step.id);
-        if (machine) machineOf.set(step.id, machine);
-    }
-    for (const item of items) {
-        const rep = item.step;
-        if (!rep) continue;
-        rep.inputs.forEach((input, slot) => {
-            const from = machineOf.get(input.id);
-            if (from) item.inputs.push({ item: from, outlet: input, slot });
-        });
-    }
-
-    for (const chain of colorChains(fused.steps)) {
-        const paint = byMachine.get(chain.stepId);
-        if (!paint) continue;
-        const chainItems: RecipeItem[] = chain.ops.map((op, index) => {
-            const item: RecipeItem = {
-                id: `${chain.stepId}:${chain.slot}:${index}`,
-                kind: "color",
-                outlets: [],
-                color: op.color,
-                sprite: op.kind === "base" ? "miner" : "mixer",
-                owner: `${chain.stepId} 端口${chain.slot}`,
-                title: op.kind === "base" ? "采矿机" : "混色器",
-                detail: op.kind === "base" ? `颜色 ${op.color}` : `${op.parts.join(" + ")} → ${op.color}`,
-                inputs: [],
-                wave: 0,
-                isFinal: false,
-            };
-            items.push(item);
-            return item;
-        });
-        chain.ops.forEach((op, index) => {
-            if (op.kind !== "mixer") return;
-            const to = chainItems[index];
-            if (!to) return;
-            for (const operand of op.operands) {
-                const from = chainItems[operand];
-                if (from) to.inputs.push({ item: from, slot: operand });
-            }
-        });
-        const last = chainItems[chainItems.length - 1];
-        if (last) paint.inputs.push({ item: last, slot: chain.slot });
-    }
-
-    // lazy waves: every card sits as late as possible, just left of its first
-    // consumer, and the final product is the rightmost column. One rule for
-    // shape ops and colour chains alike. A machine with several outlets waits
-    // for its *earliest* consumer, so every line still points right.
-    const consumers = new Map<RecipeItem, RecipeItem[]>();
-    for (const item of items) {
-        for (const edge of item.inputs) {
-            const input = edge.item;
-            const list = consumers.get(input);
-            if (list) list.push(item);
-            else consumers.set(input, [item]);
-        }
-    }
-    const distance = new Map<RecipeItem, number>();
-    const depthOf = (item: RecipeItem): number => {
-        const known = distance.get(item);
-        if (known !== undefined) return known;
-        const downstream = consumers.get(item) ?? [];
-        const depth = downstream.length ? Math.max(...downstream.map((c) => depthOf(c) + 1)) : 0;
-        distance.set(item, depth);
-        return depth;
-    };
-    for (const item of items) depthOf(item);
-    const maxDepth = Math.max(...items.map((item) => distance.get(item) ?? 0), 0);
-    for (const item of items) item.wave = maxDepth - (distance.get(item) ?? 0);
-    return items;
+function sizeOf(card: RecipeCard, colW: number): { w: number; h: number } {
+    return card.kind === "plan" ? { w: colW, h: PLAN_NODE.h } : COLOR_NODE;
 }
 
 function recipeSVG(flat: PlanTree): string {
-    const items = buildRecipeItems(flat);
-    const maxWave = Math.max(...items.map((item) => item.wave), 0);
-    const layers: RecipeItem[][] = [];
+    const diagram = recipeDiagram(flat);
+    const { cards } = diagram;
+    const maxWave = diagram.waves - 1;
+    const layers: RecipeCard[][] = [];
     for (let wave = 0; wave <= maxWave; wave++) layers.push([]);
-    for (const item of items) layers[item.wave]?.push(item);
+    for (const card of cards) layers[card.wave]?.push(card);
 
     // one column width for every wave: wide enough for the widest machine
     // sprite (the 4-slot cutter) plus card padding
     const colW = Math.max(
         MIN_CARD_W,
         COLOR_NODE.w,
-        ...items.map((item) => {
-            if (item.kind !== "plan" || !item.step) return 0;
-            return spriteBox(OP_SPRITE[item.step.op]).w + 24;
+        ...cards.map((card) => {
+            if (card.kind !== "plan" || !card.step) return 0;
+            return spriteBox(OP_SPRITE[card.step.op]).w + 24;
         })
     );
 
@@ -603,19 +459,19 @@ function recipeSVG(flat: PlanTree): string {
     // hub (the building every factory delivers into) closes the row
     const width = PAD * 2 + layers.length * colW + Math.max(0, layers.length - 1) * COL_GAP + HUB_NODE.w + COL_GAP;
 
-    const boxes = new Map<RecipeItem, ItemBox>();
+    const boxes = new Map<RecipeCard, ItemBox>();
     layers.forEach((layer, wave) => {
         const colX = PAD + wave * (colW + COL_GAP);
         let y = PAD + HEAD;
-        for (const item of layer) {
-            const size = sizeOf(item, colW);
-            boxes.set(item, { item, x: colX + (colW - size.w) / 2, y, w: size.w, h: size.h });
+        for (const card of layer) {
+            const size = sizeOf(card, colW);
+            boxes.set(card, { card, x: colX + (colW - size.w) / 2, y, w: size.w, h: size.h });
             y += size.h + ROW_GAP;
         }
     });
 
-    const finalItem = items.find((item) => item.isFinal);
-    const finalBox = finalItem ? boxes.get(finalItem) : undefined;
+    const finalCard = cards.find((card) => card.isFinal);
+    const finalBox = finalCard ? boxes.get(finalCard) : undefined;
     // the hub is a 4×4 building: keep the shared sprite scale and let the
     // board grow to fit its full height
     const hubCenterY = finalBox ? finalBox.y + finalBox.h / 2 : PAD + HEAD + HUB_SPRITE.h / 2;
@@ -623,7 +479,7 @@ function recipeSVG(flat: PlanTree): string {
         PAD + HEAD + Math.max(...colHeights, 0),
         hubCenterY + HUB_SPRITE.h / 2 + 24
     );
-    const edges = renderRecipeEdges(items, boxes, contentBottom, colW);
+    const edges = renderRecipeEdges(diagram, boxes, contentBottom, colW);
     const hubX = PAD + maxWave * (colW + COL_GAP) + colW + COL_GAP;
     const hubEdge = finalBox ? hubEdgeSVG(finalBox, hubX, flat.final) : "";
     const hubNode = finalBox ? hubNodeSVG(hubX, hubCenterY) : "";
@@ -641,14 +497,14 @@ function recipeSVG(flat: PlanTree): string {
                 `${wave === 0 ? "第 1 波 · 采矿" : `第 ${wave + 1} 波`}` +
                 `<tspan font-weight="400" fill="#9aa3b5"> · ${layer.length} 项</tspan></text>`
         );
-        for (const item of layer) {
-            const box = boxes.get(item);
+        for (const card of layer) {
+            const box = boxes.get(card);
             if (!box) continue;
-            nodes.push(item.kind === "plan" ? planNodeSVG(box) : colorNodeSVG(box));
+            nodes.push(card.kind === "plan" ? planNodeSVG(box) : colorNodeSVG(box));
         }
     });
 
-    const colors = [...new Set(items.filter((i) => i.color).map((i) => i.color as S.ColorChar))];
+    const colors = [...new Set(cards.filter((c) => c.color).map((c) => c.color as S.ColorChar))];
     const markers = [
         `<marker id="recipe-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">` +
             `<path d="M 0 0 L 8 4 L 0 8 z" fill="#b6c0d4"/></marker>`,
@@ -680,18 +536,7 @@ interface EdgeSpec {
     down: boolean;
     stroke: string;
     marker: string;
-    /** plan feeds: which outlet of the source machine this line carries */
-    outlet?: P.PlanStep;
-    /** colour feeds: the colour dot drawn on the line */
-    color?: S.ColorChar;
-    /** which input port of the target this edge enters (`下层` / `上层`) */
-    label: string;
-}
-
-/** the input port an edge enters, when the machine names its ports */
-function inputLabel(item: RecipeItem, slot: number): string {
-    if (item.kind !== "plan" || item.step?.node.op !== "stack") return "";
-    return slot === 0 ? "下层" : "上层";
+    feed: RecipeFeed;
 }
 
 /**
@@ -724,34 +569,28 @@ function edgeProductMark(product: { outlet?: P.PlanStep; color?: S.ColorChar }, 
  * target. One lane per such edge keeps them from drawing over each other.
  */
 function renderRecipeEdges(
-    items: RecipeItem[],
-    boxes: Map<RecipeItem, ItemBox>,
+    diagram: RecipeDiagram,
+    boxes: Map<RecipeCard, ItemBox>,
     contentBottom: number,
     colW: number
 ): { markup: string; laneCount: number } {
     const specs: EdgeSpec[] = [];
-    for (const item of items) {
-        const to = boxes.get(item);
-        if (!to) continue;
-        for (const edge of item.inputs) {
-            const input = edge.item;
-            const from = boxes.get(input);
-            if (!from) continue;
-            const dx = to.x - from.x;
-            const side: EdgeSpec["side"] = Math.abs(dx) < 1 ? "vertical" : dx > 0 ? "right" : "left";
-            const color = input.color;
-            specs.push({
-                from,
-                to,
-                side,
-                down: to.y > from.y,
-                stroke: color ? (S.COLOR_HEX[color] ?? "#b6c0d4") : "#b6c0d4",
-                marker: color ? `recipe-arrow-${color}` : "recipe-arrow",
-                outlet: edge.outlet,
-                color,
-                label: inputLabel(item, edge.slot),
-            });
-        }
+    for (const feed of diagram.feeds) {
+        const from = boxes.get(diagram.cards[feed.from]!);
+        const to = boxes.get(diagram.cards[feed.to]!);
+        if (!from || !to) continue;
+        const dx = to.x - from.x;
+        const side: EdgeSpec["side"] = Math.abs(dx) < 1 ? "vertical" : dx > 0 ? "right" : "left";
+        const color = feed.color;
+        specs.push({
+            from,
+            to,
+            side,
+            down: to.y > from.y,
+            stroke: color ? (S.COLOR_HEX[color] ?? "#b6c0d4") : "#b6c0d4",
+            marker: color ? `recipe-arrow-${color}` : "recipe-arrow",
+            feed,
+        });
     }
 
     const outGroups = new Map<string, number[]>();
@@ -766,7 +605,7 @@ function renderRecipeEdges(
     const verticalGroups = new Map<string, number[]>();
     specs.forEach((spec, index) => {
         if (spec.side !== "vertical") return;
-        add(verticalGroups, `${spec.from.item.id}->${spec.to.item.id}`, index);
+        add(verticalGroups, `${spec.from.card.id}->${spec.to.card.id}`, index);
     });
     specs.forEach((spec, index) => {
         if (spec.side === "vertical") return;
@@ -775,8 +614,8 @@ function renderRecipeEdges(
         // target's right side
         const fromSide = spec.side === "right" ? "right" : "left";
         const toSide = spec.side === "right" ? "left" : "right";
-        add(outGroups, `${spec.from.item.id}|${fromSide}`, index);
-        add(inGroups, `${spec.to.item.id}|${toSide}`, index);
+        add(outGroups, `${spec.from.card.id}|${fromSide}`, index);
+        add(inGroups, `${spec.to.card.id}|${toSide}`, index);
     });
 
     const fraction = (rank: number, count: number, mixed: boolean, isOut: boolean): number => {
@@ -784,10 +623,7 @@ function renderRecipeEdges(
         return isOut ? 0.16 + (0.28 * rank) / (count + 1) : 0.56 + (0.28 * rank) / (count + 1);
     };
 
-    const laneOf = new Map<number, number>();
-    specs.forEach((spec, index) => {
-        if (spec.to.item.wave - spec.from.item.wave >= 2) laneOf.set(index, laneOf.size);
-    });
+    const laneCount = specs.reduce((n, spec) => n + (spec.feed.lane === null ? 0 : 1), 0);
 
     // lanes that share a gutter would stack their verticals on one pixel
     // column, so each gets its own stub offset inside that gutter
@@ -800,9 +636,9 @@ function renderRecipeEdges(
     };
 
     const paths = specs.map((spec, index) => {
-        const { from, to, side, down, stroke, marker, label } = spec;
+        const { from, to, side, down, stroke, marker, feed } = spec;
         if (side === "vertical") {
-            const twin = verticalGroups.get(`${from.item.id}->${to.item.id}`) ?? [];
+            const twin = verticalGroups.get(`${from.card.id}->${to.card.id}`) ?? [];
             const slot = Math.max(0, twin.indexOf(index));
             const spread = twin.length > 1 ? (slot - (twin.length - 1) / 2) * 18 : 0;
             const x = from.x + from.w / 2 + spread;
@@ -812,16 +648,16 @@ function renderRecipeEdges(
             return (
                 `<path d="M ${x} ${y1} C ${x} ${y1 + (down ? bend : -bend)} ${x} ${y2 - (down ? bend : -bend)} ${x} ${y2}" ` +
                 `fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>` +
-                edgeProductMark(spec, x, (y1 + y2) / 2, 17)
+                edgeProductMark(feed, x, (y1 + y2) / 2, 17)
             );
         }
         const rightward = side === "right";
         const fromSide = rightward ? "right" : "left";
         const toSide = rightward ? "left" : "right";
-        const outList = outGroups.get(`${from.item.id}|${fromSide}`) ?? [];
-        const inList = inGroups.get(`${to.item.id}|${toSide}`) ?? [];
-        const fromInList = inGroups.get(`${from.item.id}|${fromSide}`) ?? [];
-        const toOutList = outGroups.get(`${to.item.id}|${toSide}`) ?? [];
+        const outList = outGroups.get(`${from.card.id}|${fromSide}`) ?? [];
+        const inList = inGroups.get(`${to.card.id}|${toSide}`) ?? [];
+        const fromInList = inGroups.get(`${from.card.id}|${fromSide}`) ?? [];
+        const toOutList = outGroups.get(`${to.card.id}|${toSide}`) ?? [];
         const outRank = outList.indexOf(index) + 1;
         const inRank = inList.indexOf(index) + 1;
         const x1 = from.x + (rightward ? from.w : 0);
@@ -830,19 +666,19 @@ function renderRecipeEdges(
         const y2 = to.y + to.h * fraction(inRank, inList.length, toOutList.length > 0, false);
         // the label sits just outside the target card, haloed so it stays
         // readable where another edge's stub runs underneath it
-        const tag = label
+        const tag = feed.label
             ? `<text x="${x2 - 7}" y="${y2 - 4}" font-size="9" text-anchor="end" fill="#7c869c" ` +
-              `stroke="#fbfcfe" stroke-width="3" paint-order="stroke">${label}</text>`
+              `stroke="#fbfcfe" stroke-width="3" paint-order="stroke">${feed.label}</text>`
             : "";
 
-        const lane = laneOf.get(index);
-        if (lane !== undefined) {
+        const lane = feed.lane;
+        if (lane !== null) {
             // the stub sits in the gutters beside the cards, so neither the
             // dive nor the climb touches a card
-            const colRight = PAD + from.item.wave * (colW + COL_GAP) + colW;
-            const colLeft = PAD + to.item.wave * (colW + COL_GAP);
-            const xs = colRight + 8 + nextStub(outStubs, from.item.wave) * 5;
-            const xt = colLeft - 8 - nextStub(inStubs, to.item.wave) * 5;
+            const colRight = PAD + from.card.wave * (colW + COL_GAP) + colW;
+            const colLeft = PAD + to.card.wave * (colW + COL_GAP);
+            const xs = colRight + 8 + nextStub(outStubs, from.card.wave) * 5;
+            const xt = colLeft - 8 - nextStub(inStubs, to.card.wave) * 5;
             const laneY = contentBottom + LANE_INSET + lane * LANE_STEP;
             const r = 4;
             const d =
@@ -852,7 +688,7 @@ function renderRecipeEdges(
                 `L ${xt} ${y2 + r} Q ${xt} ${y2} ${xt + r} ${y2} L ${x2} ${y2}`;
             return (
                 `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>${tag}` +
-                edgeProductMark(spec, (xs + xt) / 2, laneY, 17)
+                edgeProductMark(feed, (xs + xt) / 2, laneY, 17)
             );
         }
 
@@ -860,10 +696,10 @@ function renderRecipeEdges(
         return (
             `<path d="M ${x1} ${y1} C ${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2} ${y2}" ` +
             `fill="none" stroke="${stroke}" stroke-width="1.6" marker-end="url(#${marker})"/>${tag}` +
-            edgeProductMark(spec, (x1 + x2) / 2, (y1 + y2) / 2, 17)
+            edgeProductMark(feed, (x1 + x2) / 2, (y1 + y2) / 2, 17)
         );
     });
-    return { markup: paths.join(""), laneCount: laneOf.size };
+    return { markup: paths.join(""), laneCount };
 }
 
 /** the last line: the finished shape travels from the final machine into the hub */
@@ -892,8 +728,8 @@ function hubNodeSVG(x: number, centerY: number): string {
 }
 
 function planNodeSVG(box: ItemBox): string {
-    const { item, x, y, w } = box;
-    const step = item.step;
+    const { card, x, y, w } = box;
+    const step = card.step;
     if (!step) return "";
     const detail =
         step.node.op === "paint4"
@@ -902,22 +738,22 @@ function planNodeSVG(box: ItemBox): string {
                   .filter(Boolean)
                   .join(" · ")
             : step.node.op === "base"
-              ? `产出 ${item.detail}`
-              : item.detail;
-    const fill = item.isFinal ? "#f2faf5" : "#ffffff";
-    const stroke = item.isFinal ? "#4f9d68" : "#dfe3ec";
+              ? `产出 ${card.detail}`
+              : card.detail;
+    const fill = card.isFinal ? "#f2faf5" : "#ffffff";
+    const stroke = card.isFinal ? "#4f9d68" : "#dfe3ec";
     // one card = one machine: a fused cutter lists how many products it
     // yields, and the lines behind the card fan those products out
-    const caption = item.outlets.length > 1 ? `${item.outlets.length} 个出口` : shortCode(detail, 26);
+    const caption = card.outlets.length > 1 ? `${card.outlets.length} 个出口` : shortCode(detail, 26);
     const sprite = OP_SPRITE[step.node.op];
     const dim = spriteBox(sprite);
     const spriteTop = y + 22 + (56 - dim.h) / 2;
-    const tooltip = item.outlets.map((outlet) => `${outlet.id} ${outlet.outKey}`).join("\n");
+    const tooltip = card.outlets.map((outlet) => `${outlet.id} ${outlet.outKey}`).join("\n");
     return (
-        `<g><title>${tooltip}\n${item.title}\n${detail}</title>` +
+        `<g><title>${tooltip}\n${card.title}\n${detail}</title>` +
         `<rect x="${x}" y="${y}" width="${w}" height="${PLAN_NODE.h}" rx="10" fill="${fill}" stroke="${stroke}" ` +
-        `stroke-width="${item.isFinal ? 2 : 1}"/>` +
-        `<text x="${x + 12}" y="${y + 19}" font-size="12" font-weight="600" fill="#2b2f3a">${item.title}</text>` +
+        `stroke-width="${card.isFinal ? 2 : 1}"/>` +
+        `<text x="${x + 12}" y="${y + 19}" font-size="12" font-weight="600" fill="#2b2f3a">${card.title}</text>` +
         `<text x="${x + w - 10}" y="${y + 19}" font-size="9.5" text-anchor="end" ` +
         `fill="#9aa3b5">cost ${step.cost}</text>` +
         `<image href="${spriteSrc(sprite)}" x="${x + (w - dim.w) / 2}" y="${spriteTop}" ` +
@@ -929,20 +765,20 @@ function planNodeSVG(box: ItemBox): string {
 }
 
 function colorNodeSVG(box: ItemBox): string {
-    const { item, x, y, w } = box;
-    const color = item.color ?? "u";
+    const { card, x, y, w } = box;
+    const color = card.color ?? "u";
     const hex = S.COLOR_HEX[color] ?? "#dfe3ea";
-    const sprite = item.sprite ?? "miner";
+    const sprite = card.sprite ?? "miner";
     const dim = spriteBox(sprite);
     return (
-        `<g><title>${item.title} ${item.detail}\n${item.owner ?? ""}</title>` +
+        `<g><title>${card.title} ${card.detail}\n${card.owner ?? ""}</title>` +
         `<rect x="${x}" y="${y}" width="${w}" height="${COLOR_NODE.h}" rx="9" fill="#ffffff" stroke="${hex}" stroke-width="1.6"/>` +
         `<image href="${spriteSrc(sprite)}" x="${x + 8 + (96 - dim.w) / 2}" ` +
         `y="${y + 8 + (COLOR_NODE.h - 16 - dim.h) / 2}" width="${dim.w}" height="${dim.h}"/>` +
-        `<text x="${x + 104}" y="${y + 26}" font-size="11.5" font-weight="600" fill="#2b2f3a">${item.title}</text>` +
-        `<text x="${x + 104}" y="${y + 42}" font-size="10" fill="#6b7280">${item.detail}</text>` +
+        `<text x="${x + 104}" y="${y + 26}" font-size="11.5" font-weight="600" fill="#2b2f3a">${card.title}</text>` +
+        `<text x="${x + 104}" y="${y + 42}" font-size="10" fill="#6b7280">${card.detail}</text>` +
         `<rect x="${x + 104}" y="${y + 50}" width="14" height="14" rx="4" fill="${hex}" stroke="#64666e" stroke-width="1"/>` +
-        `<text x="${x + 124}" y="${y + 61}" font-size="9.5" fill="#9aa3b5">${item.owner ?? ""}</text>` +
+        `<text x="${x + 124}" y="${y + 61}" font-size="9.5" fill="#9aa3b5">${card.owner ?? ""}</text>` +
         `</g>`
     );
 }

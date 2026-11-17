@@ -172,7 +172,7 @@ bun run cli all 47742 --out=plan-all.svg
 
 - **存档解码**：`"\x01" + LZ-String-base64( "crc32-…" + JSON )`，JSON 里是游戏自己的 key/value 内联格式；`solver/src/savegame.ts` 解出 `dump.map.seed` 和中心位置。
 - **地图重建**：`solver/src/map.ts` 是 `map_chunk.js` 的逐行移植（ALEA RNG、`${chunkX}|${chunkY}|${seed}`、预置的 Cu/Ru/红/绿/星矿脉、圆的叠加算法）。实测与游戏画面完全对齐（Cu 在左下、Ru 在右上、红在右下、绿在左上）。
-- **图纸**：`solver/src/layout.ts`（瓦片世界：几何、端口、路由、地图状态）+ `solver/src/placement.ts`（落位与布线）+ `solver/src/schematic.ts`（出图）
+- **图纸**：`solver/src/layout.ts`（瓦片世界：几何、端口、路由、地图状态）+ `solver/src/spots.ts`（落点）、`solver/src/placement-links.ts`（链路与 rip-up）、`solver/src/color-supply.ts`（色料定量与色链）三个 seam + `solver/src/placement.ts`（一个方案的 session 与编排）+ `solver/src/schematic.ts`（出图）
   - 每个采矿机自动落到最近的对应矿脉上（给出坐标和距离）
   - 加工建筑按依赖深度排布，避开采矿脉，给出每个建筑的 tile 坐标
   - 加工建筑的朝向在 4 个 90° 方向里选：先试游戏默认朝向，摆不下、或它的输入 / 通往中心的带布不通就换一个方向；端口和端口外的引带格跟着一起转（`portCells(..., rot)`）
@@ -252,7 +252,7 @@ bun run cli all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
 - **SHAPE 配方图**：输入 shape code → 生成工序依赖图，按依赖波次从左到右排成一行（不折行，横向拖动/缩放），箭头指向下游；混色器与色料矿机也画在同一张图里，最终产物沿末段连线送进图最右的 `中心 HUB`。跨波次的依赖（跳过一列以上）从图底部的独立通道绕行，不会压在中间卡片下面。「一张卡 = 一台机器」，卡片主体是该建筑的官方贴图（`solver/web/assets/buildings/`，裁自 demo 图集 atlas0_hq），所有贴图按同一个像素比例绘制，所以占地 1×1 的采矿机明显小于 4×1 的四向切割机、4×4 的中心更大；产物不画在卡上，而是跟着连线走——连线中点的图形就是这条线上的产物，颜色链的线用颜色描边、中点是一个色点——输入只由入边表达。同一台切割机的多个出口**共用一张卡**（卡上标 `2 个出口`），分叉发生在卡后：每个出口各引一条线，所以一台机器永远只有一条入线；波次按**机器**算——整台机器等它最早被需要的那个消费者——cost 与材料表按一台算。堆叠器的入边在目标侧标 `下层` / `上层`；色料卡片标注它的输出颜色与服务的上色口（如 `v16 端口2`），一台四色上色器的两个同色端口就是两条链，卡片编号不同。
 - **ALL SHAPE YOU NEED 图纸**：填地图种子 → 点「生成全体图纸」；图纸支持滚轮缩放、拖动平移、双击复位，图例钉在左上角。「读取存档（可选）」用文件上传拿真实的中心位置：支持 Electron 版的 `savegame-*.bin`，或浏览器 IndexedDB `app_storage/files` 里的原始内容（DevTools → Application → IndexedDB 复制出来存成文件即可）。不传存档就按种子画。
 
-两个视图都可滚轮缩放、拖动平移。
+两个视图都可滚轮缩放、拖动平移。配方图的规则（一机一卡、波次、跨波车道、色链）在 `solver/src/recipe.ts`，是带测试的纯模块；`web/app.ts` 只负责画成 SVG。
 
 > 说明：原版 1.5.7 **没有**可导入的蓝图字符串（游戏里的蓝图只是内存里的复制/粘贴，不写进存档），所以这里给的是"坐标级放置清单 + 接口精确的连线图 + 传送带格数"，传送带按图上的连线铺即可。
 

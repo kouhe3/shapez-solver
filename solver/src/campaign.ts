@@ -21,9 +21,9 @@ import {
     releaseRoute,
     routeBelt,
     runFits,
-    sizeColorSupply,
 } from "./layout.js";
 import { buildLayout } from "./placement.js";
+import { colourGap, sizeColorSupply } from "./color-supply.js";
 import type {
     BeltHeading,
     BlockRect,
@@ -544,13 +544,7 @@ export function planCampaign({
 
     // colour sources the layout has to add: it currently builds exactly one
     // chain per colour, so anything above one source is a shortfall
-    const colorGap: CampaignColorGap[] = [];
-    for (const [color, needCount] of supply.sources) {
-        const have = builtSources.get(color) || 0;
-        if (have >= needCount) continue;
-        colorGap.push({ color, need: needCount, have, kind: isMixedColor(color) ? "混色器" : "采矿机" });
-    }
-    colorGap.sort((a, b) => b.need - a.need);
+    const colorGap: CampaignColorGap[] = colourGap(supply, builtSources);
     const extraSources = colorGap.reduce((sum, g) => sum + (g.need - g.have), 0);
     const demandTotal = [...colorDemand.values()].reduce((a, b) => a + b, 0);
     const supplyAvailable = builtSourceCount * SOURCE_RATE;

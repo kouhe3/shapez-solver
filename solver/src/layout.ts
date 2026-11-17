@@ -7,20 +7,20 @@
  *    geometry straight from the game's building definitions,
  *  - `World`/`createWorld` hold what no single factory owns on its own,
  *  - `routeBelt`/`claimRoute`/`releaseRoute` search and commit belt runs,
- *  - `expandPlanTree`/`fuseCuts`/`planBom`/`sizeColorSupply` read a solved plan.
+ *  - `expandPlanTree`/`fuseCuts`/`planBom` read a solved plan.
  *
- * Placing the parts and laying the links between them is `placement.ts`, which
- * builds on this module and never the other way round.
+ * Placing the parts and laying the links between them is `placement.ts` (and
+ * its `spots.ts` / `placement-links.ts` / `color-supply.ts` seams), which build
+ * on this module and never the other way round.
  *
  * Port coordinates are in tile units relative to the building's top-left tile;
  * y grows downwards (screen/tile space, same as the game).
  */
 
 import * as P from "./plan.js";
-import { SOURCE_RATE } from "./rates.js";
 import { BUILDING_NAMES } from "./catalogue.js";
 import type { BuildingKind } from "./catalogue.js";
-import { COLOR_NEEDS, colorChains } from "./color.js";
+import { colorChains } from "./color.js";
 import type { ColorChain } from "./color.js";
 import type { ColorChar } from "./shape.js";
 import type { Patch } from "./map.js";
@@ -357,12 +357,6 @@ export interface RouteResult {
      * belt of the run then points to that entry (`World.hubBound`)
      */
     entryKey: number | null;
-}
-
-/** items/s each colour has to produce, and how many sources that takes */
-export interface ColorSupply {
-    need: Map<ColorChar, number>;
-    sources: Map<ColorChar, number>;
 }
 
 /* ------------------------------------------------------------------ *
@@ -827,33 +821,6 @@ function patchCells(patch: Patch): Tile[] {
     return cells;
 }
 
-/**
- * How many colour sources a campaign needs, given what the painters pull.
- *
- * One source — a miner on a deposit, or one mixer — carries `SOURCE_RATE`
- * items/s. A mixed colour pushes its own inputs upstream: a mixer consumes
- * `SOURCE_RATE` of each input for every `SOURCE_RATE` it produces, and `w` is
- * built as mix(mix(r, g), b), so it consumes `y` and `b`.
- */
-export function sizeColorSupply(demand: ReadonlyMap<ColorChar, number>): ColorSupply {
-    const need = new Map<ColorChar, number>(demand);
-    const sources = new Map<ColorChar, number>();
-    const bump = (color: ColorChar, amount: number): Map<ColorChar, number> =>
-        need.set(color, (need.get(color) || 0) + amount);
-    const count = (amount: number): number => Math.max(0, Math.ceil(amount / SOURCE_RATE - 1e-9));
-
-    // `w` first: it is the only colour whose chain consumes another mixed
-    // colour, so its demand has to reach `y` before `y` is counted.
-    for (const color of ["w", "y", "p", "c"] as const) {
-        const n = count(need.get(color) || 0);
-        sources.set(color, n);
-        if (!n) continue;
-        for (const part of color === "w" ? (["y", "b"] as const) : COLOR_NEEDS[color]!) bump(part, n * SOURCE_RATE);
-    }
-    for (const color of ["r", "g", "b"] as const) sources.set(color, count(need.get(color) || 0));
-    return { need, sources };
-}
-
 /** the hub occupies a 4×4 tile block; belts may enter it on any side */
 export const HUB_SIZE = 4;
 
@@ -868,6 +835,11 @@ export const HUB_SIZE = 4;
  */
 export function cellKey(x: number, y: number): number {
     return (x + 4096) * 8192 + (y + 4096);
+}
+
+/** the tile a packed key stands for: the inverse of `cellKey` */
+export function tileOfKey(key: number): Tile {
+    return { x: Math.floor(key / 8192) - 4096, y: (key % 8192) - 4096 };
 }
 
 /** tiles covered by a deposit, ordered from its centre outwards */
