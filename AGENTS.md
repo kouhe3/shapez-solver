@@ -73,6 +73,7 @@ shape code string
 - Level 14 (belt reader) is the one `throughputOnly` goal: it checks the **current rate** (8/s), not stored stock, so it is the literal "keep it running" requirement (`ref/modes/levels.js:262-269`; `hub_goals.getCurrentGoalDelivered`).
 - Blueprints (copy-paste) cost **stored** `CbCbCbRb:CwCwCwCw` (`4·n^1.1`, rounded) and the cost is deducted on placement (F33). That shape is also full level 12's goal, so the campaign already builds it.
 - The solver allocates hub faces greedily (up to 6 free faces + 3 join faces per inbound link); when every entry is boxed in by belts laid earlier it merges the leg into a belt already bound for the hub (`World.hubBound`; at most `HUB_ENTRY_LEGS = 5` legs share one entry belt, which is what the 2/s belt rate allows). `hubMerges` counts the legs that had to merge. It builds no merger tree and reserves no entry per product (F34, F43).
+- **Router:** `routeBelt` snapshots the search box and searches in the Rust core (`native/router`) through `solver/src/router-engine.ts`; the JS router it replaced is gone (F49, F51). `solver/router.wasm` is a committed build product (`bun run build:router`). `cli all`, the test harness and `check:tunnels` load it synchronously at startup; `web/worker.ts` fetches `/router.wasm` before the first campaign. A missing wasm file is a hard error, not a silent JS fallback.
 
 ## Key Directories
 
@@ -82,6 +83,8 @@ shape code string
 |`solver/test/`|Custom zero-dep harness (`run-tests.ts`) and randomized `fuzz.ts`.|
 |`solver/web/`|Browser UI: `index.html` + `app.ts`, importing `../src/*.js` directly; `server.ts` serves it transpiled.|
 |`solver/cli.ts`, `solver/server.ts`|User-facing surfaces (`--k=v` flags only, parsed after the subcommand).|
+|`native/router/`|Rust belt-router crate; `src/lib.rs` is the Dijkstra, built to `solver/router.wasm`.|
+|`solver/router.wasm`|Tracked wasm build of `native/router`; regenerate with `bun run build:router`.|
 |`tools/`|Tracked instruments: tunnel legality, harness self-check, tile-key benchmark.|
 |`demo/`|Prebuilt upstream DEMO mirror; must be served from its own docroot (absolute `/v/` URLs).|
 |`docs/`|`facts.md` ledger, `plans/`, `adr/`, `agents/` skill config. Root `README.md` and `GLOSSARY.md` are canonical references.|
@@ -103,6 +106,8 @@ bun run test --filter=router   # 23 checks, 192 skipped
 bun run check:tunnels          # campaign tunnel legality, ~15-17 s (not in verify)
 bun run check:filter           # harness self-check, ~48 s (not in verify)
 bun run bench:key              # tile-key microbenchmark, ~3 s (ratio ~16-18x)
+bun run build:router           # cargo: rebuild solver/router.wasm
+bun run bench:router           # synthetic routing benchmark (the wasm router)
 
 # Solve / inspect
 bun run cli solve "RuCw--Cw:----Ru--" --json
@@ -135,6 +140,7 @@ Gotchas:
 - `solve --json` prints its payload and exits **0 even when `ok:false`**; parse the JSON, not the exit code.
 - `all` never exits non-zero for failed / impossible / deferred shapes; only a bad `--until` exits 2.
 - `map --json` appends JSON *after* the human text — it is not a pure JSON stream.
+- The belt router is wasm. `solver/router.wasm` must exist (it is tracked; rebuild with `bun run build:router` after changing `native/router`). The browser worker fetches `/router.wasm` from `solver/server.ts`, which serves it as `application/wasm`.
 
 ## Code Conventions & Common Patterns
 

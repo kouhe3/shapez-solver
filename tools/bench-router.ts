@@ -6,6 +6,8 @@
  *   bun work/bench-router.ts [--size=64] [--nets=80] [--seed=7]
  */
 import { createWorld, routeBelt, type World } from "../solver/src/layout.ts";
+import { initRouterWasm } from "../solver/src/router-engine.ts";
+import { readFileSync } from "node:fs";
 
 const arg = (name: string, fallback: number): number => {
     const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -18,6 +20,7 @@ const SEED = arg("seed", 7);
 const MODE = process.argv.find((a) => a.startsWith("--mode="))?.slice(7) ?? "random";
 const DISTINCT = arg("distinct", 0) === 1;
 const DEBUG = arg("debug", 0) === 1;
+initRouterWasm(readFileSync(new URL("../solver/router.wasm", import.meta.url)));
 
 function mulberry32(a: number): () => number {
     return () => {

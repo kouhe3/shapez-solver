@@ -27,6 +27,7 @@ import { planCampaign } from "./src/campaign.js";
 import { formatRate, formatDuration, HUB_ENTRIES } from "./src/rates.js";
 import { colorChains } from "./src/color.js";
 import { planBom, expandPlanTree } from "./src/layout.js";
+import { initRouterWasm } from "./src/router-engine.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -279,6 +280,7 @@ function pad(text: string | number, width: number): string {
 }
 
 function cmdAll(): void {
+    initRouterWasm(fs.readFileSync(new URL("./router.wasm", import.meta.url)));
     const set = String(flags.get("set") ?? "demo");
     const setConf = needSetConf(set);
     const untilLevel = flagNumber("until") ?? null;
@@ -314,7 +316,6 @@ function cmdAll(): void {
         untilLevel,
         levels: setConf ? setConf.levels : undefined,
     });
-
     if (flags.get("json")) {
         console.log(
             JSON.stringify(

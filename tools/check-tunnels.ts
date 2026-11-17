@@ -28,7 +28,11 @@ import { scanForTypes } from "../solver/src/map.ts";
 import { ALL_BUILDINGS } from "../solver/src/solver.ts";
 import { DEMO_LEVELS, FULL_LEVELS } from "../solver/src/levels.ts";
 import { BUILDING_INFO, cellKey, portApproachCells, portCells } from "../solver/src/layout.ts";
+import { initRouterWasm } from "../solver/src/router-engine.ts";
+import { readFileSync } from "node:fs";
 import type { Tile, TunnelSpan } from "../solver/src/layout.ts";
+
+initRouterWasm(readFileSync(new URL("../solver/router.wasm", import.meta.url)));
 
 /** tier-0 tunnel range (`vendor/shapez.io/src/js/core/config.js:91`) */
 const TUNNEL_RANGE = 5;

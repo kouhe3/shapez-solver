@@ -12,6 +12,7 @@ import { planCampaign } from "../src/campaign.js";
 import type { CampaignResult } from "../src/campaign.js";
 import { levelsForVersion } from "../src/levels.js";
 import type { NeedSetName } from "../src/needs.js";
+import { initRouterWasm } from "../src/router-engine.js";
 
 export interface CampaignJob {
     seed: number;
@@ -31,9 +32,17 @@ const scope = self as unknown as {
     postMessage: (message: unknown) => void;
 };
 
-scope.onmessage = (event) => {
+/** the belt router is Rust; load it before the first campaign touches it */
+const routerReady = (async (): Promise<void> => {
+    const res = await fetch("/router.wasm");
+    if (!res.ok) throw new Error(`router.wasm: HTTP ${res.status}`);
+    initRouterWasm(await res.arrayBuffer());
+})();
+
+scope.onmessage = async (event) => {
     const { id, job } = event.data;
     try {
+        await routerReady;
         const shapes = neededShapes({ set: job.set });
         const scan = scanForTypes(job.seed, {
             types: requiredTypes(shapes),

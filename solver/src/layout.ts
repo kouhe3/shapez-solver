@@ -16,6 +16,7 @@ import { COLOR_NEEDS, COLOR_OP_LABELS, colorChain, colorChains } from "./color.j
 import type { ColorChain } from "./color.js";
 import type { ColorChar } from "./shape.js";
 import type { MapItem, Patch } from "./map.js";
+import { routerSearch } from "./router-engine.js";
 
 /* ------------------------------------------------------------------ *
  * geometry (port tables, tiles)
@@ -650,23 +651,19 @@ const ROUTE_DIRS: readonly (readonly [number, number])[] = [
  */
 const MAX_UNDERGROUND = 4;
 
-/** search phases: 0 surface, 1..MAX_UNDERGROUND underground, 5 receiver */
-const PHASES = MAX_UNDERGROUND + 2;
+/** the run a search found, before spans/crossings are derived from it */
+interface ChosenRun {
+    cells: Tile[];
+    phases: number[];
+    headings: number[];
+}
 
-/** Dijkstra "unvisited"; a 32-bit sentinel lets `dist` stay an Int32Array */
-const ROUTE_INF = 0x7fffffff;
-
-/**
- * Search scratch, grown monotonically and reused across calls. A full campaign
- * runs ~1.6k searches of up to 300k states; allocating and zeroing fresh
- * Int32Arrays for every one throws away gigabytes. Each attempt rewrites the
- * range it uses, so stale entries above it are never read.
- */
-let SEARCH_DIST = new Int32Array(1 << 16);
-let SEARCH_FROM = new Int32Array(1 << 16);
-
-/** ring slots for the bucket queue: one search edge costs at most 6 */
-const BUCKET_SLOTS = 7;
+/** direction tuple → index into `ROUTE_DIRS`; negative when it has no match */
+function directionIndex(dir: readonly [number, number] | null | undefined): number {
+    if (!dir) return -1;
+    const i = ROUTE_DIRS.findIndex((d) => d[0] === dir[0] && d[1] === dir[1]);
+    return i < 0 ? -2 : i;
+}
 
 /**
  * Shortest legal belt run between two port tiles, as the game would lay it.
@@ -698,6 +695,28 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
     const minX = Math.min(start.x, goal.x) - margin;
     const maxX = Math.max(start.x, goal.x) + margin;
     const minY = Math.min(start.y, goal.y) - margin;
+    const width = Math.abs(goal.x - start.x) + 2 * margin + 1;
+    const height = Math.abs(goal.y - start.y) + 2 * margin + 1;
+    const res = routerSearch({
+        world,
+        blocked,
+        start,
+        goal,
+        minX,
+        minY,
+        width,
+        height,
+        allowCross: opts.allowCross === true,
+        relaxCross: opts.relaxCross === true,
+        goalMayJoin: opts.goalMayJoin === true,
+        exempt: opts.exempt ?? null,
+        startDir: directionIndex(opts.startDir),
+        goalDir: directionIndex(opts.goalDir),
+        frontier: opts.frontier ?? null,
+    });
+    if (!res.cells) return null;
+    return finishRun(world, { cells: res.cells, phases: res.phases, headings: res.headings }, opts);
+}
     const maxY = Math.max(start.y, goal.y) + margin;
     const width = maxX - minX + 1;
     const size = width * (maxY - minY + 1);
@@ -709,7 +728,6 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
     // cheapest run sometimes loops around a block to re-approach a tunnel end
     // from the right side; when it does, forbid that edge and search again.
     const forbidden = new Set<number>();
-    let chosen: { cells: Tile[]; phases: number[]; headings: number[] } | null = null;
     for (let attempt = 0; attempt < 64 && !chosen; attempt++) {
         // state = (tile * PHASES + phase) * 4 + heading. phase 0 = surface belt,
         // 1..4 = under the ground with that many tiles already underground, 5 =
@@ -979,6 +997,8 @@ export function routeBelt(world: World, blocked: ReadonlySet<number>, start: Til
         forbidden.add(states[cut - 1]! * 4 + headings[cut]!);
     }
     if (!chosen) return null;
+/** derive spans/crossings and (unless `dryRun`) claim the searched run */
+function finishRun(world: World, chosen: ChosenRun, opts: RouteOptions): RouteResult {
     const { cells, phases, headings } = chosen;
 
     const spans: TunnelSpan[] = [];

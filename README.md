@@ -12,6 +12,7 @@
 ## 运行环境
 
 - **Bun ≥ 1.4.4** —— 唯一的运行时。`solver/` 的源码全部是 TypeScript（唯一例外是 vendor 进来的 `lz_factory.js`），`tsconfig.json` 开 `strict` + `noUncheckedIndexedAccess` + `verbatimModuleSyntax`；Bun 直接执行源码，**没有构建步骤、没有打包器**。
+- **布线器是 Rust/wasm**：`native/router` 编成已提交的 `solver/router.wasm`（改 Rust 后跑 `bun run build:router`）；CLI、测试与 `check:tunnels` 启动时同步加载，网页 worker 从 `/router.wasm` 异步加载。运行时仍然零 npm 依赖。
 - `bun install` —— 只装一个 devDependency `@types/bun`；**运行时零依赖**（只用 `node:` 内置模块和相对 import）。
 - `bun check` —— 类型门禁（Bun 自带的 TypeScript 检查器；不装 `typescript` 包）。
 - `bun run test` —— 回归测试，182 项检查；`bun run test:quick` 只跑单元部分，147 项；`bun run verify` = `bun check` + 完整测试。
@@ -22,6 +23,7 @@
 | `solver/server.ts` | 网页 UI + JSON API（`bun run serve`） |
 | `solver/src/*.ts` | 求解器内核：形状代数、搜索、地图、布局、图纸 |
 | `solver/src/lz_factory.js` | 上游 LZ-String 原样 vendor（唯一保留的 `.js`；`lz_factory.d.ts` 补类型） |
+| `native/router/` | Rust 布线器；`bun run build:router` → `solver/router.wasm` |
 | `solver/test/run-tests.ts` | 自定义回归测试（`bun run test`），`fuzz.ts` 是随机对拍 |
 | `solver/web/app.ts` | 浏览器端 UI；请求 `/web/app.js` 时由 Bun 服务器现转译，不落盘 |
 

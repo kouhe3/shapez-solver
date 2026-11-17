@@ -10,6 +10,7 @@
     "verify": "bun check && bun run solver/test/run-tests.ts",
     "check:tunnels": "bun tools/check-tunnels.ts",
     "check:filter": "bun tools/check-test-filter.ts",
+    "build:router": "bun tools/build-router.ts",
     "cli": "bun solver/cli.ts",
     "serve": "bun solver/server.ts",
     "bench:key": "bun tools/bench-key-cost.ts",

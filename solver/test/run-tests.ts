@@ -37,6 +37,10 @@ import { colorChain, colorChains } from "../src/color.js";
 import { chainRate, formatDuration } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
 import { planCampaign } from "../src/campaign.js";
+import { initRouterWasm } from "../src/router-engine.js";
+import { readFileSync } from "node:fs";
+
+initRouterWasm(readFileSync(new URL("../router.wasm", import.meta.url)));
 
 const argv = process.argv.slice(2);
 const quick = argv.includes("--quick");
