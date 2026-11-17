@@ -1,0 +1,62 @@
+# Third-party notices
+
+This repository is distributed under the GNU General Public License, version 3
+(see `LICENSE`). It contains the following third-party material.
+
+## shapez.io DEMO — `demo/`
+
+`demo/` is an offline mirror of the official shapez.io web DEMO, build
+`8a79de52` (game version 1.5.7), downloaded from <https://shapez.io/>.
+
+    Copyright (c) tobspr Games
+    https://github.com/tobspr-games/shapez.io
+    https://tobspr.io
+
+The upstream repository is distributed under the GNU GPL v3 — its `LICENSE`
+is the GPL-3.0 text, and its `package.json` additionally declares MIT. This
+mirror is redistributed under the upstream `LICENSE` (GPL-3.0). The complete
+corresponding source is the upstream repository at commit
+`8a79de5255fb6756f3a1d26579b1e9bc36e0c811`; `bun setup-ref.ts` fetches it,
+and `bash fetch-demo.sh` re-fetches this prebuilt demo.
+
+## Building sprites — `solver/web/assets/buildings/*.png`
+
+Cropped from `res/atlas0_hq.png` of the same shapez.io build. They are part of
+the shapez.io distribution above and carry the same terms.
+
+## LZ-String — `solver/src/lz_factory.js`
+
+The savegame codec is LZ-String, extracted from the shapez.io bundle.
+
+    Copyright (c) 2013 pieroxy
+
+    MIT License
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Source: <https://github.com/pieroxy/lz-string>
+
+## Agent skills — `.agents/skills/`
+
+Vendored from <https://github.com/mattpocock/skills> (every skill path and
+content hash is pinned in `skills-lock.json`).
+
+    Copyright (c) 2026 Matt Pocock
+
+    MIT License — see `.agents/skills/LICENSE`.

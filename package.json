@@ -1,6 +1,7 @@
 {
   "name": "shapez-solver",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "test": "bun run solver/test/run-tests.ts",

@@ -268,3 +268,13 @@ bun run cli all --code=CuCuCuCu,RuCw--Cw:----Ru-- --seed=47742
 ### 关于那篇 arXiv 论文
 
 `arXiv:2611.17309v1`《Classical Energies Learn to Reason 1,000x Faster than Looped Models》讲的是用能量模型（energy descent）解 Sudoku/Maze 这类**判定型谜题**。本项目的任务是**构造性综合**：要在 shapez 的建筑语义下找一条可执行、可逐步验证的生产链，而不是给一个解打分/去噪。因此没有采用学习式求解器；不过它提到的「能量/约束即模型」在更模糊的变体（比如带吞吐/布局约束的优化）里可能有借鉴价值。
+
+---
+
+## 许可 / License
+
+- **本仓库代码与文档**：GNU GPL v3（`LICENSE`，SPDX `GPL-3.0-only`）。
+- **`demo/`**（官方 shapez.io DEMO 构建 `8a79de52` / 1.5.7）与 **`solver/web/assets/buildings/*.png`**（同一构建图集的裁切）：版权归 tobspr Games，按上游 <https://github.com/tobspr-games/shapez.io> 的 GPL-3.0 分发。完整对应源码就是上游仓库的 `8a79de5255fb6756f3a1d26579b1e9bc36e0c811`；`bun setup-ref.ts` 会稀疏 clone 它，`bash fetch-demo.sh` 重新抓取 DEMO。
+- **`solver/src/lz_factory.js`**：LZ-String，MIT（© 2013 pieroxy）。
+- **`.agents/skills/`**：mattpocock/skills，MIT（© 2026 Matt Pocock；来源与哈希固定在 `skills-lock.json`，许可原文见 `.agents/skills/LICENSE`）。
+- 完整第三方声明与许可证原文见 `NOTICE`。
