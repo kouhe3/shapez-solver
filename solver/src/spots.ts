@@ -176,11 +176,16 @@ export function createTileClaims(world: World): TileClaims {
  * coarse spot decisions: mine, window, anchor
  * ------------------------------------------------------------------ */
 
+/** the quarter turns a miner is tried in when its ejector side is walled */
+const MINER_ROTATIONS: readonly Rot[] = [0, 1, 2, 3];
+
 export interface ExtractorSite {
     patch: Patch;
     distance: number;
     x: number;
     y: number;
+    /** which way the ejector faces; the miner turns to find a free side */
+    rot: Rot;
     /** every tile the miner took: body, ejector port, approach */
     cells: number[];
 }
@@ -202,31 +207,37 @@ export function placeExtractor(
     for (const { patch, distance } of candidates) {
         for (const cell of patchCellsByCentre(patch)) {
             if (world.occupied.has(cellKey(cell.x, cell.y))) continue;
-            // its ejector tile and the tile behind it must be clear
-            const blocked = [...portCells(BUILDING_INFO.base, cell.x, cell.y), ...portApproachCells(BUILDING_INFO.base, cell.x, cell.y)].some(
-                (c) =>
-                    world.walls.has(cellKey(c.x, c.y)) ||
-                    world.belts.has(cellKey(c.x, c.y)) ||
-                    world.tunnelEnds.has(cellKey(c.x, c.y)) ||
-                    world.approaches.has(cellKey(c.x, c.y))
-            );
-            if (blocked) continue;
-            const cells = [cellKey(cell.x, cell.y)];
-            world.occupied.add(cells[0]!);
-            world.walls.add(cells[0]!);
-            for (const c of portCells(BUILDING_INFO.base, cell.x, cell.y)) {
-                const key = cellKey(c.x, c.y);
-                world.walls.add(key);
-                cells.push(key);
+            // the miner turns to find a free ejector side: a vein whose north
+            // edge is walled by other miners still takes a machine on its east
+            for (const rot of MINER_ROTATIONS) {
+                const ports = portCells(BUILDING_INFO.base, cell.x, cell.y, rot);
+                const approaches = portApproachCells(BUILDING_INFO.base, cell.x, cell.y, rot);
+                // its ejector tile and the tile beyond it must be clear
+                const blocked = [...ports, ...approaches].some(
+                    (c) =>
+                        world.walls.has(cellKey(c.x, c.y)) ||
+                        world.belts.has(cellKey(c.x, c.y)) ||
+                        world.tunnelEnds.has(cellKey(c.x, c.y)) ||
+                        world.approaches.has(cellKey(c.x, c.y))
+                );
+                if (blocked) continue;
+                const cells = [cellKey(cell.x, cell.y)];
+                world.occupied.add(cells[0]!);
+                world.walls.add(cells[0]!);
+                for (const c of ports) {
+                    const key = cellKey(c.x, c.y);
+                    world.walls.add(key);
+                    cells.push(key);
+                }
+                for (const c of approaches) {
+                    const key = cellKey(c.x, c.y);
+                    world.approaches.add(key);
+                    world.occupied.add(key);
+                    cells.push(key);
+                }
+                claims.block(cells);
+                return { patch, distance, x: cell.x, y: cell.y, rot, cells };
             }
-            for (const c of portApproachCells(BUILDING_INFO.base, cell.x, cell.y)) {
-                const key = cellKey(c.x, c.y);
-                world.approaches.add(key);
-                world.occupied.add(key);
-                cells.push(key);
-            }
-            claims.block(cells);
-            return { patch, distance, x: cell.x, y: cell.y, cells };
         }
     }
     return null;

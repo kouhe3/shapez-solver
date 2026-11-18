@@ -84,7 +84,10 @@ export function factoryRate(steps: readonly RatedStep[], canMerge: boolean = tru
         const r = STEP_RATE[step.op];
         if (r !== undefined && r < rate) rate = r;
     }
-    // a pure mining outpost fills a belt; a mixed chain is capped by its machine
+    // a pure mining outpost fills a belt; a mixed chain is capped by its machine.
+    // Measured 2026-11-18: stopping one miner short (1.6/s) takes the sheet from
+    // 7 critical merge points to 1, but costs 16% of the delivery and leaves a
+    // gap the drawing is refused for, so the full belt stays.
     return canMerge ? rate : Math.min(rate, MINER_RATE);
 }
 

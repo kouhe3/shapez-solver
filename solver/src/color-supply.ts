@@ -173,7 +173,7 @@ export function createColourSupply(seam: ColourSeam, tuning: PlacementTuning, id
                     y: found.y,
                     w: 1,
                     h: 1,
-                    rot: 0,
+                    rot: found.rot,
                     patch: found.patch,
                     distance: found.distance,
                     color: op.color,

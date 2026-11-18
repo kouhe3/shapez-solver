@@ -396,6 +396,9 @@ function cmdAll(): void {
         if (res.totals.classicFallback) {
             console.log("布局说明: 满载布局存在布线失败，已退回经典布局（每 base 一矿机、每色口一链）以保证 0 布线失败");
         }
+        if (res.totals.widened) {
+            console.log("布局说明: 紧凑布局有链路布不通，已用更宽的车间间距重建，优先保证 0 布线失败");
+        }
         if (perf.demandTotal > 0) {
             console.log(
                 `色料: 每口一链共 ${perf.builtSourceCount} 台（需求 ${perf.demandTotal.toFixed(2)}/s，供给 ${perf.supplyAvailable.toFixed(
@@ -420,6 +423,27 @@ function cmdAll(): void {
         console.log(
             `运输缺口: 同一出口挂多条带要 ${perf.splitters} 个分流节点（最坏一个口 ${perf.worstFanout} 条）；中心 ${perf.hubInbound} 条带入 ${HUB_ENTRIES} 个入口格，要 ${perf.hubMerges} 个并带`
         );
+        console.log(
+            `皮带账单: ${perf.beltLinks} 条链路 · 中位负载 ${(perf.beltUtilP50 * 100).toFixed(1)}% · 低于 25% 占 ${(
+                perf.beltSparseShare * 100
+            ).toFixed(0)}% · 超载 ${perf.beltOverloaded} 条 · 闲置 ${perf.beltIdle.toFixed(0)}/${perf.beltCapacity.toFixed(
+                0
+            )}/s（${(perf.beltIdleShare * 100).toFixed(0)}%）· 合并点余量 ${perf.beltHeadroom.toFixed(2)}/s · ${(
+                perf.deliveredRate > 0 ? res.totals.belts / perf.deliveredRate : 0
+            ).toFixed(0)} 格每 item/s`
+        );
+        if (perf.beltCritical.length) {
+            const byWhere = new Map<string, number>();
+            for (const point of perf.beltCritical) byWhere.set(point.where, (byWhere.get(point.where) ?? 0) + 1);
+            const plans = [...new Set(perf.beltCritical.map((p) => p.plan).filter((p): p is number => p !== null))].sort(
+                (a, b) => a - b
+            );
+            console.log(
+                `临界合并点: ${perf.beltCritical.length} 处（${[...byWhere].map(([w, n]) => `${w}×${n}`).join("、")}）` +
+                    `——余量 0，再加一份就堵` +
+                    (plans.length ? `；涉及计划 ${plans.join("、")}` : "")
+            );
+        }
         if (res.totals.routingGaps) {
             console.log(
                 `⚠ 布线失败 ${res.totals.routingGaps} 条：端口被别的建筑堵住，图纸上用红色 ✕ 标出（${res.sheet.routingGaps

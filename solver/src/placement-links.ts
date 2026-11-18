@@ -138,6 +138,13 @@ export interface LinkScheduler {
     commitLink(plan: LinkPlan, q: QueuedLink, replace?: number): boolean;
     /** plan a link and lay it; `false` when no legal run exists */
     layLink(q: QueuedLink): boolean;
+    /**
+     * Record a run that was not searched here — the translated belts of a
+     * pasted copy. The world is claimed exactly as `commitLink` would, so the
+     * sheet, the belt owner map and the census all see it; there is no queued
+     * link behind it, so the rip-up pass never moves it.
+     */
+    adopt(conn: Connection, run: RouteResult): number;
     /** undo one laid run so the rip-up pass can route it again */
     rip(index: number): void;
     /** rip-up and reroute: run once every part is placed */
@@ -500,6 +507,20 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels, legacyHu
         return plan ? commitLink(plan, q) : false;
     }
 
+    function adopt(conn: Connection, run: RouteResult): number {
+        const index = connections.length;
+        claimRoute(world, run);
+        connections[index] = conn;
+        laid[index] = undefined;
+        beltEstimate += conn.beltTiles;
+        for (const c of run.cells) beltOwner.set(cellKey(c.x, c.y), index);
+        for (const span of run.spans) {
+            beltOwner.set(cellKey(span.sender.x, span.sender.y), index);
+            beltOwner.set(cellKey(span.receiver.x, span.receiver.y), index);
+        }
+        return index;
+    }
+
     /** undo one laid run so the rip-up pass can route it again */
     const rip = (index: number): void => {
         const entry = laid[index];
@@ -631,6 +652,7 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels, legacyHu
         planLink,
         commitLink,
         layLink,
+        adopt,
         rip,
         schedule,
     };
@@ -690,29 +712,60 @@ export function mergeSources(
                 x: Math.round((a.src.building.x + b.src.building.x) / 2),
                 y: Math.round((a.src.building.y + b.src.building.y) / 2),
             };
-            const spot = claims.placeNear(info, mid, 0);
-            if (!spot) {
-                // this pair cannot join at all: keep the largest subtree seen
-                const candidates = [...next, a, b, ...level.slice(i + 2)];
-                let best = candidates[0]!;
-                for (const c of candidates) if (c.count > best.count) best = c;
-                return { root: best.src, merged: best.count };
-            }
             const id = make(++serial);
-            const merger: Placement = {
+            const mergerAt = (x: number, y: number): Placement => ({
                 step: id.step,
                 stepId: id.stepId,
                 kind: "merger",
                 zh: BUILDING_NAMES.merger,
-                x: spot.x,
-                y: spot.y,
+                x,
+                y,
                 w: 1,
                 h: 1,
                 rot: 0,
-            };
+            });
+            // the nearest free tile can still be unreachable: a merger wedged
+            // between two miners may have every side walled by their ports. Try
+            // the nearby spots and take the first both links can reach.
+            let merger: Placement | null = null;
+            let tries = 0;
+            for (const spot of claims.nearFits(info, mid, 0)) {
+                if (tries++ >= 48) break;
+                const claim = claims.reserve(info, spot.x, spot.y, 0);
+                const candidate = mergerAt(spot.x, spot.y);
+                const qa = links.shapeLink(a.src.building, a.src.info, a.src.outSlot, candidate, info, 0);
+                const qb = links.shapeLink(b.src.building, b.src.info, b.src.outSlot, candidate, info, 1);
+                const pa = links.planLink(qa);
+                const pb = links.planLink(qb);
+                if (pa?.path && pb?.path) {
+                    // one tile holds one belt: the two runs may not share a cell
+                    const taken = new Set(pa.path.cells.map((c) => `${c.x}|${c.y}`));
+                    const clash = pb.path.cells.some((c) => taken.has(`${c.x}|${c.y}`));
+                    if (!clash) {
+                        links.commitLink(pa, qa);
+                        links.commitLink(pb, qb);
+                        merger = candidate;
+                        break;
+                    }
+                }
+                claims.release(claim);
+            }
+            if (!merger) {
+                // no spot reaches both: keep the old single-shot behaviour so a
+                // crowded cluster still merges what it can, and report the rest
+                const spot = claims.placeNear(info, mid, 0);
+                if (!spot) {
+                    // this pair cannot join at all: keep the largest subtree seen
+                    const candidates = [...next, a, b, ...level.slice(i + 2)];
+                    let best = candidates[0]!;
+                    for (const c of candidates) if (c.count > best.count) best = c;
+                    return { root: best.src, merged: best.count };
+                }
+                merger = mergerAt(spot.x, spot.y);
+                links.layLink(links.shapeLink(a.src.building, a.src.info, a.src.outSlot, merger, info, 0));
+                links.layLink(links.shapeLink(b.src.building, b.src.info, b.src.outSlot, merger, info, 1));
+            }
             out.push(merger);
-            links.layLink(links.shapeLink(a.src.building, a.src.info, a.src.outSlot, merger, info, 0));
-            links.layLink(links.shapeLink(b.src.building, b.src.info, b.src.outSlot, merger, info, 1));
             next.push({ src: { building: merger, info, outSlot: 0 }, count: a.count + b.count });
         }
         level = next;

@@ -824,6 +824,15 @@ beginSection("campaign: one map, one hub, no overlaps");
         fanout.set(key, (fanout.get(key) || 0) + 1);
     }
     check("campaign: no output port feeds two belts", Math.max(0, ...fanout.values()), 1);
+    // the belt ledger: a link carries its own factory's rate, so a healthy
+    // sheet is never overloaded, and every internal link is counted
+    check("campaign: no belt asks for more than it carries", res.totals.throughput.beltOverloaded, 0);
+    check(
+        "campaign: the belt ledger counts every internal link",
+        res.totals.throughput.beltLinks,
+        res.sheet.connections.filter((c) => !c.toHub).length
+    );
+    checkTrue("campaign: the belt ledger reports a load", res.totals.throughput.beltUtilP50 > 0);
     check(
         "campaign: belt total adds up per factory",
         res.totals.belts,

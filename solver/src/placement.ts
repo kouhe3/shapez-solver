@@ -463,18 +463,19 @@ export function buildLayout({
     const lastDepth = byDepth.size ? Math.max(...byDepth.keys()) : 0;
     const neededHeight = Math.max(blockHeight, (lastDepth + extraRows) * 4 + 6);
     const hasProcessors = byDepth.size > 0;
-    // grow the window around this factory's own deposits, not the hub: the
-    // miner belt is the one run that cannot be shortened afterwards. A shared
-    // colour net (L20) packs tightly enough that a moved window loses splits,
-    // so those factories keep the old hub-anchored window.
-    let anchor: Tile = shared.hub;
-    if (!allowColourNet) {
-        const centroid = factoryAnchor(shared, flat);
-        anchor = {
-            x: Math.round(centroid.x - blockWidth / 2),
-            y: Math.round(centroid.y - neededHeight / 2),
-        };
-    }
+    // Grow the window around this factory's own deposits, not the hub: the miner
+    // belt is the one run that cannot be shortened afterwards, and it is most of
+    // the sheet's belt length (52% of the links, 91% of the tiles on the full set).
+    // Placing the miners first and moving the window onto their centroid was
+    // measured on 2026-11-18 too: the product legs grow more than the miner legs
+    // shrink (belt tiles 41910 → 46114), so the ore centroid stays the anchor.
+    // Halfway to the hub is worse as well (43242), so a shared trunk cannot be
+    // faked by moving the blocks: it needs the factories placed along it.
+    const centroid = factoryAnchor(shared, flat);
+    const anchor: Tile = {
+        x: Math.round(centroid.x - blockWidth / 2),
+        y: Math.round(centroid.y - neededHeight / 2),
+    };
     const block = hasProcessors ? allocateBlock(shared, blockWidth, neededHeight, tuning.blockGap, anchor) : null;
     const blockX = block ? block.x : hub.x + 8;
     const blockY = block ? block.y : hub.y - 8;
@@ -488,12 +489,8 @@ export function buildLayout({
         if (node.op !== "base") continue;
         const type = node.type;
         const code = node.code || `${type}u${type}u${type}u${type}u`;
-        // with a deposit-anchored window the mineral should also be the one
-        // nearest that window; a shared colour net keeps the legacy search
-        // around the hub so its packing stays bit-identical
-        const minerFrom = allowColourNet
-            ? { x: hub.x + 2, y: hub.y + 2 }
-            : { x: blockX + blockWidth / 2, y: blockY + neededHeight / 2 };
+        // the mineral should be the one nearest the factory that mines it
+        const minerFrom = { x: blockX + blockWidth / 2, y: blockY + neededHeight / 2 };
         const need = allowMerge ? minerCount(targetRate) : 1;
         const sites: Placement[] = [];
         let from = minerFrom;
@@ -512,7 +509,7 @@ export function buildLayout({
                 y: found.y,
                 w: 1,
                 h: 1,
-                rot: 0,
+                rot: found.rot,
                 patch: found.patch,
                 distance: found.distance,
             };
