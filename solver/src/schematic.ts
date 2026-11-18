@@ -517,7 +517,11 @@ export function schematicSVG(
     out.push(
         `<text x="${width - 16}" y="24" font-size="13" text-anchor="end" fill="#6a7180">tile = ${t}px · 共 ${
             layout.buildings.length
-        } 个建筑${campaign ? ` · ${plans.length} 种图形` : ""} · 传送带约 ${layout.beltEstimate} 格</text>`
+        } 个建筑${
+            campaign
+                ? ` · ${new Set(plans.map((p) => p.code)).size} 种图形 · ${plans.length} 座工厂`
+                : ""
+        } · 传送带约 ${layout.beltEstimate} 格</text>`
     );
 
     out.push(`</svg>`);

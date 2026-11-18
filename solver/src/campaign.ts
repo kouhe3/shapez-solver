@@ -9,11 +9,15 @@
  */
 
 import { solve, solve as solveWithAllBuildings, ALL_BUILDINGS } from "./solver.js";
+import type { SolveSuccess } from "./solver.js";
 import {
     BUILDING_INFO,
+    HUB_SIZE,
     cellKey,
     claimRoute,
     createWorld,
+    expandPlanTree,
+    fuseCuts,
     patchCellsByCentre,
     portApproachCells,
     portCells,
@@ -23,8 +27,11 @@ import {
     runFits,
 } from "./layout.js";
 import { buildLayout } from "./placement.js";
+import type { Layout, PlacementTuning } from "./placement.js";
+import { hubApproaches, hubBorderOf } from "./placement-links.js";
 import { disposeRouterWorld } from "./router-engine.js";
 import { colourGap, sizeColorSupply } from "./color-supply.js";
+import { validateSheet } from "./validate.js";
 import type {
     BeltHeading,
     BlockRect,
@@ -34,6 +41,7 @@ import type {
     LayoutSource,
     Placement,
     PlanFrame,
+    PlanTree,
     Rot,
     RouteResult,
     RoutingGap,
@@ -41,14 +49,15 @@ import type {
     TunnelSpan,
     World,
 } from "./layout.js";
-import { chainRate, bottleneck, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
+import { bottleneck, factoryRate, minerCount, HUB_ENTRIES, SOURCE_RATE, MINER_RATE, BELT_RATE } from "./rates.js";
 import type { Bottleneck } from "./rates.js";
 import { availableLevels, buildingsForLevel, FULL_LEVELS } from "./levels.js";
 import type { Level } from "./levels.js";
 import { patchMinerCapacity } from "./map.js";
 import type { Patch } from "./map.js";
-import { colorChains, isMixedColor } from "./color.js";
+import { colorChain, colorChains, isMixedColor } from "./color.js";
 import type { ColorChain } from "./color.js";
+import { flatten } from "./plan.js";
 import type { FlatPlan, PlanOp } from "./plan.js";
 import type { ColorChar } from "./shape.js";
 import type { NeededShape, ShapeSource } from "./needs.js";
@@ -79,17 +88,19 @@ export interface CampaignOkEntry extends CampaignEntryBase {
     belts: number;
     bounds: BlockRect | null;
     missing: string[];
+    /** one copy's delivery rate, once its miners are sized */
     rate: number;
+    /** factories of this shape on the sheet */
+    copies: number;
+    /** every copy's delivery rate, items/s */
+    totalRate: number;
     limit: Bottleneck | null;
     /** colours the painters of this factory pull, one item per output item */
     colorPorts: ColorChar[];
     availableAt: number;
     /** items the game asks for, summed over every source that needs this shape */
     amount: number;
-    /** 1 = every colour port owns a chain that keeps up; below that a source caps it */
-    supplyFactor: number;
-    effectiveRate: number;
-    etaNominal: number;
+    /** seconds to deliver `amount` at `totalRate` */
     eta: number;
 }
 
@@ -162,7 +173,18 @@ export interface CampaignThroughput {
     worstFanout: number;
     hubInbound: number;
     hubMerges: number;
-    limitedShapes: number;
+    /** copies of every factory on the sheet */
+    factories: number;
+    /** items/s the sheet delivers into the hub */
+    deliveredRate: number;
+    /** items/s the 16 hub entries can take, upgrade level 1 */
+    hubCapacity: number;
+    /** seconds until the last needed shape is delivered */
+    criticalEta: number;
+    /** trash-can buildings on the sheet */
+    trashCans: number;
+    /** items/s those cans destroy (every unused cutter output) */
+    wasteRate: number;
     balancerAt: number | null;
     tunnelAt: number | null;
 }
@@ -178,6 +200,8 @@ export interface CampaignTotals {
     buildings: number;
     belts: number;
     untilLevel: number | null;
+    /** the full layout could not route everything; this sheet is the classic one */
+    classicFallback?: boolean;
     throughput: CampaignThroughput;
 }
 
@@ -220,6 +244,10 @@ export interface CampaignOptions {
     untilLevel?: number | null;
     /** level table the unlock levels come from */
     levels?: readonly Level[];
+    /** internal: build every factory in the classic one-miner/one-chain mode */
+    classic?: boolean;
+    /** internal: placement knobs for a classic retry variant */
+    tuning?: Partial<PlacementTuning>;
 }
 
 export interface CampaignResult {
@@ -279,8 +307,174 @@ function boundsOf(buildings: readonly Placement[]): BlockRect {
     return { x: minX - 1, y: minY - 1, w: maxX - minX + 2, h: maxY - minY + 2 };
 }
 
-/** plan every requested shape on one map; `ok` = all planned, buildable and routed */
-export function planCampaign({
+/** what one copy of a factory costs the map */
+export interface CopyItem {
+    amount: number;
+    rate: number;
+    /** miners one copy needs, by deposit key (`shape:<code>` / `color:<c>`) */
+    miners: ReadonlyMap<string, number>;
+}
+
+/**
+ * Copies stop once a shape's whole demand arrives within an hour. The sheet is
+ * meant to be built and played, not to spend the map on shaving minutes off a
+ * small goal; the endgame shapes are days long at one copy, so this is what
+ * makes the hub the binding limit there.
+ */
+const COPY_TARGET_SECONDS = 3600;
+
+/** miners a deposit can hold, using the same cells `placeExtractor` reads */
+function minerCapacityByItem(patches: readonly Patch[]): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const p of patches) {
+        const key = p.item.kind === "shape" ? `shape:${p.item.code}` : `color:${p.item.color}`;
+        const cells = patchCellsByCentre(p).map((c): [number, number] => [c.x, c.y]);
+        // the cell count is an upper bound: the belts of the miners already on
+        // the vein run across it, and every one they cover costs a port cell.
+        // Measured on seed 47742 a vein takes about a third of its raw count
+        // before a new miner finds no clear ejector side, so budget for that.
+        out.set(key, (out.get(key) ?? 0) + Math.floor(patchMinerCapacity({ cells }) * 0.3));
+    }
+    return out;
+}
+
+/** the world state one factory build mutates, for a copy that has to be dropped */
+interface WorldSnapshot {
+    occupied: Set<number>;
+    walls: Set<number>;
+    approaches: Set<number>;
+    belts: Map<number, BeltHeading>;
+    tunnelCells: Set<number>;
+    tunnelEnds: Map<number, number>;
+    tunnelUnder: Map<number, number>;
+    hubApproaches: Set<number>;
+    hubBound: Map<number, number>;
+    hubEntryLoad: Map<number, number>;
+    blocks: number;
+}
+
+function snapshotWorld(world: World): WorldSnapshot {
+    return {
+        occupied: new Set(world.occupied),
+        walls: new Set(world.walls),
+        approaches: new Set(world.approaches),
+        belts: new Map(world.belts),
+        tunnelCells: new Set(world.tunnelCells),
+        tunnelEnds: new Map(world.tunnelEnds),
+        tunnelUnder: new Map(world.tunnelUnder),
+        hubApproaches: new Set(world.hubApproaches),
+        hubBound: new Map(world.hubBound),
+        hubEntryLoad: new Map(world.hubEntryLoad),
+        blocks: world.blocks.length,
+    };
+}
+
+/**
+ * Put the world back the way it was before a factory that turned out to have no
+ * vein left was laid out. The tracked collections are cleared and refilled in
+ * place, so every reverted cell still reaches the router's resident copy.
+ */
+function restoreWorld(world: World, saved: WorldSnapshot): void {
+    const refillMap = <K, V>(target: Map<K, V>, source: Map<K, V>): void => {
+        target.clear();
+        for (const [key, value] of source) target.set(key, value);
+    };
+    const refillSet = <V>(target: Set<V>, source: Set<V>): void => {
+        target.clear();
+        for (const value of source) target.add(value);
+    };
+    refillSet(world.occupied, saved.occupied);
+    refillSet(world.walls, saved.walls);
+    refillSet(world.approaches, saved.approaches);
+    refillMap(world.belts, saved.belts);
+    refillSet(world.tunnelCells, saved.tunnelCells);
+    refillMap(world.tunnelEnds, saved.tunnelEnds);
+    refillMap(world.tunnelUnder, saved.tunnelUnder);
+    refillSet(world.hubApproaches, saved.hubApproaches);
+    refillMap(world.hubBound, saved.hubBound);
+    refillMap(world.hubEntryLoad, saved.hubEntryLoad);
+    world.blocks.length = saved.blocks;
+}
+
+/**
+ * How many copies of every factory the map can take.
+ *
+ * One copy each is the floor. Beyond that, the next copy goes to the shape
+ * whose remaining time is longest — the classic longest-job-first water fill —
+ * until the hub's 16 entry belts (2 items/s each) or a deposit would overfill.
+ * A shape with no demand (`amount` 0, e.g. a `--code` probe) never grows.
+ *
+ * The deposit check runs on the same cell model the layout uses: the miner
+ * count for every base step, and the colour sources `sizeColorSupply` derives
+ * from the painters' pull. A copy that would ask a vein for more miners than it
+ * can hold is not built — the sheet stays buildable, and the hub is filled by
+ * the factories the map can actually feed.
+ */
+export function allocateCopies(items: readonly CopyItem[], capacity: ReadonlyMap<string, number>): number[] {
+    const copies = items.map(() => 1);
+    const hubCapacity = HUB_ENTRIES * BELT_RATE;
+    let total = items.reduce((sum, it) => sum + it.rate, 0);
+    /** miners every copy chosen so far takes from each deposit */
+    const used = new Map<string, number>();
+    const add = (item: CopyItem, sign: number): void => {
+        for (const [key, n] of item.miners) used.set(key, (used.get(key) ?? 0) + sign * n);
+    };
+    for (const item of items) add(item, +1);
+    const overfills = (): boolean => {
+        for (const [key, n] of used) if (n > (capacity.get(key) ?? 0)) return true;
+        return false;
+    };
+    for (;;) {
+        let pick = -1;
+        let longest = 0;
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i]!;
+            if (it.amount <= 0 || it.rate <= 0) continue;
+            // a shape that already arrives inside the target is done: another
+            // copy would only shave minutes off a job nobody is waiting on
+            const eta = it.amount / (copies[i]! * it.rate);
+            if (eta <= COPY_TARGET_SECONDS) continue;
+            if (total + it.rate > hubCapacity + 1e-9) continue;
+            add(it, +1);
+            const fits = !overfills();
+            add(it, -1);
+            if (!fits) continue;
+            if (eta > longest + 1e-9) {
+                longest = eta;
+                pick = i;
+            }
+        }
+        if (pick < 0) break;
+        add(items[pick]!, +1);
+        copies[pick] = (copies[pick] ?? 1) + 1;
+        total += items[pick]!.rate;
+    }
+    return copies;
+}
+
+/**
+ * Plan every requested shape on one map, with routability as a hard constraint.
+ *
+ * A sheet with a red ✕ is a diagnostic, not a drawing to build from. When the
+ * full layout (miners sized to their machines) leaves any link unrouted, the
+ * sheet is rebuilt in the classic mode — one miner per base step, one colour
+ * chain per port — which is the layout that routed before copies existed. The
+ * caller can see the choice in `totals.classicFallback`; a gap is never hidden.
+ */
+export function planCampaign(options: CampaignOptions): CampaignResult {
+    if (options.classic) return planCampaignOnce(options);
+    const full = planCampaignOnce(options);
+    if (full.totals.routingGaps === 0 && validateSheet(full.sheet).length === 0) return full;
+    // the full layout leaves a link unrouted or a tile claimed twice: rebuild in
+    // the classic factory style (one miner per base, one chain per port). The
+    // caller refuses to draw this sheet as well unless it is clean.
+    const classic = planCampaignOnce({ ...options, classic: true });
+    classic.totals.classicFallback = true;
+    return classic;
+}
+
+/** one build attempt; see `planCampaign` for the fallback */
+function planCampaignOnce({
     shapes,
     patches,
     hub,
@@ -288,6 +482,8 @@ export function planCampaign({
     buildings = null,
     untilLevel = null,
     levels = FULL_LEVELS,
+    classic = false,
+    tuning,
 }: CampaignOptions): CampaignResult {
     const world = createWorld({ hub, patches });
     const unlock = availableLevels(levels);
@@ -297,6 +493,9 @@ export function planCampaign({
     // a shared colour net needs the splitter, which the game hands out at L20
     const splitterAt = unlock.get("splitter") || null;
     const allowColourNet = splitterAt !== null && (untilLevel == null || untilLevel >= splitterAt);
+    // joining several miners or colour chains into one belt needs the merger
+    const mergerAt = unlock.get("merger") || null;
+    const allowMerge = !classic && mergerAt !== null && (untilLevel == null || untilLevel >= mergerAt);
     // never plan with a machine this version does not hand out — the demo
     // simply has no stacker — and cap that at the requested level as well
     const last = levels[levels.length - 1];
@@ -314,11 +513,33 @@ export function planCampaign({
     const colors = new Map<ColorChar, LayoutColor>();
     let beltEstimate = 0;
     let totalBuildings = 0;
+    let trashCans = 0;
+    let wasteRate = 0;
     let failed = 0;
     let deferred = 0;
     let impossible = 0;
     let unbuildable = 0;
     const gapList: RoutingGap[] = [];
+
+    /** one buildable need, prepared before any layout so copies can be sized */
+    interface PreparedNeed {
+        index: number;
+        need: NeededShape;
+        res: SolveSuccess;
+        /** the flat plan every copy lays out */
+        flat: PlanTree;
+        /** items/s one copy delivers once its miners are sized */
+        rate: number;
+        amount: number;
+        colorPorts: ColorChar[];
+        /** miners one copy needs, by deposit key */
+        miners: Map<string, number>;
+        availableAt: number;
+        copies: number;
+    }
+    const prepared: (PreparedNeed | null)[] = shapes.map(() => null);
+    /** a row that needs no layout: failed, deferred or impossible */
+    const rows: (CampaignEntry | null)[] = shapes.map(() => null);
 
     shapes.forEach((need, i) => {
         const index = i + 1;
@@ -334,7 +555,7 @@ export function planCampaign({
                 const freeAt = levelOfPlan(free.flat, need.sources, colorChains(free.flat.steps), unlock);
                 if (freeAt === Infinity) {
                     impossible += 1;
-                    entries.push({
+                    rows[i] = {
                         index,
                         code: need.code,
                         ok: false,
@@ -345,12 +566,12 @@ export function planCampaign({
                         buildings: 0,
                         belts: 0,
                         bounds: null,
-                    });
+                    };
                     return;
                 }
                 if (untilLevel != null && freeAt > untilLevel) {
                     deferred += 1;
-                    entries.push({
+                    rows[i] = {
                         index,
                         code: need.code,
                         ok: false,
@@ -361,7 +582,7 @@ export function planCampaign({
                         buildings: 0,
                         belts: 0,
                         bounds: null,
-                    });
+                    };
                     return;
                 }
                 res = free;
@@ -369,7 +590,7 @@ export function planCampaign({
         }
         if (!res.ok) {
             failed += 1;
-            entries.push({
+            rows[i] = {
                 index,
                 code: need.code,
                 ok: false,
@@ -379,14 +600,14 @@ export function planCampaign({
                 buildings: 0,
                 belts: 0,
                 bounds: null,
-            });
+            };
             return;
         }
         const chains = colorChains(res.flat.steps);
         const availableAt = levelOfPlan(res.flat, need.sources, chains, unlock);
         if (availableAt === Infinity) {
             impossible += 1;
-            entries.push({
+            rows[i] = {
                 index,
                 code: need.code,
                 ok: false,
@@ -397,12 +618,12 @@ export function planCampaign({
                 buildings: 0,
                 belts: 0,
                 bounds: null,
-            });
+            };
             return;
         }
         if (untilLevel != null && availableAt > untilLevel) {
             deferred += 1;
-            entries.push({
+            rows[i] = {
                 index,
                 code: need.code,
                 ok: false,
@@ -413,75 +634,184 @@ export function planCampaign({
                 buildings: 0,
                 belts: 0,
                 bounds: null,
-            });
+            };
             return;
         }
-        const layout = buildLayout({
-            plan: res.plan,
-            patches,
-            hub,
-            world,
-            idPrefix: `p${index}:`,
-            allowTunnels,
-            allowColourNet,
-        });
-        for (const gap of layout.routingGaps) {
-            gapList.push({ ...gap, plan: index, connection: allConnections.length + (gap.connection ?? -1) });
-        }
-        for (const b of layout.buildings) b.plan = index;
-        // miners sit far away on their deposit, so a factory frame only makes
-        // sense around the processing block
-        const processors = layout.buildings.filter((b) => b.kind !== "base");
-        const bounds = processors.length ? boundsOf(processors) : null;
-        // colour ports this factory pulls, one item per output item
+        // the same flat plan `buildLayout` lays out, so the rate and the colour
+        // ports are known before the first copy exists
+        const flat = expandPlanTree(fuseCuts(flatten(res.plan)));
         const colorPorts: ColorChar[] = [];
-        for (const step of layout.steps) {
+        for (const step of flat.steps) {
             if (step.op === "paint" && step.node.op === "paint") colorPorts.push(step.node.color);
             else if (step.op === "paint4" && step.node.op === "paint4") {
                 for (const c of step.node.colors) if (c && c !== "u") colorPorts.push(c);
             }
         }
-        const rate = chainRate(layout.steps);
-        // every port owns a chain, so the only limit is a port that outruns a
-        // single source (a 1/s quad painter port would need three miners)
-        const amount = need.sources.reduce((sum, s) => sum + ("required" in s ? s.required : s.amount), 0);
-        const supplyFactor = rate > SOURCE_RATE ? SOURCE_RATE / rate : 1;
-        const effectiveRate = rate * supplyFactor;
-        const etaNominal = amount > 0 && rate > 0 ? amount / rate : 0;
-        const eta = amount > 0 && effectiveRate > 0 ? amount / effectiveRate : 0;
-        entries.push({
+        const rate = factoryRate(flat.steps, allowMerge);
+        const miners = new Map<string, number>();
+        for (const step of flat.steps) {
+            const node = step.node;
+            if (node.op !== "base") continue;
+            const code = node.code || `${node.type}u${node.type}u${node.type}u${node.type}u`;
+            const key = `shape:${code}`;
+            miners.set(key, (miners.get(key) ?? 0) + (allowMerge ? minerCount(rate) : 1));
+        }
+        // one chain per colour port; a port that pulls more than 0.4/s gets
+        // several, and each chain starts at the base miners its recipe names
+        const chainsPerPort = allowMerge ? Math.max(1, Math.ceil(rate / SOURCE_RATE - 1e-9)) : 1;
+        for (const color of colorPorts) {
+            for (const op of colorChain(color)) {
+                if (op.kind !== "base") continue;
+                const key = `color:${op.color}`;
+                miners.set(key, (miners.get(key) ?? 0) + chainsPerPort);
+            }
+        }
+        prepared[i] = {
             index,
-            code: need.code,
-            ok: true,
-            status: "ok",
-            cost: res.cost,
-            buildings: layout.buildings.length,
-            belts: layout.beltEstimate,
-            bounds,
-            missing: layout.missing,
-            sources: need.sources,
+            need,
+            res,
+            flat,
             rate,
-            limit: bottleneck(layout.steps),
+            amount: need.sources.reduce((sum, s) => sum + ("required" in s ? s.required : s.amount), 0),
             colorPorts,
+            miners,
             availableAt,
-            amount,
-            supplyFactor,
-            effectiveRate,
-            etaNominal,
-            eta,
-        });
-        if (layout.missing.length) unbuildable += 1;
-        plans.push({ index, code: need.code, bounds, buildings: layout.buildings.length, rate });
+            copies: 1,
+        };
+    });
 
+    // ---- copies: fill the hub, longest job first -----------------------------
+    //
+    // One factory is one chain, so a stacker factory delivers 0.25 items/s and
+    // a 25 000-item goal takes days. The hub is the shared limit — 16 entries ×
+    // 2 items/s — so copies go to whichever shape is furthest from done until
+    // the next copy would overfill it. One copy each is the floor; a campaign
+    // whose single copies already exceed the hub reports the shortfall instead
+    // of dropping factories.
+    const buildable = prepared.filter((p): p is PreparedNeed => p !== null);
+    const copyCounts = allocateCopies(
+        buildable.map((p) => ({ amount: p.amount, rate: p.rate, miners: p.miners })),
+        minerCapacityByItem(patches)
+    );
+    buildable.forEach((p, k) => (p.copies = copyCounts[k]!));
+
+    /** record one accepted factory in the sheet's running totals */
+    const collect = (prep: PreparedNeed, layout: Layout): void => {
+        for (const gap of layout.routingGaps) {
+            gapList.push({ ...gap, plan: prep.index, connection: allConnections.length + (gap.connection ?? -1) });
+        }
+        for (const b of layout.buildings) b.plan = prep.index;
         allBuildings.push(...layout.buildings);
         allConnections.push(...layout.connections);
         allSources.push(...layout.sources);
         for (const m of layout.missing) missing.add(m);
         for (const b of layout.bom) bom.set(b.zh, (bom.get(b.zh) || 0) + b.n);
-        for (const c of layout.colors) if (!colors.has(c.color)) colors.set(c.color, c);
+        for (const color of layout.colors) if (!colors.has(color.color)) colors.set(color.color, color);
         beltEstimate += layout.beltEstimate;
         totalBuildings += layout.buildings.length;
-    });
+        const cans = layout.buildings.filter((b) => b.kind === "trash").length;
+        trashCans += cans;
+        // one unused cutter slot vents at the factory's own rate
+        wasteRate += cans * layout.rate;
+    };
+
+    /**
+     * Build one copy into the shared world. The floor is kept even when a link
+     * fails (the wrapper then falls back to the classic sheet); an extra copy is
+     * optional and is rolled back unless it is completely clean.
+     */
+    const buildCopy = (prep: PreparedNeed, c: number): Layout | null => {
+        // the first copy keeps the bare prefix: a one-copy sheet has the same
+        // ids it always had
+        const idPrefix = c === 0 ? `p${prep.index}:` : `p${prep.index}:c${c + 1}:`;
+        const saved = c > 0 ? snapshotWorld(world) : null;
+        const layout = buildLayout({
+            plan: prep.res.plan,
+            patches,
+            hub,
+            world,
+            idPrefix,
+            allowTunnels,
+            allowColourNet,
+            allowMerge,
+            legacyHub: classic,
+            tuning,
+        });
+        if (saved && (layout.missing.length || layout.routingGaps.length)) {
+            restoreWorld(world, saved);
+            return null;
+        }
+        collect(prep, layout);
+        return layout;
+    };
+
+    // one copy of every shape first, then the duplicates: a vein goes to the
+    // factory the campaign cannot do without before a second copy of another
+    const built: Layout[][] = shapes.map(() => []);
+    for (const prep of buildable) {
+        const first = buildCopy(prep, 0);
+        if (first) built[prep.index - 1]!.push(first);
+    }
+    for (const prep of buildable) {
+        const first = built[prep.index - 1]![0];
+        if (!first || first.missing.length || first.routingGaps.length) continue;
+        for (let c = 1; c < prep.copies; c++) {
+            const next = buildCopy(prep, c);
+            if (!next) break;
+            built[prep.index - 1]!.push(next);
+        }
+    }
+
+    for (let i = 0; i < shapes.length; i++) {
+        const prep = prepared[i];
+        if (!prep) {
+            entries.push(rows[i]!);
+            continue;
+        }
+        const layouts = built[i]!;
+        prep.copies = layouts.length;
+        // miners sit far away on their deposit, so a factory frame only makes
+        // sense around the processing block
+        const processors = layouts.flatMap((l) => l.buildings.filter((b) => b.kind !== "base"));
+        const bounds = processors.length ? boundsOf(processors) : null;
+        const missingOf = [...new Set(layouts.flatMap((l) => l.missing))];
+        const totalRate = layouts.reduce((sum, l) => sum + l.rate, 0);
+        const buildings = layouts.reduce((n, l) => n + l.buildings.length, 0);
+        const belts = layouts.reduce((n, l) => n + l.beltEstimate, 0);
+        entries.push({
+            index: prep.index,
+            code: prep.need.code,
+            ok: true,
+            status: "ok",
+            cost: prep.res.cost,
+            buildings,
+            belts,
+            bounds,
+            missing: missingOf,
+            sources: prep.need.sources,
+            rate: layouts[0]!.rate,
+            copies: prep.copies,
+            totalRate,
+            limit: bottleneck(prep.flat.steps),
+            colorPorts: prep.colorPorts,
+            availableAt: prep.availableAt,
+            amount: prep.amount,
+            eta: prep.amount > 0 && totalRate > 0 ? prep.amount / totalRate : 0,
+        });
+        if (missingOf.length) unbuildable += 1;
+        for (let c = 0; c < layouts.length; c++) {
+            const layout = layouts[c]!;
+            const own = layout.buildings.filter((b) => b.kind !== "base");
+            plans.push({
+                index: prep.index,
+                code: prep.need.code,
+                bounds: own.length ? boundsOf(own) : null,
+                buildings: layout.buildings.length,
+                rate: layout.rate,
+                copy: c + 1,
+            });
+        }
+    }
 
     // ---- campaign-level repair: gaps the per-factory pass could not see -----
     //
@@ -496,6 +826,8 @@ export function planCampaign({
         buildings: allBuildings,
         sources: allSources,
         allowTunnels,
+        hubRepair: true,
+        legacyHub: classic,
     });
     if (repair.fixed > 0) {
         // belts moved: a gap the pass closed is no longer a gap, and every
@@ -520,11 +852,12 @@ export function planCampaign({
 
     // ---- throughput: what each factory can deliver, and what is missing -----
 
-    // every colour port of every painter pulls at its factory's chain rate
+    // every colour port of every painter pulls at its factory's chain rate, and
+    // every copy repeats that pull
     const colorDemand = new Map<ColorChar, number>();
     for (const e of entries) {
         if (!e.ok) continue;
-        for (const color of e.colorPorts) colorDemand.set(color, (colorDemand.get(color) || 0) + e.rate);
+        for (const color of e.colorPorts) colorDemand.set(color, (colorDemand.get(color) || 0) + e.rate * e.copies);
     }
     const supply = sizeColorSupply(colorDemand);
     // what the layout actually built: one chain per colour port, and every
@@ -537,10 +870,14 @@ export function planCampaign({
     const builtSourceCount = [...builtSources.values()].reduce((a, b) => a + b, 0);
     const demandSizedCount = [...supply.sources.values()].reduce((a, b) => a + b, 0);
 
-    let limitedShapes = 0;
+    let factories = 0;
+    let deliveredRate = 0;
+    let criticalEta = 0;
     for (const e of entries) {
         if (!e.ok) continue;
-        if (e.supplyFactor < 0.999) limitedShapes += 1;
+        factories += e.copies;
+        deliveredRate += e.totalRate;
+        if (e.eta > criticalEta) criticalEta = e.eta;
     }
 
     // colour sources the layout has to add: it currently builds exactly one
@@ -617,7 +954,12 @@ export function planCampaign({
                 worstFanout,
                 hubInbound,
                 hubMerges,
-                limitedShapes,
+                factories,
+                deliveredRate,
+                hubCapacity: HUB_ENTRIES * BELT_RATE,
+                criticalEta,
+                trashCans,
+                wasteRate,
                 balancerAt,
                 tunnelAt,
             },
@@ -650,6 +992,10 @@ interface RepairRoutingArgs {
     buildings: readonly Placement[];
     sources?: readonly LayoutSource[];
     allowTunnels?: boolean;
+    /** replay unrouted delivery legs onto the hub (off in classic mode) */
+    hubRepair?: boolean;
+    /** classic mode: an entry takes 5 legs, not 2 items/s */
+    legacyHub?: boolean;
     /** whole-map rip-up passes before giving up */
     rounds?: number;
     /** rip-up rounds inside one failing link */
@@ -687,6 +1033,8 @@ interface RepairSnapshot {
         tunnelCells: Tile[];
         tunnelSpans: TunnelSpan[];
         beltTiles: number;
+        merged: boolean;
+        entryKey?: number | null;
     }[];
     /** a turned/moved miner lives on the placement itself, not in the world */
     placements: { x: number; y: number; rot: Rot; patch?: Patch; distance?: number }[];
@@ -743,8 +1091,9 @@ function connectionRun(conn: Connection): RouteResult | null {
         spans: conn.tunnelSpans,
         phases: conn.path.map((c) => (under.has(cellKey(c.x, c.y)) ? 1 : 0)),
         headings: conn.path.map(() => 0),
-        joinsGoal: false,
-        entryKey: null,
+        joinsGoal: conn.merged,
+        entryKey: conn.entryKey ?? null,
+        rate: conn.rate,
     };
 }
 
@@ -756,6 +1105,7 @@ function applyRun(conn: Connection, run: RouteResult): void {
     conn.tunnelCells = run.crossings;
     conn.tunnelSpans = run.spans;
     conn.beltTiles = run.cells.length - underground;
+    conn.entryKey = run.entryKey;
 }
 
 /**
@@ -784,6 +1134,8 @@ function repairRoutingGaps({
     buildings,
     sources = [],
     allowTunnels = true,
+    hubRepair = true,
+    legacyHub = false,
     rounds = 6,
     cascades = 6,
     maxRip = 3,
@@ -825,7 +1177,15 @@ function repairRoutingGaps({
         return Math.max(nearMargin, Math.min(240, 2 * span + 40));
     };
 
-    function search(start: Tile, goal: Tile, exempt: ReadonlySet<number>, startDir: RepairEnds["startDir"], goalDir: RepairEnds["goalDir"], frontier?: Set<number>): RouteResult | null {
+    function search(
+        start: Tile,
+        goal: Tile,
+        exempt: ReadonlySet<number>,
+        startDir: RepairEnds["startDir"],
+        goalDir: RepairEnds["goalDir"],
+        frontier?: Set<number>,
+        join = false
+    ): RouteResult | null {
         const wide = wideMarginFor(start, goal);
         for (const margin of wide > nearMargin ? [nearMargin, wide] : [nearMargin]) {
             const { run, boxLimited } = routeBeltDetailed(world, start, goal, {
@@ -837,6 +1197,7 @@ function repairRoutingGaps({
                 goalDir,
                 frontier,
                 margin,
+                goalMayJoin: join,
             });
             if (run) return run;
             // the search exhausted every tile it could reach without touching
@@ -865,12 +1226,85 @@ function repairRoutingGaps({
         return endsSearch(ends, frontier);
     }
 
+    /** the start port of a delivery leg, or null when its factory is gone */
+    function hubStart(conn: Connection): { start: Tile; startDir: readonly [number, number] } | null {
+        const src = byStep.get(conn.from);
+        if (!src) return null;
+        const info = BUILDING_INFO[src.kind];
+        const cells = portCells(info, src.x, src.y, src.rot);
+        const apps = portApproachCells(info, src.x, src.y, src.rot);
+        const slot = info.ins.length + conn.outSlot;
+        const start = cells[slot];
+        const approach = apps[slot];
+        if (!start || !approach) return null;
+        return { start, startDir: [Math.sign(approach.x - start.x), Math.sign(approach.y - start.y)] };
+    }
+
+    /**
+     * A delivery leg the build could not route. The generic repair cannot see
+     * these — their goal is a hub tile or a belt already bound for one, not a
+     * machine port — so they are replayed here: first onto a free entry face
+     * (pointing into the hub), then into any entry belt with rate headroom
+     * (two belts may point into one tile).
+     */
+    function findHub(index: number, frontier?: Set<number>): RouteResult | null {
+        const conn = connections[index]!;
+        if (!conn.toHub || conn.routed) return null;
+        const from = hubStart(conn);
+        if (!from) return null;
+        const rate = conn.rate ?? 1;
+        const exemptFor = (goal: Tile): Set<number> =>
+            new Set([cellKey(from.start.x, from.start.y), cellKey(goal.x, goal.y)]);
+        const faces = hubApproaches(world.hub)
+            .map((tile) => ({ tile, d: Math.abs(tile.x - from.start.x) + Math.abs(tile.y - from.start.y) }))
+            .sort((a, b) => a.d - b.d || a.tile.y - b.tile.y || a.tile.x - b.tile.x);
+        for (const { tile } of faces) {
+            const key = cellKey(tile.x, tile.y);
+            if (world.hubApproaches.has(key) || world.belts.has(key)) continue;
+            const border = hubBorderOf(world.hub, tile);
+            const run = search(
+                from.start,
+                tile,
+                exemptFor(tile),
+                from.startDir,
+                [Math.sign(border.x - tile.x), Math.sign(border.y - tile.y)],
+                frontier
+            );
+            if (!run) continue;
+            run.entryKey = key;
+            run.rate = rate;
+            return run;
+        }
+        for (const [key, entry] of world.hubBound) {
+            const load = world.hubEntryLoad.get(entry) ?? 0;
+            if (legacyHub ? load >= 5 : load + rate > BELT_RATE + 1e-9) continue;
+            if (world.hubApproaches.has(key)) continue;
+            const tile = tileOf(key);
+            const run = search(from.start, tile, exemptFor(tile), from.startDir, null, frontier, true);
+            if (!run) continue;
+            run.entryKey = entry;
+            run.rate = rate;
+            return run;
+        }
+        return null;
+    }
+
     function commit(index: number, run: RouteResult): void {
         const conn = connections[index]!;
         const old = connectionRun(conn);
         if (old) releaseRoute(world, old);
         claimRoute(world, run);
         applyRun(conn, run);
+        if (conn.toHub) {
+            // a fresh entry was claimed, or the leg merged into an entry belt
+            conn.merged = run.joinsGoal;
+            if (!run.joinsGoal && run.entryKey !== null) world.hubApproaches.add(run.entryKey);
+            const tail = run.cells.at(-1);
+            if (tail) {
+                conn.x2 = tail.x + 0.5;
+                conn.y2 = tail.y + 0.5;
+            }
+        }
     }
 
     /** the run each ripped connection had, so a free old path can come back */
@@ -1050,6 +1484,8 @@ function repairRoutingGaps({
             tunnelCells: c.tunnelCells,
             tunnelSpans: c.tunnelSpans,
             beltTiles: c.beltTiles,
+            merged: c.merged,
+            entryKey: c.entryKey,
         })),
         placements: buildings.map((b) => ({ x: b.x, y: b.y, rot: b.rot, patch: b.patch, distance: b.distance })),
         sources: sources.map((s) => ({ x: s.x, y: s.y, patch: s.patch, distance: s.distance })),
@@ -1081,6 +1517,8 @@ function repairRoutingGaps({
             conn.tunnelCells = save.tunnelCells;
             conn.tunnelSpans = save.tunnelSpans;
             conn.beltTiles = save.beltTiles;
+            conn.merged = save.merged;
+            conn.entryKey = save.entryKey;
         });
         buildings.forEach((b, i) => {
             const save = saved.placements[i]!;
@@ -1113,17 +1551,24 @@ function repairRoutingGaps({
                 // the frontier is filled on failure, so a second identical
                 // search per round would only burn the same states again
                 const frontier = new Set<number>();
-                const direct = find(index, frontier);
+                const direct =
+                    hubRepair && connections[index]!.toHub ? findHub(index, frontier) : find(index, frontier);
                 if (direct) {
                     commit(index, direct);
                     touched += 1;
                     continue;
                 }
-                const ends = connectionEnds(connections[index]!, byStep);
-                if (!ends) {
+                const conn = connections[index]!;
+                const ends = connectionEnds(conn, byStep);
+                // a hub leg has no machine goal, but its blockers can still be
+                // ripped: score them against the hub itself
+                const hubFrom = hubRepair && !ends && conn.toHub ? hubStart(conn) : null;
+                if (!ends && !hubFrom) {
                     if (retryMiner(index)) touched += 1;
                     continue;
                 }
+                const nearStart = ends?.start ?? hubFrom!.start;
+                const nearGoal = ends?.goal ?? { x: world.hub.x + HUB_SIZE / 2, y: world.hub.y + HUB_SIZE / 2 };
                 let done = false;
                 for (let cascade = 0; cascade < cascades && !done; cascade++) {
                     // `frontier` comes from the failure above (or from the
@@ -1135,8 +1580,8 @@ function repairRoutingGaps({
                         if (owner === undefined || owner === index) continue;
                         const tile = tileOf(key);
                         const d = Math.min(
-                            Math.abs(tile.x - ends.start.x) + Math.abs(tile.y - ends.start.y),
-                            Math.abs(tile.x - ends.goal.x) + Math.abs(tile.y - ends.goal.y)
+                            Math.abs(tile.x - nearStart.x) + Math.abs(tile.y - nearStart.y),
+                            Math.abs(tile.x - nearGoal.x) + Math.abs(tile.y - nearGoal.y)
                         );
                         const cur = scores.get(owner);
                         if (!cur) scores.set(owner, { hits: 1, d });
@@ -1156,7 +1601,7 @@ function repairRoutingGaps({
                         touched += 1;
                     }
                     frontier.clear();
-                    const run = find(index, frontier);
+                    const run = ends ? find(index, frontier) : findHub(index, frontier);
                     if (run) {
                         commit(index, run);
                         touched += 1;

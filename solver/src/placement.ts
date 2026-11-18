@@ -37,10 +37,12 @@ import {
 import type { BomEntry, BuildingInfo, Connection, LayoutColor, LayoutSource, Placement, PlanTree, Rot, RoutingGap, Tile, World } from "./layout.js";
 import { allocateBlock, createTileClaims, factoryAnchor, placeExtractor } from "./spots.js";
 import type { TileClaims } from "./spots.js";
-import { createLinkScheduler } from "./placement-links.js";
-import type { LinkPlan, LinkScheduler, QueuedLink } from "./placement-links.js";
+import { createLinkScheduler, mergeSources } from "./placement-links.js";
+import type { LinkPlan, LinkScheduler, MergeSource, QueuedLink } from "./placement-links.js";
 import { createColourSupply } from "./color-supply.js";
 import type { ColourSupply } from "./color-supply.js";
+import { factoryRate, minerCount } from "./rates.js";
+import { MINER_RATE } from "./rates.js";
 
 /* ------------------------------------------------------------------ *
  * tuning
@@ -75,8 +77,6 @@ export interface PlacementTuning {
     ripRounds: number;
     /** belts one failed link may rip per round */
     ripPerRound: number;
-    /** how many delivery legs one hub entry belt may carry */
-    hubEntryLegs: number;
     /** colour ports one shared colour net fans a trunk out to */
     colorGroupSize: number;
 }
@@ -91,7 +91,6 @@ export const DEFAULT_TUNING: PlacementTuning = {
     blockGap: 4,
     ripRounds: 5,
     ripPerRound: 3,
-    hubEntryLegs: 5,
     colorGroupSize: 5,
 };
 
@@ -110,6 +109,15 @@ export interface PlacementArgs {
     tuning?: Partial<PlacementTuning>;
     /** namespaces the synthetic ids the colour chains hand out */
     idPrefix?: string;
+    /** classic mode: a hub entry holds 5 legs, not 2 items/s */
+    legacyHub?: boolean;
+}
+
+/** one branch of a splitter that stands in for a shared output port */
+export interface FanoutSource {
+    building: Placement;
+    info: BuildingInfo;
+    outSlot: number;
 }
 
 /**
@@ -139,7 +147,11 @@ export interface PlacementSession {
     /** every link a step's inputs need, against the placement being tried */
     inputLinks(step: P.PlanStep, placement: Placement, info: BuildingInfo): QueuedLink[];
     /** the product of the plan's root, belted into the hub */
-    hubLinkOf(src: Placement): QueuedLink;
+    hubLinkOf(src: Placement, rate: number): QueuedLink;
+    /** the branch a fused source's consumer reads instead of the shared port */
+    readonly fanout: Map<string, FanoutSource>;
+    /** after a fused source is placed, put the splitter chain its fan-out needs */
+    wireFanout(stepId: string, placement: Placement, info: BuildingInfo): void;
 }
 
 export function createPlacementSession({
@@ -149,10 +161,11 @@ export function createPlacementSession({
     allowTunnels = true,
     tuning: overrides = {},
     idPrefix = "",
+    legacyHub = false,
 }: PlacementArgs): PlacementSession {
     const tuning: PlacementTuning = { ...DEFAULT_TUNING, ...overrides };
     const claims = createTileClaims(world);
-    const links = createLinkScheduler({ world, hub, tuning, allowTunnels });
+    const links = createLinkScheduler({ world, hub, tuning, allowTunnels, legacyHub });
 
     const buildings: Placement[] = [];
     const sources: LayoutSource[] = [];
@@ -170,10 +183,134 @@ export function createPlacementSession({
 
     const colour = createColourSupply({ world, buildings, sources, missing, claims, links, buildingOf }, tuning, idPrefix);
 
+    // a fused group can leave two consumers on one output port (the copy bug);
+    // a splitter is the legal drop back to one belt, at half the branch rate
+    interface FanoutEdge {
+        stepId: string;
+        inputIndex: number;
+    }
+    interface FanoutGroup {
+        repId: string;
+        outSlot: number;
+        edges: FanoutEdge[];
+    }
+    const fanout = new Map<string, FanoutSource>();
+    const fanoutGroups = new Map<string, FanoutGroup[]>();
+    {
+        const byKey = new Map<string, FanoutGroup>();
+        for (const step of stepById.values()) {
+            // a fused member is not a second consumer: it is another output
+            // slot of its rep, and only the rep's own inputs are belted
+            if (step.fuseInto) continue;
+            step.inputs.forEach((input, i) => {
+                const src = stepById.get(input.id);
+                if (!src) return;
+                const repId = src.fuseInto ?? src.id;
+                const outSlot = outputSlot(src);
+                const key = `${repId}|${outSlot}`;
+                const group = byKey.get(key) ?? { repId, outSlot, edges: [] };
+                group.edges.push({ stepId: step.id, inputIndex: i });
+                byKey.set(key, group);
+            });
+        }
+        for (const group of byKey.values()) {
+            if (group.edges.length < 2) continue;
+            const list = fanoutGroups.get(group.repId) ?? [];
+            list.push(group);
+            fanoutGroups.set(group.repId, list);
+        }
+    }
+
+    /** one splitter in front of a feed: its input faces the feed's output */
+    function placeSplitter(stepId: string, outSlot: number, serial: number, feed: FanoutSource, info: BuildingInfo): Placement | null {
+        const approaches = portApproachCells(feed.info, feed.building.x, feed.building.y, feed.building.rot);
+        const cells = portCells(feed.info, feed.building.x, feed.building.y, feed.building.rot);
+        const index = feed.info.ins.length + feed.outSlot;
+        const portCell = cells[index];
+        const approach = approaches[index];
+        if (!portCell || !approach) return null;
+        const dx = Math.sign(approach.x - portCell.x);
+        const dy = Math.sign(approach.y - portCell.y);
+        const rot: Rot = -dy === 1 ? 0 : -dy === -1 ? 2 : -dx === -1 ? 1 : 3;
+        const anchor = { x: approach.x + dx, y: approach.y + dy };
+        const splitterAt = (x: number, y: number): Placement => ({
+            step: `fanout:${stepId}:${outSlot}#${serial + 1}`,
+            stepId: `${idPrefix}fanout:${stepId}:${outSlot}#${serial + 1}`,
+            kind: "splitter",
+            zh: BUILDING_NAMES.splitter,
+            x,
+            y,
+            w: 1,
+            h: 1,
+            rot,
+        });
+        // the aligned spot would share its input approach with the feed, which
+        // the generic fit test rejects (the pair's one belt tile is both sides'
+        // approach); the nearest free off-axis spot routes with a bend instead.
+        // A splitter is no good if its one belt cannot reach, so try a short
+        // list rather than every free tile on the map.
+        let tries = 0;
+        for (const spot of claims.nearFits(info, anchor, rot)) {
+            if (tries++ >= 64) break;
+            // a splitter whose output approach is a dead end can never feed its
+            // consumer; the fit test cannot see past the approach itself
+            const sides = portApproachCells(info, spot.x, spot.y, rot);
+            const deadEnd = sides.slice(1).some((side) => {
+                const open = ([[1, 0], [-1, 0], [0, 1], [0, -1]] as const).some(([dx, dy]) => {
+                    if (spot.x === side.x + dx && spot.y === side.y + dy) return false;
+                    const key = cellKey(side.x + dx, side.y + dy);
+                    return !world.walls.has(key) && !world.occupied.has(key) && !world.belts.has(key);
+                });
+                return !open;
+            });
+            if (deadEnd) continue;
+            const claim = claims.reserve(info, spot.x, spot.y, rot);
+            const splitter = splitterAt(spot.x, spot.y);
+            const q = links.shapeLink(feed.building, feed.info, feed.outSlot, splitter, info, 0);
+            const plan = links.planLink(q);
+            if (plan?.path && links.commitLink(plan, q)) return splitter;
+            claims.release(claim);
+        }
+        return null;
+    }
+
+    function wireFanout(stepId: string, placement: Placement, info: BuildingInfo): void {
+        const groups = fanoutGroups.get(stepId);
+        if (!groups) return;
+        const splitterInfo = BUILDING_INFO.splitter;
+        for (const group of groups) {
+            let feed: FanoutSource = { building: placement, info, outSlot: group.outSlot };
+            const chain: Placement[] = [];
+            let ok = true;
+            for (let j = 0; j < group.edges.length - 1; j++) {
+                const splitter = placeSplitter(stepId, group.outSlot, j, feed, splitterInfo);
+                if (!splitter) {
+                    ok = false;
+                    break;
+                }
+                buildings.push(splitter);
+                chain.push(splitter);
+                feed = { building: splitter, info: splitterInfo, outSlot: 1 };
+            }
+            if (!ok) continue;
+            for (let j = 0; j < chain.length; j++) {
+                const edge = group.edges[j]!;
+                fanout.set(`${edge.stepId}:${edge.inputIndex}`, { building: chain[j]!, info: splitterInfo, outSlot: 0 });
+            }
+            const last = group.edges[group.edges.length - 1]!;
+            fanout.set(`${last.stepId}:${last.inputIndex}`, { building: chain[chain.length - 1]!, info: splitterInfo, outSlot: 1 });
+        }
+    }
+
     /** every link a step's inputs need, against the placement being tried */
     function inputLinks(step: P.PlanStep, placement: Placement, info: BuildingInfo): QueuedLink[] {
         const out: QueuedLink[] = [];
         step.inputs.forEach((input, i) => {
+            const branch = fanout.get(`${step.id}:${i}`);
+            if (branch) {
+                out.push(links.shapeLink(branch.building, branch.info, branch.outSlot, placement, info, i));
+                return;
+            }
             const src = buildingByStep.get(input.id);
             if (!src || !info.ins[i]) return;
             out.push(links.shapeLink(src, BUILDING_INFO[src.kind], outputSlot(stepById.get(input.id)), placement, info, i));
@@ -182,7 +319,7 @@ export function createPlacementSession({
     }
 
     /** the product of the plan's root, belted into the hub */
-    function hubLinkOf(src: Placement): QueuedLink {
+    function hubLinkOf(src: Placement, rate: number): QueuedLink {
         return {
             toHub: true,
             srcBuilding: src,
@@ -191,11 +328,11 @@ export function createPlacementSession({
             dstBuilding: null,
             dstInfo: null,
             inSlot: null,
-            extra: {},
+            extra: { rate: legacyHub ? 1 : rate },
         };
     }
 
-    return { tuning, buildings, sources, missing, claims, links, colour, bind, buildingOf, inputLinks, hubLinkOf };
+    return { tuning, buildings, sources, missing, claims, links, colour, bind, buildingOf, inputLinks, hubLinkOf, fanout, wireFanout };
 }
 
 /* ------------------------------------------------------------------ *
@@ -216,6 +353,8 @@ export interface Layout {
     beltEstimate: number;
     bom: BomEntry[];
     steps: P.PlanStep[];
+    /** items/s this factory delivers once its miners are sized */
+    rate: number;
 }
 
 /** what `buildLayout` takes */
@@ -236,6 +375,10 @@ export interface BuildLayoutArgs {
     allowTunnels?: boolean;
     /** may colour ports of one factory share a net (splitter unlocked, L20)? */
     allowColourNet?: boolean;
+    /** may several miners be joined into one belt (merger unlocked, L10)? */
+    allowMerge?: boolean;
+    /** classic mode: a hub entry holds 5 legs, not 2 items/s */
+    legacyHub?: boolean;
     /** placement knobs; anything left out keeps its `DEFAULT_TUNING` value */
     tuning?: Partial<PlacementTuning>;
 }
@@ -250,11 +393,16 @@ export function buildLayout({
     idPrefix = "",
     allowTunnels = true,
     allowColourNet = false,
+    allowMerge = false,
+    legacyHub = false,
     tuning: tuningOverrides = {},
 }: BuildLayoutArgs): Layout {
     const shared = world || createWorld({ hub, patches });
     // one output port = one belt, so shared sub-plans get their own copy
     const flat = expandPlanTree(fuseCuts(P.flatten(plan)));
+    // a miner is not a cap: it can be duplicated up to one belt. Without the
+    // merger part there is no way to join them, so the miner rate still binds.
+    const targetRate = factoryRate(flat.steps, allowMerge);
     // dependency depth
     const depth = new Map<string, number>();
     const stepById = new Map<string, P.PlanStep>(flat.steps.map((s): [string, P.PlanStep] => [s.id, s]));
@@ -264,7 +412,15 @@ export function buildLayout({
         depth.set(step.id, d);
     }
     // every part and belt of this factory goes through the session
-    const session = createPlacementSession({ world: shared, hub, stepById, allowTunnels, idPrefix, tuning: tuningOverrides });
+    const session = createPlacementSession({
+        world: shared,
+        hub,
+        stepById,
+        allowTunnels,
+        idPrefix,
+        tuning: tuningOverrides,
+        legacyHub,
+    });
     const { tuning, claims, links, colour } = session;
     /** fused cutters: alias step id → the rep's id (and back) */
     const aliasOf = new Map<string, string[]>();
@@ -323,7 +479,10 @@ export function buildLayout({
     const blockX = block ? block.x : hub.x + 8;
     const blockY = block ? block.y : hub.y - 8;
 
-    // 1) place extractors on real patches
+    // 1) place extractors on real patches. A base step is not one miner: the
+    // machine it feeds may run at 0.5 or 2 items/s, so the step gets as many
+    // miners as its belt needs, merged into one output where the merger exists.
+    let minerSupply = Infinity;
     for (const step of flat.steps) {
         const node = step.node;
         if (node.op !== "base") continue;
@@ -335,29 +494,59 @@ export function buildLayout({
         const minerFrom = allowColourNet
             ? { x: hub.x + 2, y: hub.y + 2 }
             : { x: blockX + blockWidth / 2, y: blockY + neededHeight / 2 };
-        const found = placeExtractor(claims, shared, (item) => item.kind === "shape" && item.code === code, minerFrom);
-        if (!found) {
+        const need = allowMerge ? minerCount(targetRate) : 1;
+        const sites: Placement[] = [];
+        let from = minerFrom;
+        for (let i = 0; i < need; i++) {
+            const found = placeExtractor(claims, shared, (item) => item.kind === "shape" && item.code === code, from);
+            if (!found) break;
+            session.sources.push({ step, patch: found.patch, distance: found.distance, x: found.x, y: found.y });
+            const miner: Placement = {
+                step: step.id,
+                // a step with several miners needs distinct ids: the repair pass
+                // keys placements by stepId
+                stepId: idPrefix + step.id + (need > 1 ? `#${i + 1}` : ""),
+                kind: "base",
+                zh: BUILDING_NAMES.base,
+                x: found.x,
+                y: found.y,
+                w: 1,
+                h: 1,
+                rot: 0,
+                patch: found.patch,
+                distance: found.distance,
+            };
+            session.buildings.push(miner);
+            sites.push(miner);
+            // the next miner belongs on the same vein: that is the cluster the
+            // merge tree stands on, not a second deposit across the map
+            from = { x: found.x, y: found.y };
+        }
+        if (!sites.length) {
             session.missing.add(`shape:${code}`);
             session.sources.push({ step, missing: `地图上找不到 ${code} 矿脉`, patch: null });
+            minerSupply = 0;
             continue;
         }
-        session.sources.push({ step, patch: found.patch, distance: found.distance, x: found.x, y: found.y });
-        const miner: Placement = {
-            step: step.id,
-            stepId: idPrefix + step.id,
-            kind: "base",
-            zh: BUILDING_NAMES.base,
-            x: found.x,
-            y: found.y,
-            w: 1,
-            h: 1,
-            rot: 0,
-            patch: found.patch,
-            distance: found.distance,
-        };
-        session.buildings.push(miner);
-        session.bind(step.id, miner);
+        if (sites.length === 1) {
+            session.bind(step.id, sites[0]!);
+            session.wireFanout(step.id, sites[0]!, BUILDING_INFO.base);
+            minerSupply = Math.min(minerSupply, MINER_RATE);
+            continue;
+        }
+        const merged = mergeSources(
+            claims,
+            links,
+            sites.map((building): MergeSource => ({ building, info: BUILDING_INFO.base, outSlot: 0 })),
+            (serial) => ({ step: `${step.id}:merge#${serial}`, stepId: `${idPrefix}${step.id}:merge#${serial}` }),
+            session.buildings
+        );
+        session.bind(step.id, merged.root.building);
+        session.wireFanout(step.id, merged.root.building, merged.root.info);
+        minerSupply = Math.min(minerSupply, merged.merged * MINER_RATE);
     }
+    // what the miners actually feed; a deposit that ran out caps the factory
+    const rate = Math.min(targetRate, Number.isFinite(minerSupply) ? minerSupply : targetRate);
 
     // 2) pack processors into rows, grouped by depth. One free row between two
     // rows and a two-tile column on the right stay empty: they are the cells a
@@ -442,7 +631,7 @@ export function buildLayout({
                     // inputs and — for the root — the hub can all be reached
                     const placement = make(cx, cy, rot);
                     const inputLinks = session.inputLinks(step, placement, info);
-                    const toHub = root ? session.hubLinkOf(placement) : null;
+                    const toHub = root ? session.hubLinkOf(placement, rate) : null;
                     const claim = claims.reserve(info, cx, cy, rot);
                     const plans = inputLinks.map((q) => links.planLink(q));
                     const hubPlan = toHub ? links.planLink(toHub) : null;
@@ -484,7 +673,7 @@ export function buildLayout({
                 claims.reserve(info, placement.x, placement.y, placement.rot);
                 for (const q of session.inputLinks(step, placement, info)) links.layLink(q);
                 if (root) {
-                    links.layLink(session.hubLinkOf(placement));
+                    links.layLink(session.hubLinkOf(placement, rate));
                     rootPlanned = true;
                 }
             }
@@ -492,6 +681,7 @@ export function buildLayout({
             session.buildings.push(placement);
             session.bind(step.id, placement);
             for (const alias of aliasOf.get(step.id) || []) session.bind(alias, placement);
+            session.wireFanout(step.id, placement, info);
             cx = placement.x + placement.w + 1;
         }
     }
@@ -500,12 +690,12 @@ export function buildLayout({
     // root step, so its hub belt is laid here
     if (!rootPlanned) {
         const rootBuilding = session.buildingOf(flat.final.id);
-        if (rootBuilding) links.layLink(session.hubLinkOf(rootBuilding));
+        if (rootBuilding) links.layLink(session.hubLinkOf(rootBuilding, rate));
     }
 
     // 3c) colour belts: one chain per consumer port, merged into a trunk at the
     // production end when the factory may share a net (see `color-supply.ts`)
-    colour.supplyFactoryColours(flat, allowColourNet);
+    colour.supplyFactoryColours(flat, allowColourNet, rate, allowMerge);
 
     // 3d) an output port with nowhere to go backs up and stalls the machine, so
     // every cutter slot the plan does not use gets a trash can. The ejector hands
@@ -590,5 +780,6 @@ export function buildLayout({
         beltEstimate: links.beltEstimate,
         bom: [...bom.entries()].map(([zh, n]) => ({ zh, n })),
         steps: flat.steps,
+        rate,
     };
 }

@@ -67,6 +67,33 @@ export function chainRate(steps: readonly RatedStep[]): number {
     return Number.isFinite(rate) ? rate : 0;
 }
 
+/**
+ * Items/s a factory can deliver once its miners are sized to feed it.
+ *
+ * A plan step processes at its machine rate, so the slowest machine still caps
+ * the chain — but `base` is not a cap: miners are the one machine the game lets
+ * you duplicate freely (five of them fill a belt), and a layout that places one
+ * miner per base step leaves a cutter (0.5/s) or a quad painter (1/s) starved.
+ * Before the merger unlocks there is no way to join several miners into one
+ * belt, so the miner rate stays the cap.
+ */
+export function factoryRate(steps: readonly RatedStep[], canMerge: boolean = true): number {
+    let rate = BELT_RATE;
+    for (const step of steps) {
+        if (step.op === "base") continue;
+        const r = STEP_RATE[step.op];
+        if (r !== undefined && r < rate) rate = r;
+    }
+    // a pure mining outpost fills a belt; a mixed chain is capped by its machine
+    return canMerge ? rate : Math.min(rate, MINER_RATE);
+}
+
+/** miners one base step needs to supply `rate` items/s, clamped to one belt */
+export function minerCount(rate: number): number {
+    const perBelt = Math.max(1, Math.round(BELT_RATE / MINER_RATE));
+    return Math.max(1, Math.min(perBelt, Math.ceil(rate / MINER_RATE - 1e-9)));
+}
+
 /** the slowest machine of a chain, or `null` for an empty one */
 export function bottleneck(steps: readonly RatedStep[]): Bottleneck | null {
     let worst: Bottleneck | null = null;

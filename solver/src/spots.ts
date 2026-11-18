@@ -232,13 +232,12 @@ export function placeExtractor(
     return null;
 }
 
-function blockCollisions(world: World, x: number, y: number, width: number, height: number, limit = Infinity): number {
+/** tiles a factory window cannot use: a deposit counts the same as a building */
+function blockScore(world: World, x: number, y: number, width: number, height: number): number {
     let hits = 0;
     for (let i = 0; i < width; i++) {
         for (let j = 0; j < height; j++) {
-            if (!processorFree(world, x + i, y + j)) {
-                if (++hits >= limit) return hits;
-            }
+            if (!processorFree(world, x + i, y + j)) hits++;
         }
     }
     return hits;
@@ -278,15 +277,15 @@ export function allocateBlock(
     const originX = Math.round(anchor.x);
     const originY = Math.round(anchor.y);
     let best: BlockRect | null = null;
-    let bestHits = Infinity;
+    let bestScore = Infinity;
     for (const c of candidates) {
         const x = originX + c.dx * stepX;
         const y = originY + c.dy * stepY;
-        const hits = blockCollisions(world, x, y, width, height, bestHits);
-        if (hits < bestHits) {
-            bestHits = hits;
+        const score = blockScore(world, x, y, width, height);
+        if (score < bestScore) {
+            bestScore = score;
             best = { x, y, w: width, h: height };
-            if (hits === 0) break;
+            if (score === 0) break;
         }
     }
     if (best) world.blocks.push(best);

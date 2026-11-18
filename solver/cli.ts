@@ -27,6 +27,7 @@ import { colorChains } from "./src/color.js";
 import { planBom, expandPlanTree } from "./src/layout.js";
 import { BUILDING_NAMES } from "./src/catalogue.js";
 import { initRouterWasm } from "./src/router-engine.js";
+import { validateSheet } from "./src/validate.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -329,6 +330,7 @@ function cmdAll(): void {
                             : { color: c.color, direct: false, mix: c.mix }
                     ),
                     missing: res.sheet.missing,
+                    routingGaps: res.sheet.routingGaps,
                     belts: res.sheet.beltEstimate,
                     throughput: res.totals.throughput,
                 },
@@ -342,7 +344,7 @@ function cmdAll(): void {
         console.log(`种子 ${ctx.seed} · 扫描半径 ${scan.radius} chunk · 中心 (${ctx.hub.x},${ctx.hub.y})`);
         console.log(`全部需求图形（${label}${scope}）: ${res.totals.shapes} 种可建 / ${shapes.length} 种需求\n`);
         console.log(
-            ` ${pad("#", 4)}${pad("图形", 28)}${pad("建筑", 6)}${pad("传送带", 8)}${pad("产能", 9)}${pad(
+            ` ${pad("#", 4)}${pad("图形", 28)}${pad("副本", 6)}${pad("建筑", 6)}${pad("传送带", 8)}${pad("产能", 9)}${pad(
                 "交付",
                 8
             )}${pad("可建", 6)}来源`
@@ -352,7 +354,7 @@ function cmdAll(): void {
             if (e.status === "deferred" || e.status === "impossible") {
                 const at = e.status === "deferred" ? `L${e.availableAt}+` : "不可建";
                 console.log(
-                    ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
+                    ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
                         "-",
                         8
                     )}${pad(at, 6)} ${e.reason}${why ? ` · ${why}` : ""}`
@@ -361,7 +363,7 @@ function cmdAll(): void {
             }
             if (!e.ok) {
                 console.log(
-                    ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
+                    ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad("-", 6)}${pad("-", 6)}${pad("-", 8)}${pad("-", 9)}${pad(
                         "-",
                         8
                     )}${pad("-", 6)}无法求解: ${e.error}`
@@ -370,8 +372,8 @@ function cmdAll(): void {
             }
             const gap = e.missing.length ? `  ⚠ 缺矿脉 ${e.missing.map((m) => m.replace(/^shape:/, "")).join(", ")}` : "";
             console.log(
-                ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad(e.buildings, 6)}${pad(e.belts, 8)}${pad(
-                    formatRate(e.effectiveRate),
+                ` ${pad(e.index, 4)}${pad(e.code, 28)}${pad(e.copies, 6)}${pad(e.buildings, 6)}${pad(e.belts, 8)}${pad(
+                    formatRate(e.totalRate),
                     9
                 )}${pad(formatDuration(e.eta), 8)}${pad(`L${e.availableAt}`, 6)}${why}${gap}`
             );
@@ -385,8 +387,15 @@ function cmdAll(): void {
         );
         const perf = res.totals.throughput;
         console.log(
-            `产能（游戏额定速度 · 升级等级 1）: 传送带 ${perf.beltRate}/s · 采矿机 ${perf.minerRate}/s · 色料源 ${perf.sourceRate}/s`
+            `总产能: ${perf.deliveredRate.toFixed(2)}/s（${perf.factories} 座工厂）· 中心上限 ${perf.hubCapacity}/s · 全部交付需 ${formatDuration(perf.criticalEta)}`
         );
+        console.log(`损耗: ${perf.trashCans} 个垃圾桶 · 丢弃 ${perf.wasteRate.toFixed(2)}/s（未用的切割口）`);
+        console.log(
+            `额定速度（升级等级 1）: 传送带 ${perf.beltRate}/s · 采矿机 ${perf.minerRate}/s · 色料源 ${perf.sourceRate}/s`
+        );
+        if (res.totals.classicFallback) {
+            console.log("布局说明: 满载布局存在布线失败，已退回经典布局（每 base 一矿机、每色口一链）以保证 0 布线失败");
+        }
         if (perf.demandTotal > 0) {
             console.log(
                 `色料: 每口一链共 ${perf.builtSourceCount} 台（需求 ${perf.demandTotal.toFixed(2)}/s，供给 ${perf.supplyAvailable.toFixed(
@@ -434,7 +443,20 @@ function cmdAll(): void {
     }
 
     const outPath = flags.get("out") ?? (flags.get("json") ? null : `plan-${ctx.seed}.svg`);
-    if (outPath) {
+    const violations = validateSheet(res.sheet);
+    if (res.totals.routingGaps > 0 || violations.length > 0) {
+        // the sheet has a red ✕ or an illegal tile: it is a diagnostic, not a
+        // drawing to build from, so no file is written and the command fails
+        const kinds = [...new Set(violations.map((v) => v.kind))].join("、");
+        const labels = res.sheet.routingGaps.map((g) => `${g.fromLabel}→${g.toLabel}`).join("、");
+        console.error(
+            `\n拒绝生成图纸：${res.totals.routingGaps} 条链路布线失败` +
+                (violations.length ? `、${violations.length} 条几何违规（${kinds}）` : "") +
+                (labels ? `（${labels}）` : "") +
+                `。这是求解器的布局缺陷，不是游戏限制。`
+        );
+        process.exitCode = 1;
+    } else if (outPath) {
         const usedPatches = [];
         for (const s of res.sheet.sources) if (s.patch) usedPatches.push(s.patch);
         for (const c of res.sheet.colors) if (c.patch) usedPatches.push(c.patch);

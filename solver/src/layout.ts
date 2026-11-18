@@ -235,6 +235,8 @@ export interface ConnectionExtra {
     color?: boolean;
     /** this belt vents an unused cutter slot into a trash can */
     waste?: boolean;
+    /** items/s this link carries into the hub (default: one unit) */
+    rate?: number;
     /**
      * The item goes straight into the part standing on the ejector's target
      * tile: the game's ejector hands it to any acceptor there
@@ -278,6 +280,8 @@ export interface Connection extends ConnectionDraft {
     /** the underground runs of `path`, the single source for the drawing */
     tunnelSpans: TunnelSpan[];
     beltTiles: number;
+    /** hub entry tile key this run feeds; `null` for a non-hub link */
+    entryKey?: number | null;
 }
 
 /**
@@ -318,6 +322,8 @@ export interface PlanFrame {
     bounds: BlockRect | null;
     buildings: number;
     rate: number;
+    /** 1-based copy of the shape; several frames may share `index` and `code` */
+    copy?: number;
 }
 
 /** how the router may lay one run */
@@ -366,6 +372,11 @@ export interface RouteResult {
      * belt of the run then points to that entry (`World.hubBound`)
      */
     entryKey: number | null;
+    /**
+     * items/s this run carries into the hub; an entry belt takes 2/s, so the
+     * entry's load is the sum of its legs' rates. Non-hub runs leave it unset.
+     */
+    rate?: number;
 }
 
 /* ------------------------------------------------------------------ *
@@ -754,7 +765,10 @@ export function claimRoute(world: World, run: RouteResult): void {
         // the whole run leads to the hub: tag it so later factories can merge in
         if (run.entryKey !== null) world.hubBound.set(key, run.entryKey);
     }
-    if (run.entryKey !== null) world.hubEntryLoad.set(run.entryKey, (world.hubEntryLoad.get(run.entryKey) ?? 0) + 1);
+    if (run.entryKey !== null) {
+        const rate = run.rate ?? 1;
+        world.hubEntryLoad.set(run.entryKey, (world.hubEntryLoad.get(run.entryKey) ?? 0) + rate);
+    }
 }
 
 /**
@@ -829,8 +843,8 @@ export function releaseRoute(world: World, run: RouteResult): void {
         if (run.entryKey !== null) world.hubBound.delete(key);
     }
     if (run.entryKey !== null) {
-        const left = (world.hubEntryLoad.get(run.entryKey) ?? 1) - 1;
-        if (left > 0) world.hubEntryLoad.set(run.entryKey, left);
+        const left = (world.hubEntryLoad.get(run.entryKey) ?? 1) - (run.rate ?? 1);
+        if (left > 1e-9) world.hubEntryLoad.set(run.entryKey, left);
         else world.hubEntryLoad.delete(run.entryKey);
     }
 }

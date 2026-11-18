@@ -19,6 +19,7 @@ import { BUILDING_NAMES } from "./catalogue.js";
 import { BUILDING_INFO, cellKey, portApproachCells, portCells } from "./layout.js";
 import { SOURCE_RATE } from "./rates.js";
 import { placeExtractor } from "./spots.js";
+import { mergeSources } from "./placement-links.js";
 import type { ColorChar } from "./shape.js";
 import type { BuildingInfo, LayoutSource, Placement, PlanTree, Tile, World } from "./layout.js";
 import type { TileClaims } from "./spots.js";
@@ -126,9 +127,14 @@ export interface ColourSupply {
     /** one colour chain per consumer port */
     buildColorChain(color: ColorChar, anchor: Tile): ColorChainOutcome | null;
     /** one colour net for several ports of the same factory */
-    buildSharedColorNet(color: ColorChar, ports: { painter: Placement; info: BuildingInfo; slot: number }[], anchor: Tile): void;
+    buildSharedColorNet(
+        color: ColorChar,
+        ports: { painter: Placement; info: BuildingInfo; slot: number }[],
+        anchor: Tile,
+        perPort: number
+    ): void;
     /** every colour port of a factory, fed the way its unlock level allows */
-    supplyFactoryColours(flat: PlanTree, allowColourNet: boolean): void;
+    supplyFactoryColours(flat: PlanTree, allowColourNet: boolean, rate?: number, allowMerge?: boolean): void;
 }
 
 export function createColourSupply(seam: ColourSeam, tuning: PlacementTuning, idPrefix: string): ColourSupply {
@@ -279,65 +285,44 @@ export function createColourSupply(seam: ColourSeam, tuning: PlacementTuning, id
     function buildSharedColorNet(
         color: ColorChar,
         ports: { painter: Placement; info: BuildingInfo; slot: number }[],
-        anchor: Tile
+        anchor: Tile,
+        perPort: number
     ): void {
-        const first = buildColorChain(color, anchor);
-        if (!first || !first.ok) {
+        const chains: BuiltColorChain[] = [];
+        let production = anchor;
+        for (let p = 0; p < ports.length; p++) {
+            for (let i = 0; i < perPort; i++) {
+                const chain = buildColorChain(color, production);
+                if (!chain || !chain.ok) {
+                    seam.missing.add(`颜色:${color}`);
+                    return;
+                }
+                chains.push(chain);
+                // the old net built every chain at the first chain's production
+                // point; advancing the anchor each time moved the whole colour
+                // cluster and changed the factory's belts around it
+                if (chains.length === 1) production = chain.anchor ?? production;
+            }
+        }
+
+        // pairwise merge, nearest the production cluster. A port that pulls
+        // more than one source needs several chains joined into one belt.
+        const merged = mergeSources(
+            claims,
+            links,
+            chains.map((c) => ({ building: c.building, info: c.info, outSlot: c.outSlot })),
+            () => ({ step: `merger:${color}#${++colorSerial}`, stepId: `${idPrefix}merger:${color}#${colorSerial}` }),
+            seam.buildings
+        );
+        if (merged.merged < chains.length) {
             seam.missing.add(`颜色:${color}`);
             return;
         }
-        const chains: BuiltColorChain[] = [first];
-        const production = first.anchor ?? { x: first.building.x, y: first.building.y };
-        for (let i = 1; i < ports.length; i++) {
-            const chain = buildColorChain(color, production);
-            if (!chain || !chain.ok) {
-                seam.missing.add(`颜色:${color}`);
-                return;
-            }
-            chains.push(chain);
-        }
-
-        // pairwise merge, nearest the production cluster
-        let level: BuiltColorChain[] = chains;
-        while (level.length > 1) {
-            const next: BuiltColorChain[] = [];
-            for (let i = 0; i < level.length; i += 2) {
-                const a = level[i]!;
-                const b = level[i + 1];
-                if (!b) {
-                    next.push(a);
-                    continue;
-                }
-                const info = BUILDING_INFO.merger;
-                const spot = claims.placeNear(
-                    info,
-                    { x: Math.round((a.building.x + b.building.x) / 2), y: Math.round((a.building.y + b.building.y) / 2) },
-                    0
-                );
-                if (!spot) return;
-                const merger: Placement = {
-                    step: `merger:${color}#${++colorSerial}`,
-                    stepId: `${idPrefix}merger:${color}#${colorSerial}`,
-                    kind: "merger",
-                    zh: BUILDING_NAMES.merger,
-                    x: spot.x,
-                    y: spot.y,
-                    w: 1,
-                    h: 1,
-                    rot: 0,
-                };
-                seam.buildings.push(merger);
-                if (!links.layLink(links.shapeLink(a.building, a.info, a.outSlot, merger, info, 0, { color: true }))) return;
-                if (!links.layLink(links.shapeLink(b.building, b.info, b.outSlot, merger, info, 1, { color: true }))) return;
-                next.push({ ok: true, color, building: merger, info, outSlot: 0 });
-            }
-            level = next;
-        }
 
         // one splitter per extra port: out0 feeds a port, out1 passes the trunk on
-        let prev = level[0]!;
-        for (let i = 0; i < ports.length - 1; i++) {
-            const port = ports[i]!;
+        let prev = merged.root;
+        const lastPort = ports.at(-1)!;
+        for (const port of ports.slice(0, -1)) {
             const info = BUILDING_INFO.splitter;
             // sit two tiles outside the port and face the outlet at it, so the
             // last run is a two-tile belt instead of a lap around the block
@@ -365,21 +350,73 @@ export function createColourSupply(seam: ColourSeam, tuning: PlacementTuning, id
             seam.buildings.push(splitter);
             if (!links.layLink(links.shapeLink(prev.building, prev.info, prev.outSlot, splitter, info, 0, { color: true }))) return;
             links.layLink(links.shapeLink(splitter, info, 0, port.painter, port.info, port.slot, { color: true }));
-            prev = { ok: true, color, building: splitter, info, outSlot: 1 };
+            prev = { building: splitter, info, outSlot: 1 };
         }
-        const last = ports.at(-1)!;
-        links.layLink(links.shapeLink(prev.building, prev.info, prev.outSlot, last.painter, last.info, last.slot, { color: true }));
+        links.layLink(links.shapeLink(prev.building, prev.info, prev.outSlot, lastPort.painter, lastPort.info, lastPort.slot, { color: true }));
     }
 
     /**
-     * Every colour port of one factory, fed the way its unlock level allows:
-     * ports of the same colour in one factory share a net when a splitter can
-     * fan the trunk back out, and each port keeps its own chain before that.
-     * Merging at the consumer end would save nothing — the chains still start
-     * at their own miners, so the long belts would merely end at a merger
-     * instead of a painter.
+     * One port's colour, as many chains as the port pulls and one belt in.
+     * A port outruns a chain above 0.4 items/s (a quad painter at 1/s pulls
+     * three), so the chains are built side by side and merged; without the
+     * merger part the port keeps one chain and stays the factory's limit.
      */
-    function supplyFactoryColours(flat: PlanTree, allowColourNet: boolean): void {
+    function feedPort(
+        color: ColorChar,
+        port: { painter: Placement; info: BuildingInfo; slot: number },
+        perPort: number,
+        anchor: Tile
+    ): Tile | null {
+        const chains: BuiltColorChain[] = [];
+        let production = anchor;
+        for (let i = 0; i < perPort; i++) {
+            const chain = buildColorChain(color, production);
+            if (!chain || !chain.ok) {
+                seam.missing.add(`颜色:${color}`);
+                return null;
+            }
+            chains.push(chain);
+            production = chain.anchor ?? production;
+        }
+        const root =
+            chains.length === 1
+                ? chains[0]!
+                : (() => {
+                      const merged = mergeSources(
+                          claims,
+                          links,
+                          chains.map((c) => ({ building: c.building, info: c.info, outSlot: c.outSlot })),
+                          () => ({ step: `merger:${color}#${++colorSerial}`, stepId: `${idPrefix}merger:${color}#${colorSerial}` }),
+                          seam.buildings
+                      );
+                      if (merged.merged < chains.length) {
+                          seam.missing.add(`颜色:${color}`);
+                          return null;
+                      }
+                      return merged.root;
+                  })();
+        if (!root) return null;
+        if (
+            !links.layLink(
+                links.shapeLink(root.building, root.info, root.outSlot, port.painter, port.info, port.slot, { color: true })
+            )
+        ) {
+            return null;
+        }
+        return chains.at(-1)?.anchor ?? production;
+    }
+
+    /**
+     * Every colour port of one factory, fed the way its unlock level allows.
+     *
+     * A port pulls the factory's own rate, so a quad painter at 1/s needs three
+     * chains; `perPort` counts them. Ports of the same colour share a trunk only
+     * when a splitter can fan it back out (L20); a chain group is sized by the
+     * belt, not by a fixed port count.
+     */
+    function supplyFactoryColours(flat: PlanTree, allowColourNet: boolean, rate: number = 0, allowMerge: boolean = false): void {
+        const perPort = allowMerge ? Math.max(1, Math.ceil(rate / SOURCE_RATE - 1e-9)) : 1;
+        const groupSize = Math.max(1, Math.floor(tuning.colorGroupSize / perPort));
         const colourPorts = new Map<ColorChar, { painter: Placement; info: BuildingInfo; slot: number }[]>();
         for (const step of flat.steps) {
             const node = step.node;
@@ -396,42 +433,28 @@ export function createColourSupply(seam: ColourSeam, tuning: PlacementTuning, id
             });
         }
         for (const [color, ports] of colourPorts) {
-            // a belt carries 2 items/s and one port pulls 0.4, so five ports per trunk
-            for (let start = 0; start < ports.length; start += tuning.colorGroupSize) {
-                const chunk = ports.slice(start, start + tuning.colorGroupSize);
+            // a belt carries 2 items/s and one chain 0.4, so a trunk takes five
+            // chains — fewer ports when each port already needs several
+            for (let start = 0; start < ports.length; start += groupSize) {
+                const chunk = ports.slice(start, start + groupSize);
                 const head = chunk[0]!;
                 const anchor = { x: head.painter.x + head.info.w + 3, y: head.painter.y };
                 if (chunk.length < 2 || !allowColourNet) {
-                    // One chain per port: a chain carries exactly one port's 0.4/s
-                    // and one output port takes one belt, so two ports of the same
-                    // colour need two chains — building one and linking only the
-                    // head would leave the second port with no colour at all.
+                    // One chain group per port: a chain carries exactly one port's
+                    // 0.4/s and one output port takes one belt, so two ports of the
+                    // same colour need two groups — building one and linking only
+                    // the head would leave the second port with no colour at all.
                     // Before the L20 splitter the merge cannot fan a trunk back
-                    // out, so this is also the early-level path for k ≥ 2. Only
-                    // the first chain anchors at its port; the next grows at that
-                    // chain's production point, so its miners land in the same
-                    // deposit cluster instead of crowding the factory block.
+                    // out, so this is also the early-level path for k ≥ 2.
                     let production = anchor;
                     for (const port of chunk) {
-                        const chain = buildColorChain(color, production);
-                        if (!chain || !chain.ok) {
-                            seam.missing.add(`颜色:${color}`);
-                            break;
-                        }
-                        if (
-                            !links.layLink(
-                                links.shapeLink(chain.building, chain.info, chain.outSlot, port.painter, port.info, port.slot, {
-                                    color: true,
-                                })
-                            )
-                        ) {
-                            break;
-                        }
-                        production = chain.anchor ?? production;
+                        const next = feedPort(color, port, perPort, production);
+                        if (!next) break;
+                        production = next;
                     }
                     continue;
                 }
-                buildSharedColorNet(color, chunk, anchor);
+                buildSharedColorNet(color, chunk, anchor, perPort);
             }
         }
     }

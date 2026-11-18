@@ -14,6 +14,7 @@
 
 import { BUILDING_NAMES } from "./catalogue.js";
 import {
+    BUILDING_INFO,
     cellKey,
     claimRoute,
     HUB_SIZE,
@@ -36,7 +37,9 @@ import type {
     Tile,
     World,
 } from "./layout.js";
+import { BELT_RATE } from "./rates.js";
 import type { PlacementTuning } from "./placement.js";
+import type { TileClaims } from "./spots.js";
 
 /* ------------------------------------------------------------------ *
  * the hub's faces
@@ -48,7 +51,7 @@ import type { PlacementTuning } from "./placement.js";
  * belts cannot share one entry tile, so a campaign with more inbound belts
  * than that needs a merger.
  */
-function hubApproaches(hub: Tile): Tile[] {
+export function hubApproaches(hub: Tile): Tile[] {
     const out: Tile[] = [];
     for (let i = 0; i < HUB_SIZE; i++) {
         out.push({ x: hub.x + i, y: hub.y - 1 });
@@ -60,7 +63,7 @@ function hubApproaches(hub: Tile): Tile[] {
 }
 
 /** the border tile an outside approach feeds; its centre is where the belt ends */
-function hubBorderOf(hub: Tile, tile: Tile): Tile {
+export function hubBorderOf(hub: Tile, tile: Tile): Tile {
     if (tile.y < hub.y) return { x: tile.x, y: hub.y };
     if (tile.y >= hub.y + HUB_SIZE) return { x: tile.x, y: hub.y + HUB_SIZE - 1 };
     if (tile.x < hub.x) return { x: hub.x, y: tile.y };
@@ -110,6 +113,8 @@ export interface LinkSchedulerArgs {
     hub: Tile;
     tuning: PlacementTuning;
     allowTunnels: boolean;
+    /** classic mode: cap an entry at 5 legs (the old policy) instead of 2 items/s */
+    legacyHub?: boolean;
 }
 
 export interface LinkScheduler {
@@ -139,7 +144,7 @@ export interface LinkScheduler {
     schedule(): void;
 }
 
-export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSchedulerArgs): LinkScheduler {
+export function createLinkScheduler({ world, hub, tuning, allowTunnels, legacyHub = false }: LinkSchedulerArgs): LinkScheduler {
     const allowCross = allowTunnels !== false;
 
     const connections: Connection[] = [];
@@ -212,15 +217,15 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
      *
      * Two belts may point into one tile, so a leg that finds every entry boxed
      * in by the belts of earlier factories can still merge into one that is on
-     * its way there. An entry belt carries 2 items/s and the fattest factory
-     * root pulls 0.4, so a trunk stops taking legs once its entry reached
-     * `tuning.hubEntryLegs` — without that cap every factory could chain onto
-     * the first belt and the sheet would claim a rate the game cannot carry.
+     * its way there. An entry belt carries 2 items/s: a trunk stops taking legs
+     * once the entry's load plus this leg would overfill it, or the sheet would
+     * claim a rate the game cannot carry.
      */
-    function hubTrunkCells(x: number, y: number, limit: number): Tile[] {
+    function hubTrunkCells(x: number, y: number, limit: number, rate: number): Tile[] {
         const out: { tile: Tile; d: number }[] = [];
         for (const [key, entry] of world.hubBound) {
-            if ((world.hubEntryLoad.get(entry) ?? 0) >= tuning.hubEntryLegs) continue;
+            const load = world.hubEntryLoad.get(entry) ?? 0;
+            if (legacyHub ? load >= 5 : load + rate > BELT_RATE + 1e-9) continue;
             // an entry tile is offered by the face loop together with its claim
             if (world.hubApproaches.has(key)) continue;
             const tile = tileOfKey(key);
@@ -342,6 +347,7 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
         };
 
         if (q.toHub) {
+            const legRate = q.extra.rate ?? 1;
             const faces = hubApproaches(hub)
                 .map((t) => ({ ...t, d: Math.abs(t.x - x1) + Math.abs(t.y - y1) }))
                 .sort((a, b) => a.d - b.d || a.y - b.y || a.x - b.x);
@@ -359,7 +365,12 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
             let merges = 0;
             for (const t of faces) {
                 const key = cellKey(t.x, t.y);
-                if (world.hubApproaches.has(key) && world.belts.has(key) && merges++ < 3) {
+                if (
+                    world.hubApproaches.has(key) &&
+                    world.belts.has(key) &&
+                    merges++ < 3 &&
+                    (legacyHub || (world.hubEntryLoad.get(key) ?? 0) + legRate <= BELT_RATE + 1e-9)
+                ) {
                     candidates.push({ tile: t, join: true, entry: true });
                 }
             }
@@ -367,7 +378,7 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
             // this one. Two belts may point into one tile, so the leg can still
             // merge into a belt that already runs to the hub; one entry belt
             // carries 2 items/s, which bounds how many legs it may feed.
-            for (const tile of hubTrunkCells(x1, y1, 6)) candidates.push({ tile, join: true, entry: false });
+            for (const tile of hubTrunkCells(x1, y1, 6, legRate)) candidates.push({ tile, join: true, entry: false });
 
             if (!candidates.length) for (const t of faces) candidates.push({ tile: t, join: false, entry: true });
             let first: LinkPlan | null = null;
@@ -442,6 +453,7 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
         const tail = path.cells[path.cells.length - 1];
         const joined = path.joinsGoal && tail ? world.hubBound.get(cellKey(tail.x, tail.y)) : undefined;
         path.entryKey = plan.hubTile ? cellKey(plan.hubTile.x, plan.hubTile.y) : joined ?? null;
+        path.rate = q.extra.rate;
         // the run was searched on this very world a moment ago: write it as tested
         claimRoute(world, path);
         // every path tile is a belt or a tunnel end; the underground tiles are
@@ -457,6 +469,7 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
             tunnelCells: path.crossings,
             tunnelSpans: path.spans,
             beltTiles,
+            entryKey: path.entryKey,
         };
         laid[index] = { q, run: path, hubTile: plan.hubTile };
         lastPlan.set(index, plan);
@@ -621,4 +634,88 @@ export function createLinkScheduler({ world, hub, tuning, allowTunnels }: LinkSc
         rip,
         schedule,
     };
+}
+
+/* ------------------------------------------------------------------ *
+ * merging several outputs into one belt
+ * ------------------------------------------------------------------ */
+
+/** one product a merge tree may take in */
+export interface MergeSource {
+    building: Placement;
+    info: BuildingInfo;
+    outSlot: number;
+}
+
+export interface MergeResult {
+    root: MergeSource;
+    /** how many of the inputs actually reach the root */
+    merged: number;
+}
+
+/**
+ * Pairwise merge of several same-product outputs into one belt.
+ *
+ * A miner makes 0.4 items/s and a belt carries 2/s, so five miners may share
+ * one belt — but only once the merger part exists (L10). The same shape of tree
+ * feeds a colour port that pulls more than one chain. Both the shape miners and
+ * the colour chains use this helper, so there is one geometry and one routing
+ * probe, not two conventions.
+ *
+ * The merger goes on the nearest free tile between its two operands and the
+ * links are laid like any other; a link that cannot route is reported by the
+ * rip-up pass, not by pretending the vein is missing. `merged` counts the
+ * inputs that reached the root; only a failure to place the merger drops any.
+ */
+export function mergeSources(
+    claims: TileClaims,
+    links: LinkScheduler,
+    sources: readonly MergeSource[],
+    make: (serial: number) => { step: string; stepId: string },
+    out: Placement[]
+): MergeResult {
+    const info = BUILDING_INFO.merger;
+    let level: { src: MergeSource; count: number }[] = sources.map((src) => ({ src, count: 1 }));
+    let serial = 0;
+    while (level.length > 1) {
+        const next: typeof level = [];
+        for (let i = 0; i < level.length; i += 2) {
+            const a = level[i]!;
+            const b = level[i + 1];
+            if (!b) {
+                next.push(a);
+                continue;
+            }
+            const mid = {
+                x: Math.round((a.src.building.x + b.src.building.x) / 2),
+                y: Math.round((a.src.building.y + b.src.building.y) / 2),
+            };
+            const spot = claims.placeNear(info, mid, 0);
+            if (!spot) {
+                // this pair cannot join at all: keep the largest subtree seen
+                const candidates = [...next, a, b, ...level.slice(i + 2)];
+                let best = candidates[0]!;
+                for (const c of candidates) if (c.count > best.count) best = c;
+                return { root: best.src, merged: best.count };
+            }
+            const id = make(++serial);
+            const merger: Placement = {
+                step: id.step,
+                stepId: id.stepId,
+                kind: "merger",
+                zh: BUILDING_NAMES.merger,
+                x: spot.x,
+                y: spot.y,
+                w: 1,
+                h: 1,
+                rot: 0,
+            };
+            out.push(merger);
+            links.layLink(links.shapeLink(a.src.building, a.src.info, a.src.outSlot, merger, info, 0));
+            links.layLink(links.shapeLink(b.src.building, b.src.info, b.src.outSlot, merger, info, 1));
+            next.push({ src: { building: merger, info, outSlot: 0 }, count: a.count + b.count });
+        }
+        level = next;
+    }
+    return { root: level[0]!.src, merged: level[0]!.count };
 }

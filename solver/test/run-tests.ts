@@ -39,9 +39,9 @@ import type { BuildingKind } from "../src/catalogue.js";
 import { schematicSVG } from "../src/schematic.js";
 import type { SchematicLayout } from "../src/schematic.js";
 import { colorChain, colorChains } from "../src/color.js";
-import { chainRate, formatDuration } from "../src/rates.js";
+import { chainRate, factoryRate, formatDuration, minerCount } from "../src/rates.js";
 import { neededShapes, requiredTypes } from "../src/needs.js";
-import { planCampaign } from "../src/campaign.js";
+import { allocateCopies, planCampaign } from "../src/campaign.js";
 import { validateSheet } from "../src/validate.js";
 import { recipeDiagram } from "../src/recipe.js";
 import { initRouterWasm } from "../src/router-engine.js";
@@ -758,8 +758,10 @@ beginSection("solver: atoms cut out of mixed deposits");
 beginSection("campaign: one map, one hub, no overlaps");
 {
     const patches: Patch[] = [
-        { x: 0, y: 0, size: 2, item: { kind: "shape", code: "CuCuCuCu" } },
-        { x: 14, y: 14, size: 2, item: { kind: "shape", code: "RuRuRuRu" } },
+        // a bare-miner outpost fills a belt with five miners, so the fixture
+        // has to be a real vein, not a two-tile speck
+        { x: 0, y: 0, size: 6, item: { kind: "shape", code: "CuCuCuCu" } },
+        { x: 14, y: 14, size: 6, item: { kind: "shape", code: "RuRuRuRu" } },
     ];
     const hub = { x: 40, y: 40 };
     const res = planCampaign({
@@ -790,7 +792,9 @@ beginSection("campaign: one map, one hub, no overlaps");
         }
     }
     check("campaign: buildings never overlap", clashes, 0);
-    check("campaign: one miner per factory", res.sheet.buildings.filter((b) => b.kind === "base").length, 3);
+    // the full set has the merger, so a base step is sized to the machine it
+    // feeds: a bare miner fills a belt (5), a cutter half needs 2
+    check("campaign: miners are sized to the machine", res.sheet.buildings.filter((b) => b.kind === "base").length, 12);
     check("campaign: a belt run into the hub per shape", res.sheet.connections.filter((c) => c.toHub).length, 3);
     check(
         "campaign: belt total is the sum of the legs",
@@ -803,14 +807,16 @@ beginSection("campaign: one map, one hub, no overlaps");
         [true, true, true]
     );
     check(
-        "campaign: a shared colour chain only ever limits, never boosts",
-        res.entries.every((e) => e.status === "ok" && e.supplyFactor > 0 && e.supplyFactor <= 1),
+        "campaign: every factory reports its copies and total rate",
+        res.entries.every((e) => e.status === "ok" && e.totalRate > 0 && e.copies >= 1),
         true
     );
     // an unconnected output port backs up and stalls the machine
     const cans = res.sheet.buildings.filter((b) => b.kind === "trash").length;
     check("campaign: cutter offcuts get a trash can", cans, 1);
     check("campaign: every waste belt lands in one", res.sheet.connections.filter((c) => c.waste).length, cans);
+    check("campaign: the loss ledger counts the cans", res.totals.throughput.trashCans, cans);
+    check("campaign: waste is the trashed port at the factory rate", res.totals.throughput.wasteRate, 0.5);
     const fanout = new Map<string, number>();
     for (const c of res.sheet.connections) {
         if (c.toHub) continue;
@@ -1124,7 +1130,8 @@ beginSection("hub: a leg with every entry boxed in merges into a delivery belt")
         world.hubBound.set(key, cellKey(entry.x, entry.y));
     }
     world.hubApproaches.add(cellKey(entry.x, entry.y));
-    world.hubEntryLoad.set(cellKey(entry.x, entry.y), 1);
+    // the leg already on that belt carries a bare miner's 0.4/s
+    world.hubEntryLoad.set(cellKey(entry.x, entry.y), 0.4);
     // every other entry tile is claimed too, so no free face is left
     for (let i = 0; i < 4; i++) {
         for (const t of [
@@ -1149,12 +1156,17 @@ beginSection("hub: a leg with every entry boxed in merges into a delivery belt")
         tail ? world.hubBound.get(cellKey(tail.x, tail.y)) : -1,
         cellKey(entry.x, entry.y)
     );
-    check("hub merge: two legs now share one entry belt", world.hubEntryLoad.get(cellKey(entry.x, entry.y)), 2);
+    check("hub merge: the entry load is both legs' items/s", world.hubEntryLoad.get(cellKey(entry.x, entry.y)), 0.8);
 }
 
 beginSection("throughput: the game's own rates");
 {
     check("rate: a bare miner makes 0.4/s", chainRate([{ op: "base" }]), 0.4);
+    check("rate: a bare miner fills a belt once miners can merge", factoryRate([{ op: "base" }], true), 2);
+    check("rate: without a merger one miner caps the factory", factoryRate([{ op: "base" }], false), 0.4);
+    check("rate: a cutter chain runs at 0.5/s", factoryRate([{ op: "base" }, { op: "cutHalf" }], true), 0.5);
+    check("miners: half a belt takes two", minerCount(0.5), 2);
+    check("miners: one belt takes five", minerCount(2), 5);
     check("rate: a stacker caps the chain at 0.25/s", chainRate([{ op: "base" }, { op: "stack" }]), 0.25);
     check(
         "rate: a painter chain runs at 2/6 per second",
@@ -1199,6 +1211,40 @@ beginSection("throughput: the game's own rates");
     for (const step of shared.steps) for (const input of step.inputs) parents.set(input.id, (parents.get(input.id) || 0) + 1);
     parents.set(shared.final.id, (parents.get(shared.final.id) || 0) + 1);
     check("tree: no step is referenced twice", Math.max(...parents.values()), 1);
+}
+
+beginSection("copies: demand fills the hub, deposits cap it");
+{
+    const miners = new Map([["shape:CuCuCuCu", 5]]);
+    const open = new Map([["shape:CuCuCuCu", 10_000]]);
+    // the hour target would allow far more than the hub: 32/s is sixteen 2/s factories
+    check(
+        "copies: a day-long shape fills the hub",
+        allocateCopies([{ amount: 1_000_000, rate: 2, miners }], open)[0],
+        16
+    );
+    check(
+        "copies: a deposit of 20 miners caps a five-miner factory at four",
+        allocateCopies(
+            [{ amount: 100_000, rate: 2, miners }],
+            new Map([["shape:CuCuCuCu", 20]])
+        )[0],
+        4
+    );
+    check(
+        "copies: a shape inside the hour target stays at one",
+        allocateCopies([{ amount: 600, rate: 2, miners }], open)[0],
+        1
+    );
+    // one red port at 1/s takes three miners; six fit, so two copies (5) but not three (8)
+    check(
+        "copies: a colour vein caps the copies",
+        allocateCopies(
+            [{ amount: 100_000, rate: 1, miners: new Map([["color:r", 3]]) }],
+            new Map([["color:r", 6]])
+        )[0],
+        2
+    );
 }
 
 beginSection("planner: level 20");
