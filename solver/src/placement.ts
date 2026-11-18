@@ -37,9 +37,10 @@ import {
 import type { BomEntry, BuildingInfo, Connection, LayoutColor, LayoutSource, Placement, PlanTree, Rot, RoutingGap, Tile, World } from "./layout.js";
 import { allocateBlock, createTileClaims, factoryAnchor, placeExtractor } from "./spots.js";
 import type { TileClaims } from "./spots.js";
-import { createLinkScheduler, mergeSources } from "./placement-links.js";
+import { createLinkScheduler } from "./placement-links.js";
 import type { LinkPlan, LinkScheduler, MergeSource, QueuedLink } from "./placement-links.js";
 import { createColourSupply } from "./color-supply.js";
+import { buildOutpost } from "./supply.js";
 import type { ColourSupply } from "./color-supply.js";
 import { factoryRate, minerCount } from "./rates.js";
 import { MINER_RATE } from "./rates.js";
@@ -492,55 +493,33 @@ export function buildLayout({
         // the mineral should be the one nearest the factory that mines it
         const minerFrom = { x: blockX + blockWidth / 2, y: blockY + neededHeight / 2 };
         const need = allowMerge ? minerCount(targetRate) : 1;
-        const sites: Placement[] = [];
-        let from = minerFrom;
-        for (let i = 0; i < need; i++) {
-            const found = placeExtractor(claims, shared, (item) => item.kind === "shape" && item.code === code, from);
-            if (!found) break;
-            session.sources.push({ step, patch: found.patch, distance: found.distance, x: found.x, y: found.y });
-            const miner: Placement = {
-                step: step.id,
-                // a step with several miners needs distinct ids: the repair pass
-                // keys placements by stepId
-                stepId: idPrefix + step.id + (need > 1 ? `#${i + 1}` : ""),
-                kind: "base",
-                zh: BUILDING_NAMES.base,
-                x: found.x,
-                y: found.y,
-                w: 1,
-                h: 1,
-                rot: found.rot,
-                patch: found.patch,
-                distance: found.distance,
-            };
-            session.buildings.push(miner);
-            sites.push(miner);
-            // the next miner belongs on the same vein: that is the cluster the
-            // merge tree stands on, not a second deposit across the map
-            from = { x: found.x, y: found.y };
-        }
-        if (!sites.length) {
+        const outpost = buildOutpost(
+            claims,
+            shared,
+            links,
+            code,
+            need * MINER_RATE,
+            minerFrom,
+            (kind, serial) =>
+                kind === "miner"
+                    ? // a step with several miners needs distinct ids: the repair
+                      // pass keys placements by stepId
+                      { step: step.id, stepId: idPrefix + step.id + (need > 1 ? `#${serial}` : "") }
+                    : { step: `${step.id}:merge#${serial}`, stepId: `${idPrefix}${step.id}:merge#${serial}` },
+            session.buildings
+        );
+        if (!outpost) {
             session.missing.add(`shape:${code}`);
             session.sources.push({ step, missing: `地图上找不到 ${code} 矿脉`, patch: null });
             minerSupply = 0;
             continue;
         }
-        if (sites.length === 1) {
-            session.bind(step.id, sites[0]!);
-            session.wireFanout(step.id, sites[0]!, BUILDING_INFO.base);
-            minerSupply = Math.min(minerSupply, MINER_RATE);
-            continue;
+        for (const miner of outpost.miners) {
+            session.sources.push({ step, patch: miner.patch ?? null, distance: miner.distance, x: miner.x, y: miner.y });
         }
-        const merged = mergeSources(
-            claims,
-            links,
-            sites.map((building): MergeSource => ({ building, info: BUILDING_INFO.base, outSlot: 0 })),
-            (serial) => ({ step: `${step.id}:merge#${serial}`, stepId: `${idPrefix}${step.id}:merge#${serial}` }),
-            session.buildings
-        );
-        session.bind(step.id, merged.root.building);
-        session.wireFanout(step.id, merged.root.building, merged.root.info);
-        minerSupply = Math.min(minerSupply, merged.merged * MINER_RATE);
+        session.bind(step.id, outpost.root.building);
+        session.wireFanout(step.id, outpost.root.building, outpost.root.info);
+        minerSupply = Math.min(minerSupply, outpost.rate);
     }
     // what the miners actually feed; a deposit that ran out caps the factory
     const rate = Math.min(targetRate, Number.isFinite(minerSupply) ? minerSupply : targetRate);
